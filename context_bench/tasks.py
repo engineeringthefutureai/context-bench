@@ -7,4 +7,5 @@ from .types import Task
 
 
 def load_tasks(root: Path) -> dict[str, Task]:
+    """Raise on a missing or unknown field: category outside Category, tier missing or outside 1..6."""
     raise NotImplementedError

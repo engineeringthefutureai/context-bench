@@ -2,11 +2,17 @@
 
   1. copy the repo into a fresh sandbox
   2. build the context with LEVELS[level](task, workspace, **variant options)
-  3. render the fixed prompt; count tokens; if it doesn't fit -> label no_fit and stop
-  4. call the model (L8: run the tool loop)
+  3. render the fixed prompt; count tokens; if tokens + max_output_tokens > context_window
+     -> ctx_fits=false, label no_fit, stop
+  4. call the model (L8: run the tool loop, which applies the same fit check before every turn);
+     log usage to stderr as it goes (tokens in/out,
+     peak context vs window, latency, tool calls) so it's visible during testing
   5. parse <file> blocks, apply them, save the patch
   6. run hidden tests, run the detector
-  7. return a RunResult (helper_in_context, recall, label, cost)
+  7. write the run bundle (context_bench/bundle.py) and return a RunResult
+     (helper_in_context, recall, label, cost)
+
+Grading is a separate, later stage: `cbench grade` (context_bench/grade.py).
 """
 from __future__ import annotations
 
@@ -23,7 +29,8 @@ class Experiment:
         raise NotImplementedError
 
     def configs(self):
-        """Expand [[config]] entries x models x repo sizes x seeds x tasks into RunConfigs."""
+        """Expand [[config]] entries x models x repo sizes x seeds x tasks into RunConfigs.
+        A config's optional `categories` and `tiers` keep only matching tasks (e.g. L0: tier 1)."""
         raise NotImplementedError
 
     def sweep(self) -> None:

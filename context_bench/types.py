@@ -21,6 +21,7 @@ class Task:
     target_file: str                   # repo-relative path the change centers on
     needed_helpers: tuple[str, ...]    # qualnames, e.g. "shopkit.money.format_money"
     hidden_tests: Path                 # directory outside the repo; never shown to the model
+    tier: int                          # difficulty ladder 1..6 (see CLAUDE.md); orthogonal to category
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class RunConfig:
     query_mode: str = "none"         # none | task_vs_code | task_vs_summary | draft_then_search  (L5)
     agent_variant: str = "none"      # none | grep | hybrid  (L8)
     prompt_arm: str = "base"         # base | reuse_hint
-    temperature: float = 0.2
+    temperature: float | None = None  # None = server default (not sent)
 
     @property
     def run_id(self) -> str:
@@ -70,6 +71,7 @@ class RunResult:
     run_id: str
     task_id: str
     category: str
+    tier: int
     level: str
     retriever: str
     query_mode: str
@@ -79,7 +81,8 @@ class RunResult:
     quant: str
     embedder: str
     seed: int
-    temperature: float
+    temperature: float | None    # what we asked for; None = server default
+    sampling: dict               # what the server actually used (llm.server_sampling())
     repo_size: str
     ctx_fits: bool               # false -> label "no_fit"; never truncate silently
     helper_in_context: bool      # the causal split: was the needed helper's definition visible?
@@ -89,8 +92,10 @@ class RunResult:
     tests_passed: int
     tests_total: int
     equiv_score: float | None
-    tokens_in: int
+    tokens_in: int               # summed over every model call in the run (L8: all turns; L5 draft included)
     tokens_out: int
+    peak_ctx_tokens: int         # largest single prompt sent; vs context_window = how full the window got
+    context_window: int
     latency_s: float
     tool_calls: int
     patch_path: str | None

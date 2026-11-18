@@ -56,11 +56,15 @@ class AgentResult:
     tool_errors: int
     tokens_in: int
     tokens_out: int
+    peak_ctx_tokens: int      # largest prompt over all turns (context grows with tool output)
+    no_fit: bool              # a turn would have exceeded the context window
     latency_s: float
 
 
 def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: str,
-              temperature: float, seed: int, max_tokens: int) -> AgentResult:
+              temperature: float | None, seed: int, max_tokens: int,
+              context_window: int) -> AgentResult:
     """Tool loop: call the model, execute tool calls, feed results back, stop on a final answer
-    or when the budget is spent."""
+    or when the budget is spent. Before every turn, check prompt tokens + max_tokens against the
+    context window; if it no longer fits, stop and report no_fit (never let the server truncate)."""
     raise NotImplementedError

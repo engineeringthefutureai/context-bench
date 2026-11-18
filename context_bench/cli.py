@@ -1,4 +1,4 @@
-"""cbench one | run | index | validate-retrieval | report"""
+"""cbench one | run | index | validate-retrieval | grade | report"""
 from __future__ import annotations
 
 import argparse
@@ -30,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
     val = sub.add_parser("validate-retrieval", help="recall@k of planted helpers per retriever")
     val.add_argument("--retrievers", default="bm25")
     val.add_argument("--repo-size", default="S")
+
+    gr = sub.add_parser("grade", help="blind judge compares all patches per task")
+    gr.add_argument("--task", action="append", help="limit to these tasks (repeatable)")
+    gr.add_argument("--dry-run", action="store_true", help="write judge dirs, don't call the judge")
 
     sub.add_parser("report", help="label counts per configuration")
     return ap

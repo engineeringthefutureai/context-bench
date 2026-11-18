@@ -42,10 +42,10 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 
 | Level | Module | Context |
 |---|---|---|
-| L0 | `l0_no_context` | Task text only. **Control tasks only** (baseline for hallucinated references). |
+| L0 | `l0_no_context` | Task text only. **Tier-1 control tasks only** (baseline for hallucinated references). |
 | L1 | `l1_one_file` | Target file |
 | L2 | `l2_manual_files` | Target + its direct imports + its test file (deterministic "what a dev would add") |
-| L3 | `l3_whole_project` | Every source file, sorted, with paths. Run at repo sizes S/M/L |
+| L3 | `l3_whole_project` | Every source file, sorted, with paths |
 | L4 | `l4_file_rag` | Target + top-3 files by retrieval (`retriever`) |
 | L5 | `l5_function_rag` | Target + top-8 functions with path, import header, signature, docstring, body (`retriever`, `query_mode`) |
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class |
@@ -57,7 +57,10 @@ L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per
 
 Ablation: `prompt_arm = reuse_hint` on L1 and L5.
 
-Optional model axis: an older and a current model of the same family and size, same quantization, on
+**Current scope: one model (Qwen 3.8 27B), one shot per config (seed 1), server-default temperature.** Crude on purpose;
+more seeds, a second size and the model axis come later.
+
+Optional model axis (later): an older and a current model of the same family and size, same quantization, on
 L1/L2/L3/L5/L8, to separate the effect of the model from the effect of context building.
 
 ## Labels and detector
@@ -65,6 +68,15 @@ L1/L2/L3/L5/L8, to separate the effect of the model from the effect of context b
 Precedence and layers are documented in `context_bench/evaluate/detector.py`. Equivalence = new function
 vs helper on fuzzed inputs (`context_bench/evaluate/fuzz.py`, one strategy per helper in
 `helpers/registry.toml`), ≥ 0.95 agreement → `duplicated`.
+
+## Grading (blind, comparison-based)
+Tests and the detector give the labels; grading adds a judged view of code quality and never changes
+them. Every run saves its patch and logs in `results/runs/<run_id>/` (`context_bench/bundle.py`).
+`cbench grade` (`context_bench/grade.py`) shows one Claude Code judge, per task, all candidate patches
+side by side, numbered, with the original repo and `grading/rubric.md`, in a directory outside this
+project. The judge never learns how any candidate was produced (level, model, prompt, context, tools);
+`[grading].judge_command` confines it to read-only tools inside that directory, with no settings or
+CLAUDE.md loaded.
 
 ## Retrieval
 Everything goes through the `Retriever` protocol (`context_bench/retrieval/base.py`). Reference
@@ -76,9 +88,17 @@ is swappable and recorded per run.
 - `fixtures/repo_S/` — seed test repo (`shopkit`) with planted helpers. Target: ~60 files, 25 helpers
   (half with names matching task wording, half not; ⅓ in `utils/`, the rest in domain modules; none in
   the target file of the task that needs it; for L2, half the reuse tasks import the helper's module
-  directly and half don't). Larger M/L repos add realistic filler and leave helpers untouched.
+  directly and half don't). It's the only repo for now; small is fine.
 - `tasks/<id>/task.toml` + `hidden_tests/`. Target: 40 tasks — 20 reuse, 8 cross-file, 6 convention,
   6 control. `reuse-001` is the worked example.
+- Every task also has a `tier` (difficulty ladder, orthogonal to category):
+  1 spec-only new function (control) · 2 local edit, all info in the target file (control) ·
+  3 reuse, one helper, name matches task wording · 4 reuse, opaque naming / several helpers ·
+  5 convention defined in other files · 6 cross-file feature needing coordinated edits.
+  Seed ladder: `control-001`, `control-002`, `reuse-002`, `reuse-001`, `convention-001`, `cross-001`.
+- Every task is verified before commit: the unmodified fixture fails the hidden tests and a reference
+  solution passes (`tasks/<id>/solutions/reference.diff`). Tasks that depend on repo context (tier 3+)
+  also keep a plausible context-blind solution that fails (`context_blind.diff`).
 - `helpers/registry.toml` — every planted helper with its fuzz strategy and naming style.
 
 ## Commands (once implemented)
@@ -89,4 +109,5 @@ cbench one --task reuse-001 --level L1
 cbench run
 cbench report
 ```
-Endpoints and model names are placeholders in `config/experiment.toml`.
+Model under test: Qwen 3.8 27B, `Qwen3.8-27B-UD-Q6_K_XL.gguf`, 96k context (`config/experiment.toml`);
+the endpoint is a local placeholder.
