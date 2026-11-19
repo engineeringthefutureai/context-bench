@@ -73,7 +73,7 @@ class Experiment:
             ctx = LEVELS[rc.level](task, load_workspace(sandbox), **_level_options(rc))
             messages = render(task, ctx, rc.prompt_arm)
             prompt_tokens = client.count_prompt_tokens(messages)
-            base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, ctx=ctx,
+            base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
                         sampling=self._sampling[rc.model])
 
             if prompt_tokens + max_out > window:
@@ -162,7 +162,7 @@ def _recall(task: Task, ctx: ContextBlock) -> float | None:
     return sum(hit(q) for q in task.needed_helpers) / len(task.needed_helpers)
 
 
-def _result(*, rc, task, model_cfg, window, ctx, sampling, label, ctx_fits, tests, tokens, latency,
+def _result(*, rc, task, model_cfg, window, max_out, ctx, sampling, label, ctx_fits, tests, tokens, latency,
             patch_path, error) -> RunResult:
     passed, total, reuse = tests
     tokens_in, tokens_out, peak = tokens
@@ -174,7 +174,7 @@ def _result(*, rc, task, model_cfg, window, ctx, sampling, label, ctx_fits, test
         repo_size=rc.repo_size, ctx_fits=ctx_fits, helper_in_context=_helper_visible(task, ctx),
         retrieval_recall=_recall(task, ctx), label=label, reuse_passed=reuse, tests_passed=passed,
         tests_total=total, tokens_in=tokens_in, tokens_out=tokens_out, peak_ctx_tokens=peak,
-        context_window=window, latency_s=round(latency, 2), tool_calls=0, patch_path=patch_path,
+        context_window=window, max_output_tokens=max_out, latency_s=round(latency, 2), tool_calls=0, patch_path=patch_path,
         error=error)
 
 

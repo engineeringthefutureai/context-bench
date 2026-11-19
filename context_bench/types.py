@@ -95,6 +95,7 @@ class RunResult:
     tokens_out: int
     peak_ctx_tokens: int         # largest single prompt sent; vs context_window = how full the window got
     context_window: int
+    max_output_tokens: int       # output cap per call (thinking included)
     latency_s: float
     tool_calls: int
     patch_path: str | None

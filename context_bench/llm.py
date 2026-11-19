@@ -40,7 +40,7 @@ def api_key_from_env(env_file: Path = PROJECT_ROOT / ".env") -> str | None:
 
 
 class OpenAICompatClient:
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 600.0,
+    def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 1800.0,
                  transport: httpx.BaseTransport | None = None):
         self.model = model
         key = api_key or api_key_from_env()
