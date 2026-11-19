@@ -10,4 +10,4 @@ from ..workspace import Workspace
 
 
 def build_context(task: Task, ws: Workspace) -> ContextBlock:
-    raise NotImplementedError
+    return ContextBlock(text="")
