@@ -26,5 +26,12 @@ Target file: {target_file}"""
 
 
 def render(task: Task, context: ContextBlock, prompt_arm: str = "base") -> list[dict]:
-    """Return [system, user] chat messages. Empty context renders as "(none)"."""
-    raise NotImplementedError
+    """Return [system, user] chat messages. Empty context renders as "(none)".
+
+    The reuse_hint arm appends REUSE_HINT to the system prompt; nothing else differs between arms."""
+    if prompt_arm not in ("base", "reuse_hint"):
+        raise ValueError(f"unknown prompt_arm {prompt_arm!r}")
+    system = SYSTEM_PROMPT + ("\n" + REUSE_HINT if prompt_arm == "reuse_hint" else "")
+    user = USER_TEMPLATE.format(context=context.text.strip() or "(none)", task=task.prompt.strip(),
+                                target_file=task.target_file)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
