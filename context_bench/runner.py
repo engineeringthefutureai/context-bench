@@ -16,17 +16,104 @@ Grading is a separate, later stage: `cbench grade` (context_bench/grade.py).
 """
 from __future__ import annotations
 
+import re
+import sys
+import tempfile
+import tomllib
+from dataclasses import asdict
 from pathlib import Path
 
-from .types import RunConfig, RunResult
+from . import bundle
+from .apply import UnsafePath, apply_files, make_sandbox, parse_files, unified_patch
+from .evaluate.hidden_tests import run_hidden_tests
+from .levels import LEVELS
+from .llm import OpenAICompatClient
+from .prompt import render
+from .tasks import load_tasks
+from .types import ContextBlock, RunConfig, RunResult, Task
+from .workspace import load_workspace
 
 
 class Experiment:
-    def __init__(self, config_path: Path):
-        raise NotImplementedError
+    def __init__(self, config_path: Path, client_factory=None):
+        """Paths in the config are relative to the project root (the config file's grandparent).
+        client_factory(model_cfg) -> client; defaults to OpenAICompatClient (tests pass a fake)."""
+        self.config = tomllib.loads(config_path.read_text())
+        self.root = config_path.resolve().parent.parent
+        paths = self.config["paths"]
+        self.tasks = load_tasks(self._path(paths["tasks"]))
+        self.results_path = self._path(paths["results"])
+        self.runs_dir = self._path(paths["runs"])
+        self.shared_dir = self._path(paths["tasks"]) / "_shared"
+        self.default_model = self.config["sweep"]["models"][0]
+        self._client_factory = client_factory or (
+            lambda m: OpenAICompatClient(m["base_url"], m["model"]))
+        self._clients: dict[str, object] = {}
+        self._sampling: dict[str, dict] = {}
+
+    def _path(self, p: str) -> Path:
+        return Path(p) if Path(p).is_absolute() else self.root / p
+
+    def _client(self, model_key: str):
+        if model_key not in self._clients:
+            self._clients[model_key] = self._client_factory(self.config["models"][model_key])
+            self._sampling[model_key] = self._clients[model_key].server_sampling()
+        return self._clients[model_key]
 
     def run_one(self, rc: RunConfig) -> RunResult:
-        raise NotImplementedError
+        task = self.tasks[rc.task_id]
+        model_cfg = self.config["models"][rc.model]
+        gen = self.config["generation"]
+        max_out, window = gen["max_output_tokens"], model_cfg["context_window"]
+        client = self._client(rc.model)
+        run_dir = self.runs_dir / rc.run_id
+
+        with tempfile.TemporaryDirectory(prefix="cbench-") as tmp:
+            sandbox = make_sandbox(self._path(self.config["repos"][rc.repo_size]), Path(tmp) / "repo")
+            ctx = LEVELS[rc.level](task, load_workspace(sandbox), **_level_options(rc))
+            messages = render(task, ctx, rc.prompt_arm)
+            prompt_tokens = client.count_prompt_tokens(messages)
+            base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, ctx=ctx,
+                        sampling=self._sampling[rc.model])
+
+            if prompt_tokens + max_out > window:
+                result = _result(**base, label="no_fit", ctx_fits=False, tests=(0, 0, None),
+                                 tokens=(prompt_tokens, 0, prompt_tokens), latency=0.0, patch_path=None,
+                                 error=f"prompt {prompt_tokens} + max_output {max_out} > window {window}")
+                bundle.write_bundle(run_dir, patch=None, messages=messages, response="", reasoning=None,
+                                    transcript=None, tests_output="", result=asdict(result))
+                _log(result)
+                return result
+
+            if rc.level == "L8":
+                raise NotImplementedError("L8 tool loop is not implemented yet")
+            chat = client.chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out)
+
+            files, error = parse_files(chat.content), None
+            if chat.finish_reason == "length":
+                error = f"output hit max_output_tokens ({max_out})"
+            elif not files:
+                error = "no <file> blocks in the response"
+            patch = None
+            try:
+                before = apply_files(sandbox, files)
+                patch = unified_patch(before, files) or None
+            except UnsafePath as e:
+                error = f"unsafe path: {e}"
+            passed, total, reuse, tests_out = run_hidden_tests(sandbox, task.hidden_tests, self.shared_dir)
+
+        label = "ok" if total > 0 and passed == total else "broken"
+        result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
+                         tokens=(chat.tokens_in + ctx.extra_tokens_in, chat.tokens_out + ctx.extra_tokens_out,
+                                 max(prompt_tokens, chat.tokens_in)),
+                         latency=chat.latency_s,
+                         patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
+                         error=error)
+        bundle.write_bundle(run_dir, patch=patch, messages=messages, response=chat.content,
+                            reasoning=chat.reasoning, transcript=None, tests_output=tests_out,
+                            result=asdict(result))
+        _log(result)
+        return result
 
     def configs(self):
         """Expand [[config]] entries x models x repo sizes x seeds x tasks into RunConfigs.
@@ -44,3 +131,57 @@ class Experiment:
     def validate_retrieval(self, retrievers: list[str], repo_size: str = "S") -> str:
         """recall@1/3/8 of planted helpers per retriever, function and file level."""
         raise NotImplementedError
+
+
+def _level_options(rc: RunConfig) -> dict:
+    """Only the variant options each level's build_context accepts."""
+    if rc.level == "L4":
+        return {"retriever": rc.retriever}
+    if rc.level == "L5":
+        return {"retriever": rc.retriever, "query_mode": rc.query_mode}
+    if rc.level == "L8":
+        return {"agent_variant": rc.agent_variant}
+    return {}
+
+
+def _helper_visible(task: Task, ctx: ContextBlock) -> bool | None:
+    """Every needed helper's definition (def/class line) appears in the context text."""
+    if not task.needed_helpers:
+        return None
+    return all(re.search(rf"^\s*(?:async\s+)?(?:def|class)\s+{re.escape(q.rsplit('.', 1)[1])}\b",
+                         ctx.text, re.M) for q in task.needed_helpers)
+
+
+def _recall(task: Task, ctx: ContextBlock) -> float | None:
+    """Share of needed helpers whose qualname or module file is among the retrieved items."""
+    if not ctx.retrieved or not task.needed_helpers:
+        return None
+    def hit(q: str) -> bool:
+        module_file = q.rsplit(".", 1)[0].replace(".", "/") + ".py"
+        return q in ctx.retrieved or module_file in ctx.retrieved
+    return sum(hit(q) for q in task.needed_helpers) / len(task.needed_helpers)
+
+
+def _result(*, rc, task, model_cfg, window, ctx, sampling, label, ctx_fits, tests, tokens, latency,
+            patch_path, error) -> RunResult:
+    passed, total, reuse = tests
+    tokens_in, tokens_out, peak = tokens
+    return RunResult(
+        run_id=rc.run_id, task_id=task.id, category=task.category, tier=task.tier, level=rc.level,
+        retriever=rc.retriever, query_mode=rc.query_mode, agent_variant=rc.agent_variant,
+        prompt_arm=rc.prompt_arm, model=model_cfg["model"], quant=model_cfg.get("quant", ""),
+        embedder="none", seed=rc.seed, temperature=rc.temperature, sampling=sampling,
+        repo_size=rc.repo_size, ctx_fits=ctx_fits, helper_in_context=_helper_visible(task, ctx),
+        retrieval_recall=_recall(task, ctx), label=label, reuse_passed=reuse, tests_passed=passed,
+        tests_total=total, tokens_in=tokens_in, tokens_out=tokens_out, peak_ctx_tokens=peak,
+        context_window=window, latency_s=round(latency, 2), tool_calls=0, patch_path=patch_path,
+        error=error)
+
+
+def _log(r: RunResult) -> None:
+    pct = 100 * r.peak_ctx_tokens / r.context_window
+    reuse = "" if r.reuse_passed is None else f" reuse={'yes' if r.reuse_passed else 'no'}"
+    print(f"[{r.task_id} {r.level} {r.prompt_arm}] in={r.tokens_in} out={r.tokens_out} "
+          f"peak={r.peak_ctx_tokens}/{r.context_window} ({pct:.1f}%) {r.latency_s}s tools={r.tool_calls} "
+          f"-> {r.label} tests {r.tests_passed}/{r.tests_total}{reuse}"
+          + (f" ({r.error})" if r.error else ""), file=sys.stderr)

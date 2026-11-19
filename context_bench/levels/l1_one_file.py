@@ -10,4 +10,7 @@ from ..workspace import Workspace
 
 
 def build_context(task: Task, ws: Workspace) -> ContextBlock:
-    raise NotImplementedError
+    path = task.target_file
+    if path not in ws.files:
+        return ContextBlock(text=f"File: {path}\n(This file does not exist yet.)", included=[path])
+    return ContextBlock(text=f"File: {path}\n```python\n{ws.files[path].rstrip()}\n```", included=[path])

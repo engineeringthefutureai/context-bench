@@ -85,7 +85,7 @@ class RunResult:
     sampling: dict               # what the server actually used (llm.server_sampling())
     repo_size: str
     ctx_fits: bool               # false -> label "no_fit"; never truncate silently
-    helper_in_context: bool      # the causal split: was the needed helper's definition visible?
+    helper_in_context: bool | None  # was every needed helper's definition visible? None: task needs none
     retrieval_recall: float | None
     label: str
     reuse_passed: bool | None    # reuse tasks: did test_reuse.py pass? None for other tasks

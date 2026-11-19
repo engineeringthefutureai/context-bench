@@ -1,17 +1,23 @@
 """Append-only results.jsonl with resume by run_id."""
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 from .types import RunResult
 
 
 def done_run_ids(path: Path) -> set[str]:
-    raise NotImplementedError
+    if not path.exists():
+        return set()
+    return {json.loads(line)["run_id"] for line in path.read_text().splitlines() if line.strip()}
 
 
 def append(path: Path, result: RunResult) -> None:
-    raise NotImplementedError
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(asdict(result)) + "\n")
 
 
 def report(path: Path) -> str:

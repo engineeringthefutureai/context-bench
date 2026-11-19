@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+from dataclasses import asdict
+from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +44,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    from . import results
+    from .runner import Experiment
+    from .types import RunConfig
+
+    if args.cmd == "one":
+        exp = Experiment(Path(args.config))
+        rc = RunConfig(task_id=args.task, level=args.level, model=args.model or exp.default_model,
+                       seed=args.seed, repo_size=args.repo_size, retriever=args.retriever,
+                       query_mode=args.query_mode, agent_variant=args.agent_variant,
+                       prompt_arm=args.prompt_arm)
+        result = exp.run_one(rc)
+        results.append(exp.results_path, result)
+        print(json.dumps(asdict(result), indent=2))
+        return
     raise NotImplementedError(f"command '{args.cmd}' not implemented yet")
 
 

@@ -19,9 +19,16 @@ from ..workspace import Workspace
 
 MAX_TOOL_CALLS = 15
 
+# Mechanics only (what the model has), never strategy (how to search). Goes inside <context>, after
+# the target file, so the system prompt stays identical across levels.
+TOOLS_NOTE = """You can explore the repository with these tools: {tools}.
+You may make at most {max_calls} tool calls. When you are done, reply with the <file> blocks as
+described; that reply ends the task."""
 
-def build_context(task: Task, ws: Workspace) -> ContextBlock:
-    """Initial context only (the target file); the rest arrives through tools."""
+
+def build_context(task: Task, ws: Workspace, agent_variant: str = "grep") -> ContextBlock:
+    """Initial context only: the target file, then TOOLS_NOTE listing the variant's tools.
+    The rest arrives through tools."""
     raise NotImplementedError
 
 
