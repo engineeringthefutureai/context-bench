@@ -28,7 +28,7 @@ produced. Output: an overall ranking and 1-5 scores per dimension. A hand-graded
 ## Charts
 1. Outcome by level, stacked by label
 2. Outcome vs input tokens (cost frontier)
-3. Context usage per level (peak prompt tokens vs the 96k window)
+3. Context usage per level (peak prompt tokens vs the context window)
 4. Outcome when the helper was visible vs not visible
 5. (model axis) outcome by level, one line per model
 6. Pass rate by tier × level (where each context strategy stops coping as tasks need more of the repo)

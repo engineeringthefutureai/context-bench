@@ -1,4 +1,7 @@
-"""Minimal OpenAI-compatible chat client. Plain HTTP, no frameworks."""
+"""Minimal OpenAI-compatible chat client. Plain HTTP, no frameworks.
+
+API key: CBENCH_API_KEY from the environment, else from the project's .env file (gitignored;
+see .env.example). Sent as "Authorization: Bearer <key>"; never logged or written to results."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

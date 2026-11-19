@@ -111,5 +111,5 @@ cbench one --task reuse-001 --level L1
 cbench run
 cbench report
 ```
-Model under test: Qwen 3.8 27B, `Qwen3.8-27B-UD-Q6_K_XL.gguf`, 96k context (`config/experiment.toml`);
+Model under test: Qwen 3.8 27B, `Qwen3.8-27B-UD-Q6_K_XL.gguf` (KV cache q8_0), 128k context (`config/experiment.toml`);
 the endpoint is a local placeholder.
