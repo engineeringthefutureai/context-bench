@@ -108,7 +108,7 @@ is swappable and recorded per run.
 pip install -e '.[dev]' && pytest
 cbench validate-retrieval --retrievers bm25,embed
 cbench one --task reuse-001 --level L1
-cbench run
+cbench run                       # resumable; --level L1 --level L3 to limit, --dry-run to list what is left
 cbench report
 ```
 Model under test: Qwen 3.8 27B, `Qwen3.8-27B-UD-Q6_K_XL.gguf` (KV cache q8_0), 128k context (`config/experiment.toml`);

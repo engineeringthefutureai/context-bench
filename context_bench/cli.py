@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--agent-variant", default="none")
     one.add_argument("--prompt-arm", default="base")
 
-    sub.add_parser("run", help="full sweep from config (resumable)")
+    run = sub.add_parser("run", help="full sweep from config (resumable)")
+    run.add_argument("--level", action="append", help="only these levels (repeatable)")
+    run.add_argument("--dry-run", action="store_true", help="list the runs still to do, don't run them")
 
     idx = sub.add_parser("index", help="build caches, e.g. function summaries")
     idx.add_argument("--summaries", action="store_true")
@@ -57,6 +59,13 @@ def main(argv: list[str] | None = None) -> None:
         result = exp.run_one(rc)
         results.append(exp.results_path, result)
         print(json.dumps(asdict(result), indent=2))
+        return
+    if args.cmd == "run":
+        Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run)
+        return
+    if args.cmd == "report":
+        exp = Experiment(Path(args.config))
+        print(results.report(exp.results_path), end="")
         return
     raise NotImplementedError(f"command '{args.cmd}' not implemented yet")
 

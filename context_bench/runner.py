@@ -23,12 +23,15 @@ import tomllib
 from dataclasses import asdict
 from pathlib import Path
 
-from . import bundle
+import httpx
+
+from . import bundle, results
 from .apply import UnsafePath, apply_files, make_sandbox, parse_files, unified_patch
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
 from .llm import OpenAICompatClient
 from .prompt import render
+from .results import config_label
 from .tasks import load_tasks
 from .types import ContextBlock, RunConfig, RunResult, Task
 from .workspace import load_workspace
@@ -115,14 +118,57 @@ class Experiment:
         _log(result)
         return result
 
-    def configs(self):
+    def configs(self, levels: list[str] | None = None) -> list[RunConfig]:
         """Expand [[config]] entries x models x repo sizes x seeds x tasks into RunConfigs.
-        A config's optional `categories` and `tiers` keep only matching tasks (e.g. L0: tier 1)."""
-        raise NotImplementedError
+        A config's optional `categories` and `tiers` keep only matching tasks (e.g. L0: tier 1).
+        `levels` keeps only those levels (cbench run --level)."""
+        sweep = self.config["sweep"]
+        out = []
+        for c in self.config.get("config", []):
+            if levels and c["level"] not in levels:
+                continue
+            tasks = [t for t in sorted(self.tasks.values(), key=lambda t: (t.tier, t.id))
+                     if ("categories" not in c or t.category in c["categories"])
+                     and ("tiers" not in c or t.tier in c["tiers"])]
+            for model in c.get("models", sweep["models"]):
+                for size in c.get("repo_sizes", sweep["default_repo_sizes"]):
+                    for seed in sweep["seeds"]:
+                        out += [RunConfig(task_id=t.id, level=c["level"], model=model, seed=seed,
+                                          repo_size=size, retriever=c.get("retriever", "none"),
+                                          query_mode=c.get("query_mode", "none"),
+                                          agent_variant=c.get("agent_variant", "none"),
+                                          prompt_arm=c.get("prompt_arm", "base"),
+                                          temperature=self.config["generation"].get("temperature"))
+                                for t in tasks]
+        return out
 
-    def sweep(self) -> None:
-        """Run every config not already in results.jsonl; failures aren't written, so they retry."""
-        raise NotImplementedError
+    def sweep(self, levels: list[str] | None = None, dry_run: bool = False) -> None:
+        """Run every config not already in results.jsonl; failures aren't written, so they retry.
+        A level that isn't implemented yet is skipped (reported once); a server error (timeout,
+        connection, HTTP status) skips that run, so the next `cbench run` retries it."""
+        done = results.done_run_ids(self.results_path)
+        todo = [rc for rc in self.configs(levels) if rc.run_id not in done]
+        print(f"{len(todo)} runs to do ({len(done)} already in {self.results_path.name})", file=sys.stderr)
+        if dry_run:
+            for rc in todo:
+                print(f"  {rc.task_id} {config_label(asdict(rc))}", file=sys.stderr)
+            return
+        unimplemented: set[str] = set()
+        for i, rc in enumerate(todo, 1):
+            if rc.level in unimplemented:
+                continue
+            print(f"({i}/{len(todo)})", end=" ", file=sys.stderr)
+            try:
+                result = self.run_one(rc)
+            except NotImplementedError as e:
+                unimplemented.add(rc.level)
+                print(f"skipping {rc.level}: not implemented ({e})", file=sys.stderr)
+                continue
+            except httpx.HTTPError as e:
+                print(f"[{rc.task_id} {config_label(asdict(rc))}] server error, will retry next run: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
+                continue
+            results.append(self.results_path, result)
 
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""
