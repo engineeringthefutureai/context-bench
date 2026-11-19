@@ -1,4 +1,4 @@
-"""Source -> Chunks (functions/classes, methods included) via tree-sitter."""
+"""Source -> Chunks (functions/classes, methods included) via the stdlib ast module."""
 from __future__ import annotations
 
 from pathlib import Path
