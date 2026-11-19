@@ -1,7 +1,9 @@
 """Core records shared by every module. RunResult is the results.jsonl schema."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -60,7 +62,8 @@ class RunConfig:
     @property
     def run_id(self) -> str:
         """Stable hash of all fields; used to resume sweeps."""
-        raise NotImplementedError
+        blob = json.dumps(asdict(self), sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 @dataclass

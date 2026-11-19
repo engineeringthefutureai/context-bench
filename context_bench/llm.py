@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 @dataclass
 class ChatResult:
     content: str
+    reasoning: str = ""            # reasoning_content, if the server separates thinking
     tool_calls: list[dict] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
