@@ -8,9 +8,9 @@
      log usage to stderr as it goes (tokens in/out,
      peak context vs window, latency, tool calls) so it's visible during testing
   5. parse <file> blocks, apply them, save the patch
-  6. run hidden tests, run the detector
+  6. run hidden tests: correctness tests -> label (ok / broken); test_reuse.py -> reuse_passed
   7. write the run bundle (context_bench/bundle.py) and return a RunResult
-     (helper_in_context, recall, label, cost)
+     (helper_in_context, recall, label, reuse_passed, cost)
 
 Grading is a separate, later stage: `cbench grade` (context_bench/grade.py).
 """

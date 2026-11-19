@@ -6,7 +6,7 @@ Variants:
 
 Budget: at most 15 tool calls; then the model must return its <file> blocks.
 Malformed tool calls are counted; if the run ends with tool errors and no file blocks, the label
-is "tool_error" (never counted as duplication).
+is "tool_error".
 helper_in_context for L8 = the helper's definition appeared in any tool output.
 """
 from __future__ import annotations

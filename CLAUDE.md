@@ -6,8 +6,7 @@ A small, controlled experiment harness: the same coding tasks, the same model, a
 of building the model's context (the levels below). For each run it records:
 
 - **Correctness:** do the task's hidden tests pass?
-- **Reuse:** did the model call the existing project helper the task needs, or write its own version?
-- **Hallucination:** did it reference project code that doesn't exist?
+- **Reuse:** did the new code actually call the existing project helper the task needs? (a hidden reuse test)
 - **Visibility:** was the needed helper's definition actually in what the model saw (`helper_in_context`)?
 - **Cost:** input/output tokens, latency, tool calls.
 
@@ -42,7 +41,7 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 
 | Level | Module | Context |
 |---|---|---|
-| L0 | `l0_no_context` | Task text only. **Tier-1 control tasks only** (baseline for hallucinated references). |
+| L0 | `l0_no_context` | Task text only. **Tier-1 control tasks only** (baseline: what the model does with no repo at all). |
 | L1 | `l1_one_file` | Target file |
 | L2 | `l2_manual_files` | Target + its direct imports + its test file (deterministic "what a dev would add") |
 | L3 | `l3_whole_project` | Every source file, sorted, with paths |
@@ -63,14 +62,16 @@ more seeds, a second size and the model axis come later.
 Optional model axis (later): an older and a current model of the same family and size, same quantization, on
 L1/L2/L3/L5/L8, to separate the effect of the model from the effect of context building.
 
-## Labels and detector
-`reused` · `duplicated` · `inlined_dup` · `hallucinated` · `broken` · `tool_error` · `no_fit` · `ok`.
-Precedence and layers are documented in `context_bench/evaluate/detector.py`. Equivalence = new function
-vs helper on fuzzed inputs (`context_bench/evaluate/fuzz.py`, one strategy per helper in
-`helpers/registry.toml`), ≥ 0.95 agreement → `duplicated`.
+## Labels and reuse
+Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `ok`.
+Reuse is a separate field, `reuse_passed` (reuse tasks only): each reuse task has
+`hidden_tests/test_reuse.py`, which spies on the needed helper (`tasks/_shared/reuse_spy.py`) and checks
+the new code really calls it. It is reported apart from the correctness tests, so "correct but
+re-implemented" stays visible. Kept simple on purpose: no duplication detector for now; a
+"plagiarism scanner" for copied/re-implemented helpers may come later.
 
 ## Grading (blind, comparison-based)
-Tests and the detector give the labels; grading adds a judged view of code quality and never changes
+Tests give the labels and reuse; grading adds a judged view of code quality and never changes
 them. Every run saves its patch and logs in `results/runs/<run_id>/` (`context_bench/bundle.py`).
 `cbench grade` (`context_bench/grade.py`) shows one Claude Code judge, per task, all candidate patches
 side by side, numbered, with the original repo and `grading/rubric.md`, in a directory outside this
@@ -98,8 +99,9 @@ is swappable and recorded per run.
   Seed ladder: `control-001`, `control-002`, `reuse-002`, `reuse-001`, `convention-001`, `cross-001`.
 - Every task is verified before commit: the unmodified fixture fails the hidden tests and a reference
   solution passes (`tasks/<id>/solutions/reference.diff`). Tasks that depend on repo context (tier 3+)
-  also keep a plausible context-blind solution that fails (`context_blind.diff`).
-- `helpers/registry.toml` — every planted helper with its fuzz strategy and naming style.
+  also keep a plausible context-blind solution that fails (`context_blind.diff`). Reuse tasks: the
+  reference passes `test_reuse.py`, the context-blind solution fails it.
+- `helpers/registry.toml` — every planted helper and its naming style (for analysis and retrieval recall).
 
 ## Commands (once implemented)
 ```

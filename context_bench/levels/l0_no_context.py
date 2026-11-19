@@ -1,7 +1,7 @@
 """L0 — no context. Task text only.
 
-Runs on control tasks only: a real edit is impossible without seeing the file. Serves as the
-baseline for hallucinated helpers (calls to project functions that don't exist).
+Runs on tier-1 control tasks only: a real edit is impossible without seeing the file. Serves as the
+baseline: what the model does with no repo at all.
 """
 from __future__ import annotations
 

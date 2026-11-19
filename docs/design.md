@@ -1,19 +1,18 @@
 # Design notes
 
 ## Questions
-1. How do correctness, reuse of existing code and hallucinated references change across the levels?
-2. When the model writes its own version of an existing helper, was that helper visible to it?
+1. How do correctness and reuse of existing code change across the levels?
+2. When the model doesn't reuse an existing helper, was that helper visible to it?
 3. What does each level cost in tokens and latency for what it delivers?
 4. (Optional model axis) How much of any difference comes from the model and how much from context
    building?
 
 ## Metrics
 - Hidden-test pass rate.
-- Reuse outcome on reuse tasks: reused / duplicated / inlined duplicate.
-- Hallucinated references to project code that doesn't exist.
+- Reuse on reuse tasks: a hidden test checks the needed helper is actually called (`reuse_passed`).
 - `helper_in_context`, and retrieval recall@k split by whether task wording matches the helper's name.
 - Input/output tokens, latency, tool calls, and peak context usage (largest single prompt vs the window).
-- 10% stratified hand audit of labels to report detector precision.
+- A hand-checked sample of judge grades.
 
 ## Controls
 One prompt template; base arm never mentions reuse; first pass: one model, one shot per config,
@@ -39,3 +38,5 @@ produced. Output: an overall ranking and 1-5 scores per dimension. A hand-graded
 - No LangChain: retrieval details are the variables under study.
 - Third-party retrievers plug in behind `Retriever` and are validated against the reference ones.
 - Level modules are self-contained; duplication between them is intentional for readability.
+- No duplication detector for now (simple first). Reuse = a spy-based hidden test; the judge covers how a
+  non-reusing patch re-implemented things. A "plagiarism scanner" may come later.
