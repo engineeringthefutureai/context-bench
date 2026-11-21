@@ -115,7 +115,7 @@ def _experiment(tmp_path, client):
               .replace('S = "fixtures/repo_S"', f'S = "{FIXTURE}"')
               .replace('M = "fixtures/repo_M"', f'M = "{ROOT / "fixtures" / "repo_M"}"')
               .replace('helpers = "helpers/registry.toml"', f'helpers = "{ROOT / "helpers" / "registry.toml"}"')
-              .replace('base_url = "http://localhost:11436"', 'base_url = "http://127.0.0.1:9"'))   # never the real embedder
+              .replace('base_url = "http://localhost:21434"', 'base_url = "http://127.0.0.1:9"'))   # never the real embedder
     (tmp_path / "config").mkdir(exist_ok=True)
     (tmp_path / "config" / "experiment.toml").write_text(cfg)
     return Experiment(tmp_path / "config" / "experiment.toml", client_factory=lambda m, url: client)
