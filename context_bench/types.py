@@ -135,6 +135,10 @@ class RunResult:
     tokens_cached: int | None = None    # server-reported prefix-cache hits, summed; None: not reported
     helper_body_in_context: bool | None = None  # strict visibility: each needed helper's full source
                                         #   was in view (helper_in_context also counts signatures)
+    helper_usage_in_context: bool | None = None  # each needed helper seen imported or called (not just
+                                        #   defined) somewhere in the context; None: task needs none
+    legacy_ctx_share: float | None = None  # share of the context (chars) from dead code ([legacy] paths)
+    legacy_used: bool | None = None     # the patch imports or references dead code; None: no patch
     cold_start: bool = False            # clean mode: the model server was restarted right before this run
     # embedder work in this run (added 2026-11-21; absent in older rows / runs without embeddings)
     embed_texts: int = 0                # texts sent to the embedding server (cache misses + queries)

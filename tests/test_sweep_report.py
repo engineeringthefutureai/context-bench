@@ -49,7 +49,7 @@ def test_report(tmp_path):
     text = results.report(exp.results_path)
     assert "| control-001 (1) | ❌ 1/13 |" in text and "## Per configuration" in text
     assert "| L1 nothink | 6 |" in text and "| L1+hint nothink | 6 |" in text   # config: thinking off; --level L1 includes the hint arm
-    assert "helper not in context" in text
+    assert "not seen" in text
     assert results.report(tmp_path / "missing.jsonl").startswith("No results")
 
 

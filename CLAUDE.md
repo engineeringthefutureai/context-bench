@@ -9,6 +9,7 @@ of building the model's context (the levels below). For each run it records:
 - **Reuse:** did the new code actually call the existing project helper the task needs? (a hidden reuse test)
 - **Visibility:** did the model see the needed helper? `helper_in_context` (its def line in any form:
   source, L6 signature, tool output) and `helper_body_in_context` (its full source, so it could see what it does).
+  `helper_usage_in_context`: the helper seen imported or called (models reuse what they only saw used).
 - **Cost:** input/output tokens, latency, tool calls.
 
 The harness measures; it doesn't argue for an outcome. Implement every level as well as it can
@@ -67,7 +68,7 @@ several cross-file / convention tasks. Results recorded as L8 were migrated to L
 
 Active vs legacy code: L7 must be able to tell live code from dead code (repo M: `common/`, `utils/strings.py`).
 It gets the means, not the instruction: `find_references` (where a name is used) and import counts
-in `list_files`. Nothing in the prompt says dead code exists. Measured at every level:
+in `list_files`. Nothing in the prompt says dead code exists. Measured at every level (`metrics.py`, backfilled by `cbench rescore`):
 `legacy_ctx_share` (share of context tokens from dead paths; L7: tool output) and `legacy_used`
 (the patch imports or calls dead code). Dead paths are `[legacy].paths` in `helpers/registry.toml`,
 harness-only. A `legacy_hint` prompt arm, if ever wanted, is an opt-in ablation like `reuse_hint`.

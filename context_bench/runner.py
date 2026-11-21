@@ -39,6 +39,7 @@ from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
 from .levels.l7_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
 from .llm import ChatResult, OpenAICompatClient, env_value
+from .metrics import dead_modules, legacy_ctx_share, legacy_used, usage_visible
 from .prompt import PROMPT_VERSION, render
 from .embedders import CachedEmbedder, OpenAICompatEmbedder
 from .retrieval.bm25 import BM25Retriever
@@ -61,6 +62,9 @@ class Experiment:
         self.results_path = self._path(paths["results"])
         self.runs_dir = self._path(paths["runs"])
         self.shared_dir = self._path(paths["tasks"]) / "_shared"
+        reg_path = self._path(paths["helpers"]) if paths.get("helpers") else None
+        registry = tomllib.loads(reg_path.read_text()) if reg_path and reg_path.is_file() else {}
+        self.legacy = registry.get("legacy", {}).get("paths", [])   # dead code: harness-only
         self.default_model = self.config["sweep"]["models"][0]
         self._client_factory = client_factory or (
             lambda m, url: OpenAICompatClient(url, m["model"]))
@@ -262,6 +266,7 @@ class Experiment:
                          patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
                          error="; ".join(e for e in (error, ctx.note) if e) or None)
         _set(result, perf)
+        _set(result, self._seen_metrics(task, ctx.text, ws, patch))
         # L7: the whole tool conversation. Otherwise side exchanges (e.g. the L5 planning call), plus
         # the raw message when the text alone doesn't explain the reply (the server lifted pretend
         # tool calls out of an otherwise empty content).
@@ -273,6 +278,13 @@ class Experiment:
                             tests_output=tests_out, result=asdict(result))
         _log(result)
         return result
+
+    def _seen_metrics(self, task: Task, seen: str, ws: Workspace, patch: str | None) -> dict:
+        """Metrics from what the run saw (context + tool output) and what it wrote (metrics.py)."""
+        return {"helper_usage_in_context": usage_visible(task.needed_helpers, seen),
+                "legacy_ctx_share": legacy_ctx_share(seen, self.legacy),
+                "legacy_used": (legacy_used(patch, dead_modules(self.legacy, list(ws.files)))
+                                if patch else None)}
 
     def _protocol(self, task: Task, repo_size: str, response: str, files: dict[str, str]) -> dict:
         """format_status, and when the strict parse found nothing but there is code, the hidden-test
@@ -313,6 +325,9 @@ class Experiment:
                 ctx, ws = ContextBlock(text=seen), workspaces[r["repo_size"]]
                 r["helper_in_context"] = _helper_visible(task, ctx)
                 r["helper_body_in_context"] = _helper_body_visible(task, ctx, ws)
+                patch_file = self.runs_dir / r["run_id"] / "patch.diff"
+                r.update(self._seen_metrics(task, seen, ws,
+                                            patch_file.read_text() if patch_file.is_file() else None))
             n += 1
         results.rewrite(self.results_path, rows)
         return n
@@ -497,12 +512,17 @@ class Experiment:
 
 
 def _seen_text(run_dir: Path) -> str | None:
-    """Everything the model was shown, from a bundle: the prompt's user turn plus every tool output
-    (L7). None if the bundle has no prompt."""
+    """What the levels put in front of the model, from a bundle: the <context> block plus every
+    tool output (L7), i.e. the same text as ctx.text at run time. None if the bundle has no prompt."""
     prompt = run_dir / "prompt.json"
     if not prompt.is_file():
         return None
-    parts = [m.get("content") or "" for m in json.loads(prompt.read_text()) if m.get("role") == "user"]
+    parts = []
+    for m in json.loads(prompt.read_text()):
+        if m.get("role") == "user":           # the <context> block (as levels built it), else the turn
+            text = m.get("content") or ""
+            inner = re.search(r"<context>\n(.*?)\n</context>", text, re.S)
+            parts.append(inner.group(1) if inner else text)
     transcript = run_dir / "transcript.jsonl"
     if transcript.is_file():
         for line in transcript.read_text().splitlines():

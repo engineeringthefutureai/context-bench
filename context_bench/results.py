@@ -193,20 +193,27 @@ def report(path: Path) -> str:
                         sum(r["tokens_out"] for r in rs) // len(rs),
                         f"{peak} ({100 * peak / rs[0]['context_window']:.1f}%)",
                         f"{sum(r['latency_s'] for r in rs) / len(rs):.0f}s",
-                        f"{sum(r['tool_calls'] for r in rs) / len(rs):.1f}"])
+                        f"{sum(r['tool_calls'] for r in rs) / len(rs):.1f}",
+                        f"{100 * sum(r.get('legacy_ctx_share') or 0 for r in rs) / len(rs):.0f}%",
+                        sum(bool(r.get("legacy_used")) for r in rs)])
     out += _table(["Config", "runs", "ok", "broken", "no_fit", "tool_error", "ran out",
                    "fmt/no code/asked", "lenient ok", "reuse ok",
-                   "mean in", "cacheable in", "mean out", "max peak", "mean latency", "mean tools"], summary)
+                   "mean in", "cacheable in", "mean out", "max peak", "mean latency", "mean tools",
+                   "dead ctx", "dead used"], summary)
 
     ru = [r for r in rows if r["reuse_passed"] is not None]
     if ru:
         out += ["", "## Reuse vs helper visibility (all configurations)", ""]
         vis = []
-        for seen, name in ((True, "helper in context"), (False, "helper not in context")):
-            group = [r for r in ru if bool(r["helper_in_context"]) is seen]
+        groups = (("full source seen", lambda r: bool(r.get("helper_body_in_context"))),
+                  ("signature only", lambda r: bool(r["helper_in_context"]) and not r.get("helper_body_in_context")),
+                  ("only seen in use", lambda r: not r["helper_in_context"] and bool(r.get("helper_usage_in_context"))),
+                  ("not seen", lambda r: not r["helper_in_context"] and not r.get("helper_usage_in_context")))
+        for name, pick in groups:
+            group = [r for r in ru if pick(r)]
             vis.append([name, len(group), sum(bool(r["reuse_passed"]) for r in group),
-                        sum(r["label"] == "ok" for r in group)])
-        out += _table(["", "reuse runs", "reused", "tests ok"], vis)
+                        sum(r["label"] == "ok" for r in group), sum(bool(r.get("legacy_used")) for r in group)])
+        out += _table(["", "reuse runs", "reused", "tests ok", "used dead code"], vis)
 
     out += ["", "## Performance per model", "",
             "Per request = output tokens / model-call time (thinking included). Combined = all output /"

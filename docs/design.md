@@ -128,3 +128,11 @@ three L4 runs reused a helper whose definition was *not* in context (helper_in_c
 a retrieved file imported and called it (e.g. invoices/render.py for format_money / normalize_sku) and
 the model copied the import. Seeing a helper *used* is enough for reuse; a later metric could record
 "usage visible" next to "definition visible".
+
+**Visibility vs reuse, and dead code (all runs so far, 2026-11-21).** Reuse runs by what the model saw:
+full source 70 (53 reused, 44 passed) · signature only 34 (8 reused, 4 passed) · only seen *in use* 14
+(7 reused, 9 passed) · not seen 52 (0 reused). So reuse needs the helper in view, a body beats a
+signature by far, and a call site alone is often enough. Dead code: 5 patches imported a dead decoy
+(`sku_code`, `cleanSKU`, `slugify`, `kgToLbs` x2), all failing - all single-shot runs whose context came
+from embeddings or the L6 map; none at L3 or L7, where the model can see (L3) or check (L7) that the
+code is dead. Dead share of context on M: L3 ~10%, embed retrieval 14-18%, BM25 4-7%, L7 3-9%.
