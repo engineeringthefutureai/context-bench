@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     gr = sub.add_parser("grade", help="blind judge compares all patches per task")
     gr.add_argument("--task", action="append", help="limit to these tasks (repeatable)")
     gr.add_argument("--dry-run", action="store_true", help="write judge dirs, don't call the judge")
+    gr.add_argument("--repo-size", action="append", help="only these repos (repeatable)")
 
     sub.add_parser("report", help="label counts per configuration")
     rs = sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
@@ -96,7 +97,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "grade":
         exp = Experiment(Path(args.config))
-        n = exp.grade(args.task, dry_run=args.dry_run)
+        n = exp.grade(args.task, dry_run=args.dry_run, repo_sizes=args.repo_size)
         print(f"judge dirs written to {exp.config['grading']['work_dir']}" if args.dry_run else f"graded {n} runs")
         return
     if args.cmd == "report":

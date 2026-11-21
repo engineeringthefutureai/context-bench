@@ -483,7 +483,8 @@ class Experiment:
             print(f"{len(failed)} runs failed with an unexpected error (not recorded; rerun to retry): "
                   + ", ".join(failed), file=sys.stderr)
 
-    def grade(self, task_ids: list[str] | None = None, dry_run: bool = False) -> int:
+    def grade(self, task_ids: list[str] | None = None, dry_run: bool = False,
+              repo_sizes: list[str] | None = None) -> int:
         """cbench grade: one blind judge per task and repo over the patches of the current prompt version
         on the fixture as it is now (grade.py). Returns the number of runs graded."""
         from . import grade
@@ -495,7 +496,8 @@ class Experiment:
                 and (not task_ids or r["task_id"] in task_ids)]
         graded = 0
         for task_id in sorted({r["task_id"] for r in rows}):
-            for size in sorted({r["repo_size"] for r in rows if r["task_id"] == task_id}):
+            for size in sorted({r["repo_size"] for r in rows if r["task_id"] == task_id
+                                and (not repo_sizes or r["repo_size"] in repo_sizes)}):
                 mine = [r for r in rows if r["task_id"] == task_id and r["repo_size"] == size
                         and r.get("repo_hash") == self.repo_hash(size)]
                 n = grade.grade_task(self.tasks[task_id], size, mine, repo=self._path(self.config["repos"][size]),
