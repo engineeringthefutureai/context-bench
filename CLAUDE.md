@@ -49,12 +49,19 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L5 | `l5_function_rag` | Target + top-8 functions with path, import header, signature, docstring, body (`retriever`, `query_mode`) |
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class |
 | L7 | `l7_symbol_graph` | Target + definitions of referenced symbols + 1-hop callers |
-| L8 | `l8_agentic` | Target + tools `grep`, `list_files`, `read_file` (≤15 calls); `hybrid` adds `semantic_search` |
+| L8 | `l8_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search` |
 
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost).
 
 Ablation: `prompt_arm = reuse_hint` on L1 and L5.
+
+Active vs legacy code: L8 must be able to tell live code from dead code (repo M has `legacy_v1/`).
+It gets the means, not the instruction: `find_references` (where a name is used) and import counts
+in `list_files`. Nothing in the prompt says dead code exists. Measured at every level:
+`legacy_ctx_share` (share of context tokens from dead paths; L8: tool output) and `legacy_used`
+(the patch imports or calls dead code). Dead paths are `[legacy].paths` in `helpers/registry.toml`,
+harness-only. A `legacy_hint` prompt arm, if ever wanted, is an opt-in ablation like `reuse_hint`.
 
 **Current scope: one model (Qwen 3.8 27B), one shot per config (seed 1), server-default temperature.** Crude on purpose;
 more seeds, a second size and the model axis come later.
@@ -86,10 +93,16 @@ against them with `cbench validate-retrieval` (recall@k of planted helpers) befo
 is swappable and recorded per run.
 
 ## Fixtures and tasks
-- `fixtures/repo_S/` — seed test repo (`shopkit`) with planted helpers. Target: ~60 files, 25 helpers
-  (half with names matching task wording, half not; ⅓ in `utils/`, the rest in domain modules; none in
-  the target file of the task that needs it; for L2, half the reuse tasks import the helper's module
-  directly and half don't). It's the only repo for now; small is fine.
+- `fixtures/repo_S/` — seed test repo (`shopkit`, ~2k tokens) with the first three planted helpers.
+- `fixtures/repo_M/` — the grown `shopkit` (~32k tokens at L3 plus ~4k of legacy_v1, ~110 files, stdlib only, its own passing
+  `tests/`). A strict superset of S: every S file is byte-identical, so every task runs on both
+  (`--repo-size M`). 25 helpers (13 matching / 12 opaque naming, 9 in `utils/`), each called somewhere
+  in M, plus near-miss decoys (`[[decoy]]` in the registry) that fail the hidden tests if used instead.
+  `shopkit/legacy_v1/` (~4k tokens) is dead 2017-era code in a clashing style (camelCase, float dollars,
+  globals); nothing imports it. It holds more look-alikes and tests whether models use or imitate it.
+  New tasks: no helper in the target file of the task that needs it; for L2, half the reuse tasks
+  import the helper's module directly and half don't. Changing an S file changes both repos.
+  M deliberately has no `tests/test_<stem>.py` for existing task targets, so L2 shows them nothing extra.
 - `tasks/<id>/task.toml` + `hidden_tests/`. Target: 40 tasks — 20 reuse, 8 cross-file, 6 convention,
   6 control. `reuse-001` is the worked example.
 - Every task also has a `tier` (difficulty ladder, orthogonal to category):
@@ -101,7 +114,7 @@ is swappable and recorded per run.
   solution passes (`tasks/<id>/solutions/reference.diff`). Tasks that depend on repo context (tier 3+)
   also keep a plausible context-blind solution that fails (`context_blind.diff`). Reuse tasks: the
   reference passes `test_reuse.py`, the context-blind solution fails it.
-- `helpers/registry.toml` — every planted helper and its naming style (for analysis and retrieval recall).
+- `helpers/registry.toml` — every planted helper and its naming style, plus decoys (for analysis and retrieval recall).
 
 ## Commands (once implemented)
 ```

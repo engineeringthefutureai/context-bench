@@ -25,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="full sweep from config (resumable)")
     run.add_argument("--level", action="append", help="only these levels (repeatable)")
+    run.add_argument("--model", action="append", help="run these [models.*] instead of [sweep].models")
+    run.add_argument("--repo-size", action="append", help="run these [repos] instead of [sweep] sizes")
     run.add_argument("--dry-run", action="store_true", help="list the runs still to do, don't run them")
 
     idx = sub.add_parser("index", help="build caches, e.g. function summaries")
@@ -61,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(asdict(result), indent=2))
         return
     if args.cmd == "run":
-        Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run)
+        Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run, models=args.model, repo_sizes=args.repo_size)
         return
     if args.cmd == "report":
         exp = Experiment(Path(args.config))

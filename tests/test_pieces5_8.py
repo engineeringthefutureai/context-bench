@@ -115,7 +115,7 @@ def _experiment(tmp_path, client):
               .replace('S = "fixtures/repo_S"', f'S = "{FIXTURE}"'))
     (tmp_path / "config").mkdir(exist_ok=True)
     (tmp_path / "config" / "experiment.toml").write_text(cfg)
-    return Experiment(tmp_path / "config" / "experiment.toml", client_factory=lambda m: client)
+    return Experiment(tmp_path / "config" / "experiment.toml", client_factory=lambda m, url: client)
 
 
 def _run(tmp_path, task, reply, prompt_tokens=500, level="L1"):

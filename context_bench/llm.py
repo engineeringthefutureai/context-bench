@@ -65,7 +65,7 @@ class OpenAICompatClient:
         usage = data.get("usage") or {}
         return ChatResult(
             content=msg.get("content") or "",
-            reasoning=msg.get("reasoning_content") or "",
+            reasoning=msg.get("reasoning_content") or msg.get("reasoning") or "",   # llama.cpp | Ollama
             tool_calls=msg.get("tool_calls") or [],
             tokens_in=usage.get("prompt_tokens", 0),
             tokens_out=usage.get("completion_tokens", 0),

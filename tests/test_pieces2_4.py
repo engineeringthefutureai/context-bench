@@ -89,3 +89,9 @@ def test_run_hidden_tests(tmp_path, task, solution, expected):
 
 def test_hidden_tests_leave_no_artifacts_in_tasks():
     assert not list((ROOT / "tasks").rglob("__pycache__")) and not list((ROOT / "tasks").rglob(".pytest_cache"))
+
+
+def test_parse_files_tag_is_case_and_quote_insensitive():
+    from context_bench.apply import parse_files
+    assert parse_files("<File path='a.py'>\nx = 1\n</File>") == {"a.py": "x = 1\n"}
+    assert parse_files('<file  path = "b.py" >\ny = 2\n</FILE>') == {"b.py": "y = 2\n"}

@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import sys
 import tempfile
+import threading
 import tomllib
 from dataclasses import asdict
 from pathlib import Path
@@ -40,7 +41,8 @@ from .workspace import load_workspace
 class Experiment:
     def __init__(self, config_path: Path, client_factory=None):
         """Paths in the config are relative to the project root (the config file's grandparent).
-        client_factory(model_cfg) -> client; defaults to OpenAICompatClient (tests pass a fake)."""
+        client_factory(model_cfg, base_url) -> client; defaults to OpenAICompatClient (tests pass a fake).
+        A model may list several identical servers as `base_urls`; the sweep runs one job per server."""
         self.config = tomllib.loads(config_path.read_text())
         self.root = config_path.resolve().parent.parent
         paths = self.config["paths"]
@@ -50,25 +52,32 @@ class Experiment:
         self.shared_dir = self._path(paths["tasks"]) / "_shared"
         self.default_model = self.config["sweep"]["models"][0]
         self._client_factory = client_factory or (
-            lambda m: OpenAICompatClient(m["base_url"], m["model"]))
-        self._clients: dict[str, object] = {}
+            lambda m, url: OpenAICompatClient(url, m["model"]))
+        self._clients: dict[tuple[str, str], object] = {}
         self._sampling: dict[str, dict] = {}
 
     def _path(self, p: str) -> Path:
         return Path(p) if Path(p).is_absolute() else self.root / p
 
-    def _client(self, model_key: str):
-        if model_key not in self._clients:
-            self._clients[model_key] = self._client_factory(self.config["models"][model_key])
-            self._sampling[model_key] = self._clients[model_key].server_sampling()
-        return self._clients[model_key]
+    def base_urls(self, model_key: str) -> list[str]:
+        m = self.config["models"][model_key]
+        return m.get("base_urls") or [m["base_url"]]
 
-    def run_one(self, rc: RunConfig) -> RunResult:
+    def _client(self, model_key: str, url: str | None = None):
+        url = url or self.base_urls(model_key)[0]
+        if (model_key, url) not in self._clients:
+            self._clients[model_key, url] = self._client_factory(self.config["models"][model_key], url)
+            if model_key not in self._sampling:
+                self._sampling[model_key] = self._clients[model_key, url].server_sampling()
+        return self._clients[model_key, url]
+
+    def run_one(self, rc: RunConfig, base_url: str | None = None) -> RunResult:
+        """One run; base_url picks one of the model's servers (default: the first)."""
         task = self.tasks[rc.task_id]
         model_cfg = self.config["models"][rc.model]
         gen = self.config["generation"]
         max_out, window = gen["max_output_tokens"], model_cfg["context_window"]
-        client = self._client(rc.model)
+        client = self._client(rc.model, base_url)
         run_dir = self.runs_dir / rc.run_id
 
         with tempfile.TemporaryDirectory(prefix="cbench-") as tmp:
@@ -118,10 +127,11 @@ class Experiment:
         _log(result)
         return result
 
-    def configs(self, levels: list[str] | None = None) -> list[RunConfig]:
+    def configs(self, levels: list[str] | None = None, models: list[str] | None = None,
+                repo_sizes: list[str] | None = None) -> list[RunConfig]:
         """Expand [[config]] entries x models x repo sizes x seeds x tasks into RunConfigs.
         A config's optional `categories` and `tiers` keep only matching tasks (e.g. L0: tier 1).
-        `levels` keeps only those levels (cbench run --level)."""
+        `levels` keeps only those levels (cbench run --level); `models` / `repo_sizes` replace the sweep's."""
         sweep = self.config["sweep"]
         out = []
         for c in self.config.get("config", []):
@@ -130,8 +140,8 @@ class Experiment:
             tasks = [t for t in sorted(self.tasks.values(), key=lambda t: (t.tier, t.id))
                      if ("categories" not in c or t.category in c["categories"])
                      and ("tiers" not in c or t.tier in c["tiers"])]
-            for model in c.get("models", sweep["models"]):
-                for size in c.get("repo_sizes", sweep["default_repo_sizes"]):
+            for model in models or c.get("models", sweep["models"]):
+                for size in repo_sizes or c.get("repo_sizes", sweep["default_repo_sizes"]):
                     for seed in sweep["seeds"]:
                         out += [RunConfig(task_id=t.id, level=c["level"], model=model, seed=seed,
                                           repo_size=size, retriever=c.get("retriever", "none"),
@@ -142,33 +152,58 @@ class Experiment:
                                 for t in tasks]
         return out
 
-    def sweep(self, levels: list[str] | None = None, dry_run: bool = False) -> None:
+    def sweep(self, levels: list[str] | None = None, dry_run: bool = False,
+              models: list[str] | None = None, repo_sizes: list[str] | None = None) -> None:
         """Run every config not already in results.jsonl; failures aren't written, so they retry.
         A level that isn't implemented yet is skipped (reported once); a server error (timeout,
         connection, HTTP status) skips that run, so the next `cbench run` retries it."""
         done = results.done_run_ids(self.results_path)
-        todo = [rc for rc in self.configs(levels) if rc.run_id not in done]
+        todo = [rc for rc in self.configs(levels, models, repo_sizes) if rc.run_id not in done]
         print(f"{len(todo)} runs to do ({len(done)} already in {self.results_path.name})", file=sys.stderr)
         if dry_run:
             for rc in todo:
                 print(f"  {rc.task_id} {config_label(asdict(rc))}", file=sys.stderr)
             return
         unimplemented: set[str] = set()
-        for i, rc in enumerate(todo, 1):
-            if rc.level in unimplemented:
-                continue
-            print(f"({i}/{len(todo)})", end=" ", file=sys.stderr)
-            try:
-                result = self.run_one(rc)
-            except NotImplementedError as e:
-                unimplemented.add(rc.level)
-                print(f"skipping {rc.level}: not implemented ({e})", file=sys.stderr)
-                continue
-            except httpx.HTTPError as e:
-                print(f"[{rc.task_id} {config_label(asdict(rc))}] server error, will retry next run: "
-                      f"{type(e).__name__}: {e}", file=sys.stderr)
-                continue
-            results.append(self.results_path, result)
+        lock = threading.Lock()
+        counter = iter(range(1, len(todo) + 1))
+
+        def worker(url: str, queue: list[RunConfig]) -> None:
+            while True:
+                with lock:
+                    if not queue:
+                        return
+                    rc = queue.pop(0)
+                    if rc.level in unimplemented:
+                        continue
+                    i = next(counter)
+                tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
+                try:
+                    result = self.run_one(rc, url)
+                except NotImplementedError as e:
+                    with lock:
+                        if rc.level not in unimplemented:
+                            unimplemented.add(rc.level)
+                            print(f"skipping {rc.level}: not implemented ({e})", file=sys.stderr)
+                    continue
+                except httpx.HTTPError as e:
+                    print(f"({i}/{len(todo)}) {tag} server error, will retry next run: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
+                    continue
+                with lock:
+                    results.append(self.results_path, result)
+                    print(f"  ({i}/{len(todo)} done, {url})", file=sys.stderr)
+
+        # one queue per model, one worker per server of that model
+        threads = []
+        for model in dict.fromkeys(rc.model for rc in todo):
+            queue = [rc for rc in todo if rc.model == model]
+            for url in self.base_urls(model):
+                threads.append(threading.Thread(target=worker, args=(url, queue)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""

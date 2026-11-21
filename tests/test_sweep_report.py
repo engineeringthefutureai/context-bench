@@ -41,3 +41,17 @@ def test_report(tmp_path):
     assert "| L1 | 6 |" in text and "| L1+hint | 6 |" in text          # --level L1 includes the hint arm
     assert "helper not in context" in text
     assert results.report(tmp_path / "missing.jsonl").startswith("No results")
+
+
+def test_sweep_spreads_runs_over_base_urls(tmp_path):
+    from context_bench.runner import Experiment
+    exp = _experiment(tmp_path, FakeClient(REPLY))
+    exp.config["models"][exp.default_model]["base_urls"] = ["http://a", "http://b"]
+    used = []
+    def factory(m, url):
+        used.append(url)
+        return FakeClient(REPLY)
+    exp._client_factory = factory
+    exp.sweep(["L1"])
+    rows = results.load(exp.results_path)
+    assert len(rows) == 2 * len(exp.tasks) and sorted(used) == ["http://a", "http://b"]

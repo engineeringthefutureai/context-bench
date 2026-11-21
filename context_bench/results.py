@@ -33,9 +33,11 @@ def load(path: Path) -> list[dict]:
 
 
 def config_label(r: dict) -> str:
-    """Short name for a configuration: level, its variant options, and '+hint' for the reuse arm."""
+    """Short name for a configuration: level, its variant options, '+hint' for the reuse arm and
+    '@M' etc. for any repo other than S."""
     parts = [r["level"]] + [r[k] for k in ("retriever", "query_mode", "agent_variant") if r[k] != "none"]
-    return " ".join(parts) + ("+hint" if r["prompt_arm"] != "base" else "")
+    return (" ".join(parts) + ("+hint" if r["prompt_arm"] != "base" else "")
+            + (f" @{r['repo_size']}" if r["repo_size"] != "S" else ""))
 
 
 def _ran_out(r: dict) -> bool:

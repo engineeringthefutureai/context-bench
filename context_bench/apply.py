@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-_FILE_RE = re.compile(r'<file path="([^"]+)">\n?(.*?)</file>', re.DOTALL)
+_FILE_RE = re.compile(r'<file\s+path\s*=\s*["\']([^"\']+)["\']\s*>\n?(.*?)</file>', re.DOTALL | re.IGNORECASE)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FENCE_RE = re.compile(r"\A\s*```[\w.+-]*\n(.*?)\n?```\s*\Z", re.DOTALL)
 
