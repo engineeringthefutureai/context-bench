@@ -19,3 +19,8 @@ class Retriever(Protocol):
 def chunk_text(c: Chunk) -> str:
     """What a function/class is indexed by (L5, validate-retrieval): path, qualname, then source."""
     return f"{c.path}\n{c.qualname}\n{c.source}"
+
+
+def file_text(path: str, text: str) -> str:
+    """What a whole file is indexed by (L4, validate-retrieval): its path, then its contents."""
+    return f"{path}\n{text}"

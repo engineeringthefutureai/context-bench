@@ -11,14 +11,10 @@ from typing import Callable
 
 from ..types import Task
 from ..workspace import Workspace
-from .base import Retriever, chunk_text
+from .base import Retriever, chunk_text, file_text
 
 KS = (1, 3, 8)
 DEPTH = 50          # ranks beyond this print as ">50"
-
-
-def file_text(path: str, text: str) -> str:
-    return f"{path}\n{text}"
 
 
 def helper_file(qualname: str, ws: Workspace) -> str | None:

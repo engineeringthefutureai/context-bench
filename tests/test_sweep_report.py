@@ -20,7 +20,7 @@ def test_configs_expand_and_filter(tmp_path):
 def test_sweep_resumes_skips_unimplemented_and_retries_server_errors(tmp_path):
     client = FakeClient(REPLY)
     exp = _experiment(tmp_path, client)
-    exp.sweep(["L0", "L4"])                                       # L4 isn't implemented yet: skipped
+    exp.sweep(["L0", "L7"])                                       # L7 isn't implemented yet: skipped
     rows = results.load(exp.results_path)
     assert [(r["task_id"], r["level"]) for r in rows] == [("control-001", "L0")]
     exp.sweep(["L0"])                                             # already done: no new call

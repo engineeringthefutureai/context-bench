@@ -102,3 +102,16 @@ def test_l5_model_queries_plans_merges_and_falls_back():
     assert ctx.transcript[0]["queries"] == ["slug for title url"] and ctx.note is None
     bad = LEVELS["L5"](TASKS["reuse-002"], WS, query_mode="model_queries", planner=lambda *a: ("<file>", 1, 1, 0.1))
     assert bad.queries == [TASKS["reuse-002"].prompt] and "fell back" in bad.note
+
+
+def test_l4_target_plus_top_files_whole():
+    task = TASKS["reuse-002"]
+    ctx = LEVELS["L4"](task, WS)
+    assert ctx.text.startswith(f"File: {task.target_file}\n") and 0 < len(ctx.retrieved) <= 3
+    assert ctx.retrieved[0] == "shopkit/utils/text.py" and task.target_file not in ctx.retrieved
+    assert ctx.included == [task.target_file] + ctx.retrieved
+    assert WS.files["shopkit/utils/text.py"].rstrip() in ctx.text      # whole file, not a chunk
+    assert _helper_visible(task, ctx)
+    import pytest
+    with pytest.raises(NotImplementedError):
+        LEVELS["L4"](task, WS, retriever="embed")       # no embedder handed in by the runner

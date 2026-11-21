@@ -119,3 +119,10 @@ request, 53 combined at concurrency 4 (long L8 prompts); actual prefix-cache hit
 Embedder (iGPU): ~600 tokens/s cold, repo M indexed once in 75 s, a new query 40-200 ms; with a
 warm cache it adds nothing measurable per run. L8 peak prompt per turn: 7-8.5k tokens (vs 42k for
 L3 on M); a bug that recorded L8's total input as its peak is fixed and backfilled.
+
+**L4 file RAG (thinking off, prompt v3, S+M, 2026-11-21).** bm25 7/13, embed 6/13 (L5 task_vs_code:
+8/13 in the same sweep generation), ~1.5-2.8k input tokens. Visibility misses a real path to reuse:
+three L4 runs reused a helper whose definition was *not* in context (helper_in_context false) because
+a retrieved file imported and called it (e.g. invoices/render.py for format_money / normalize_sku) and
+the model copied the import. Seeing a helper *used* is enough for reuse; a later metric could record
+"usage visible" next to "definition visible".
