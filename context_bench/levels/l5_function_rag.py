@@ -42,10 +42,16 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..types import ContextBlock, Task
+from ..chunking import import_header
+from ..retrieval.base import Retriever, chunk_text
+from ..retrieval.bm25 import BM25Retriever
+from ..types import Chunk, ContextBlock, Task
 from ..workspace import Workspace
 
 TOP_CHUNKS = 8
+SEARCH_DEPTH = 40      # hits fetched before overlap filtering fills the TOP_CHUNKS budget
+RETRIEVED_HEADER = ("Retrieved code from other files (the most relevant functions and classes found "
+                    "by searching the repository):")
 N_QUERIES = 5          # model_queries: queries used from the planning reply
 K_PER_QUERY = 3        # model_queries: hits taken per query before merging
 
@@ -65,7 +71,63 @@ def parse_queries(reply: str, limit: int = N_QUERIES) -> list[str]:
     raise NotImplementedError
 
 
+def _make_retriever(name: str) -> Retriever:
+    if name == "bm25":
+        return BM25Retriever()
+    raise NotImplementedError(f"retriever {name!r}")
+
+
+def _overlaps(a: Chunk, b: Chunk) -> bool:
+    """Same file and one span inside the other (a class and one of its methods)."""
+    return a.path == b.path and (a.start_line <= b.start_line <= b.end_line <= a.end_line
+                                 or b.start_line <= a.start_line <= a.end_line <= b.end_line)
+
+
+def _select(hits: list[tuple[str, float]], by_id: dict[str, Chunk]) -> list[Chunk]:
+    """Best TOP_CHUNKS in rank order, skipping a chunk that overlaps one already taken, so a class
+    and its method don't both spend the budget on the same lines."""
+    picked: list[Chunk] = []
+    for qualname, _ in hits:
+        c = by_id[qualname]
+        if not any(_overlaps(c, p) for p in picked):
+            picked.append(c)
+        if len(picked) == TOP_CHUNKS:
+            break
+    return picked
+
+
+def _render(picked: list[Chunk], ws: Workspace) -> str:
+    """Grouped by file in order of first appearance: path, the file's import header once, then each
+    chunk's source (signature, docstring, body) with its line numbers."""
+    by_file: dict[str, list[Chunk]] = {}
+    for c in picked:
+        by_file.setdefault(c.path, []).append(c)
+    parts = [RETRIEVED_HEADER]
+    for path, chunks in by_file.items():
+        body = []
+        if header := import_header(ws.files[path]):
+            body.append(header)
+        body += [f"# lines {c.start_line}-{c.end_line}\n{c.source}" for c in chunks]
+        parts.append(f"File: {path}\n```python\n" + "\n\n".join(body) + "\n```")
+    return "\n\n".join(parts)
+
+
 def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
                   query_mode: str = "task_vs_code", drafter: Drafter | None = None,
                   planner: Planner | None = None) -> ContextBlock:
-    raise NotImplementedError
+    """Implemented: query_mode "task_vs_code" (query = task text). The target file's own chunks are
+    not indexed: the target is shown in full."""
+    if query_mode != "task_vs_code":
+        raise NotImplementedError(f"query_mode {query_mode!r}")
+    path = task.target_file
+    if path in ws.files:
+        target = f"File: {path}\n```python\n{ws.files[path].rstrip()}\n```"
+    else:
+        target = f"File: {path}\n(This file does not exist yet.)"
+    chunks = [c for c in ws.chunks if c.path != path]
+    r = _make_retriever(retriever)
+    r.index([c.qualname for c in chunks], [chunk_text(c) for c in chunks])
+    picked = _select(r.search(task.prompt, SEARCH_DEPTH), {c.qualname: c for c in chunks})
+    text = target + ("\n\n" + _render(picked, ws) if picked else "")
+    return ContextBlock(text=text, included=[path] + [c.qualname for c in picked],
+                        retrieved=[c.qualname for c in picked], queries=[task.prompt])

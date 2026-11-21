@@ -9,17 +9,12 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..types import Chunk, Task
+from ..types import Task
 from ..workspace import Workspace
-from .base import Retriever
+from .base import Retriever, chunk_text
 
 KS = (1, 3, 8)
 DEPTH = 50          # ranks beyond this print as ">50"
-
-
-def chunk_text(c: Chunk) -> str:
-    """What a function is indexed by: its path and qualname, then its source."""
-    return f"{c.path}\n{c.qualname}\n{c.source}"
 
 
 def file_text(path: str, text: str) -> str:

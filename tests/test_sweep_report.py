@@ -160,3 +160,12 @@ def test_smallest_repo_and_task_repo_sizes(tmp_path):
     assert ("trap-001", "M") in l1 and ("trap-001", "S") not in l1        # M-only task: on M
     l3 = {(rc.task_id, rc.repo_size) for rc in exp.configs(["L3"])}
     assert ("trap-001", "S") not in l3 and {("reuse-002", "S"), ("reuse-002", "M")} <= l3
+
+
+def test_variant_key_separates_implemented_siblings():
+    from context_bench.runner import _variant
+    from context_bench.types import RunConfig
+    a = RunConfig(task_id="t", level="L5", model="m", seed=1, retriever="bm25", query_mode="task_vs_code")
+    b = RunConfig(task_id="t", level="L5", model="m", seed=1, retriever="embed", query_mode="task_vs_code")
+    assert _variant(a) == ("L5", "bm25", "task_vs_code") != _variant(b)
+    assert _variant(RunConfig(task_id="t", level="L1", model="m", seed=1)) == ("L1",)

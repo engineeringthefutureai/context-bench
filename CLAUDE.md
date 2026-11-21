@@ -101,7 +101,12 @@ CLAUDE.md loaded.
 Everything goes through the `Retriever` protocol (`context_bench/retrieval/base.py`). Reference
 implementations (BM25, brute-force cosine) double as yardsticks: any third-party retriever is validated
 against them with `cbench validate-retrieval` (recall@k of planted helpers) before a sweep. The embedder
-is swappable and recorded per run.
+is swappable and recorded per run. Implemented: BM25 (`retrieval/bm25.py`, code-aware tokens from
+`tokenize.py`) and validation with query = task text (`retrieval/validate.py`: function and file level,
+target file left out, recall@1/3/8 split by naming, the first decoy that outranks a helper). Functions are
+indexed as `chunk_text` (path, qualname, source), the same text L5 searches. L5 implements
+`task_vs_code` (BM25); other modes and `embed` raise NotImplementedError, and the sweep skips that
+variant only (level + retriever + query mode + agent variant), not its siblings.
 
 ## Fixtures and tasks
 - `fixtures/repo_S/` — seed test repo (`shopkit`, ~2k tokens) with the first three planted helpers.

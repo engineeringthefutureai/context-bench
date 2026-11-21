@@ -231,7 +231,7 @@ class Experiment:
               thinking: bool | None = None, task_ids: list[str] | None = None) -> None:
         """Run every config not already in results.jsonl (or whose repo has changed since: a recorded
         repo_hash that differs from the fixture now); failures aren't written, so they retry.
-        A level that isn't implemented yet is skipped (reported once); a server error (timeout,
+        A level or variant that isn't implemented yet is skipped (reported once); a server error (timeout,
         connection, HTTP status) skips that run, so the next `cbench run` retries it."""
         recorded = {r["run_id"]: r.get("repo_hash") for r in results.load(self.results_path)}
         todo = [rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)
@@ -253,7 +253,7 @@ class Experiment:
                     if not queue:
                         return
                     rc = queue.pop(0)
-                    if rc.level in unimplemented:
+                    if _variant(rc) in unimplemented:
                         continue
                     i = next(counter)
                 tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
@@ -261,9 +261,9 @@ class Experiment:
                     result = self.run_one(rc, url, concurrency=workers_per_url[rc.model, url])
                 except NotImplementedError as e:
                     with lock:
-                        if rc.level not in unimplemented:
-                            unimplemented.add(rc.level)
-                            print(f"skipping {rc.level}: not implemented ({e})", file=sys.stderr)
+                        if _variant(rc) not in unimplemented:
+                            unimplemented.add(_variant(rc))
+                            print(f"skipping {' '.join(_variant(rc))}: not implemented ({e})", file=sys.stderr)
                     continue
                 except httpx.HTTPError as e:
                     print(f"({i}/{len(todo)}) {tag} server error, will retry next run: "
@@ -313,6 +313,12 @@ class Experiment:
 
 # Retrievers by config name. "embed" joins once an embedder is configured.
 RETRIEVERS = {"bm25": BM25Retriever}
+
+
+def _variant(rc: RunConfig) -> tuple[str, ...]:
+    """Level plus the options that pick its implementation (e.g. L5 bm25 task_vs_code), so an
+    unimplemented variant is skipped without skipping its implemented siblings."""
+    return tuple(v for v in (rc.level, rc.retriever, rc.query_mode, rc.agent_variant) if v != "none")
 
 
 def _runs_on(task: Task, size: str, sizes, all_sizes: list[str]) -> bool:

@@ -57,3 +57,29 @@ def test_l6_map_signatures_with_and_without_docs():
     assert "    fields: sku: str, qty: int, unit_cents: int" in plain       # dataclass fields shown
     assert "slug_for_title(self.title)" not in plain and "return " not in plain.split("Repository map")[1]
     assert "shopkit/catalog/models.py\n  " not in plain.split("Repository map")[1]   # target not repeated
+
+
+def test_l5_task_vs_code_retrieves_matching_helper_with_body():
+    ctx = LEVELS["L5"](TASKS["reuse-002"], WS)
+    assert ctx.retrieved[0] == "shopkit.utils.text.slug_for_title"
+    assert 0 < len(ctx.retrieved) <= 8 and ctx.included[1:] == ctx.retrieved
+    assert ctx.queries == [TASKS["reuse-002"].prompt]
+    assert _helper_visible(TASKS["reuse-002"], ctx)
+    target = TASKS["reuse-002"].target_file
+    assert ctx.text.startswith(f"File: {target}\n") and ctx.text.count(f"File: {target}\n") == 1
+    assert "import re" in ctx.text                        # the helper file's import header
+
+
+def test_l5_skips_overlapping_chunks_and_unimplemented_variants():
+    from context_bench.levels.l5_function_rag import _select
+    from context_bench.types import Chunk
+    cls = Chunk("a.py", "a.K", "class", 1, 10, "class K", "", "class K: ...")
+    meth = Chunk("a.py", "a.K.m", "function", 3, 5, "def m(self)", "", "def m(self): ...")
+    other = Chunk("b.py", "b.f", "function", 1, 2, "def f()", "", "def f(): ...")
+    by_id = {c.qualname: c for c in (cls, meth, other)}
+    assert _select([("a.K.m", 3.0), ("a.K", 2.0), ("b.f", 1.0)], by_id) == [meth, other]
+    import pytest
+    with pytest.raises(NotImplementedError):
+        LEVELS["L5"](TASKS["reuse-002"], WS, retriever="embed")
+    with pytest.raises(NotImplementedError):
+        LEVELS["L5"](TASKS["reuse-002"], WS, query_mode="model_queries")
