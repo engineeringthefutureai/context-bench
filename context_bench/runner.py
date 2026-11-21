@@ -33,7 +33,8 @@ from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
-from .llm import OpenAICompatClient
+from .levels.l8_agentic import RepoTools, run_agent
+from .llm import ChatResult, OpenAICompatClient
 from .prompt import PROMPT_VERSION, render
 from .retrieval.bm25 import BM25Retriever
 from .results import config_label
@@ -121,12 +122,33 @@ class Experiment:
                 _log(result)
                 return result
 
-            if rc.level == "L8":
-                raise NotImplementedError("L8 tool loop is not implemented yet")
+            agent = None
             perf["started_at"] = _now()
-            chat = client.chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
-                               **({} if rc.thinking else {"thinking": False}))
+            if rc.level == "L8":
+                tools = RepoTools(sandbox)
+                agent = run_agent(client, messages, tools, agent_variant=rc.agent_variant,
+                                  temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
+                                  context_window=window, thinking=rc.thinking)
+                chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
+                                  tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
+                                  latency_s=agent.latency_s, finish_reason=agent.finish_reason)
+                # helper_in_context for L8: the definition appeared in any tool output
+                ctx.text += "\n\n" + "\n\n".join(tools.transcript)
+                perf["tool_calls"] = agent.tool_calls
+            else:
+                chat = client.chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
+                                   **({} if rc.thinking else {"thinking": False}))
             perf.update(finished_at=_now(), prefill_s=_round(chat.prefill_s), decode_s=_round(chat.decode_s))
+            if agent and agent.no_fit:
+                result = _result(**base, label="no_fit", ctx_fits=False, tests=(0, 0, None),
+                                 tokens=(agent.tokens_in, agent.tokens_out, agent.peak_ctx_tokens),
+                                 latency=agent.latency_s, patch_path=None,
+                                 error=f"a turn would exceed the window ({agent.peak_ctx_tokens} + {max_out} > {window})")
+                _set(result, perf)
+                bundle.write_bundle(run_dir, patch=None, messages=messages, response="", reasoning=chat.reasoning,
+                                    transcript=agent.transcript, tests_output="", result=asdict(result))
+                _log(result)
+                return result
 
             files, error = parse_files(chat.content), None
             if chat.finish_reason == "length":
@@ -145,9 +167,11 @@ class Experiment:
             perf["format_status"] = "tool_request"
 
         label = "ok" if total > 0 and passed == total else "broken"
+        if agent and agent.tool_errors and not files:
+            label, error = "tool_error", f"{agent.tool_errors} tool errors and no <file> blocks"
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
                          tokens=(chat.tokens_in + ctx.extra_tokens_in, chat.tokens_out + ctx.extra_tokens_out,
-                                 max(prompt_tokens, chat.tokens_in)),
+                                 max(prompt_tokens, chat.tokens_in, agent.peak_ctx_tokens if agent else 0)),
                          latency=chat.latency_s,
                          patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
                          error=error)
@@ -156,7 +180,8 @@ class Experiment:
                             reasoning=chat.reasoning,
                             # raw message when the text alone doesn't explain the reply (e.g. the
                             # server lifted pretend tool calls out of an otherwise empty content)
-                            transcript=([{"finish_reason": chat.finish_reason, "message": chat.message}]
+                            transcript=(agent.transcript if agent else
+                                        [{"finish_reason": chat.finish_reason, "message": chat.message}]
                                         if chat.tool_calls or not chat.content.strip() else None),
                             tests_output=tests_out, result=asdict(result))
         _log(result)
