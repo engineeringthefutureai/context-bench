@@ -74,3 +74,10 @@ Three points on one axis, cheapest first. The open question: how much of C's qua
 Build order: Retriever protocol + BM25 + `cbench validate-retrieval` (recall@k of the planted
 helpers per query mode; for A this needs no model at all) → L5 A (BM25) → L5 B → embedder + embed
 variants → L4 (same retriever, file level) → L8.
+
+**Baseline, A + BM25 (`cbench validate-retrieval`, 2026-11-20).** Query = task text, target file left
+out. Matching helpers rank #1 as functions on S and M (`slug_for_title`, `format_weight`). Opaque
+ones are invisible on M: `normalize_sku` ranks 89th and `format_money` 271st of 450 matching
+chunks for reuse-001 ("product codes ... cleaned up", "invoices" share no token with either name or
+body). On S (29 chunks) they still scrape in at 6 and 15. No stemming (`codes` != `code`), on
+purpose for now. This is the gap B (model_queries) and the embed variants are meant to close.

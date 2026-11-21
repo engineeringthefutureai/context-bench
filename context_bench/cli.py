@@ -79,6 +79,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "rescore":
         print(f"rescored {Experiment(Path(args.config)).rescore()} runs")
         return
+    if args.cmd == "validate-retrieval":
+        exp = Experiment(Path(args.config))
+        print(exp.validate_retrieval(args.retrievers.split(","), args.repo_size), end="")
+        return
     if args.cmd == "report":
         exp = Experiment(Path(args.config))
         print(results.report(exp.results_path), end="")

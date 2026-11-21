@@ -35,6 +35,7 @@ from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
 from .llm import OpenAICompatClient
 from .prompt import render
+from .retrieval.bm25 import BM25Retriever
 from .results import config_label
 from .tasks import load_tasks
 from .types import ContextBlock, RunConfig, RunResult, Task
@@ -290,8 +291,28 @@ class Experiment:
         raise NotImplementedError
 
     def validate_retrieval(self, retrievers: list[str], repo_size: str = "S") -> str:
-        """recall@1/3/8 of planted helpers per retriever, function and file level."""
-        raise NotImplementedError
+        """recall@1/3/8 of planted helpers per retriever, function and file level (query = task
+        text, see retrieval/validate.py). Tasks with needed helpers that run on this repo."""
+        from .retrieval.validate import validate
+        registry = tomllib.loads(self._path(self.config["paths"]["helpers"]).read_text())
+        naming = {h["qualname"]: h["naming"] for h in registry.get("helper", [])}
+        decoys = {d["qualname"] for d in registry.get("decoy", [])}
+        ws = load_workspace(self._path(self.config["repos"][repo_size]))
+        tasks = [t for t in self.tasks.values() if t.needed_helpers
+                 and (not t.repo_sizes or repo_size in t.repo_sizes)]
+        out = [f"repo {repo_size}: {len(ws.chunks)} functions/classes, {len(ws.files)} files, "
+               f"{len(tasks)} tasks with needed helpers; query = task text"]
+        for name in retrievers:
+            make = RETRIEVERS.get(name)
+            if make is None:
+                out.append(f"\n## {name}\nnot available (known: {', '.join(RETRIEVERS)})")
+                continue
+            out.append(f"\n## {name}\n" + validate(make, ws, tasks, naming, decoys)[1])
+        return "\n".join(out) + "\n"
+
+
+# Retrievers by config name. "embed" joins once an embedder is configured.
+RETRIEVERS = {"bm25": BM25Retriever}
 
 
 def _runs_on(task: Task, size: str, sizes, all_sizes: list[str]) -> bool:
