@@ -4,6 +4,8 @@
 tasks. The final round (thinking on, clean cold server for every run) has not run yet, so treat
 every number here as a strong signal, not a result.*
 
+Illustrated version with charts and a hypothesis review: [report.html](report.html).
+
 ## Setup in one paragraph
 
 One model, Qwen 3.8 27B (FP8 on vLLM, tensor-parallel over two Intel Arc Pro B60), gets the same
