@@ -96,3 +96,16 @@ def test_semantic_search_uses_the_supplied_retriever():
     assert out.splitlines()[0].startswith("shopkit/shipping/packaging.py:") and "format_weight" in out.splitlines()[0]
     with pytest.raises(RuntimeError):
         RepoTools(M).semantic_search("x")
+
+
+def test_cacheable_tokens_count_the_repeated_prefix():
+    _, res = _run([[("read_file", {"path": "shopkit/money.py"})], [("grep", {"pattern": "def"})], "final"])
+    assert res.tokens_in == 30 and res.tokens_cacheable == 20      # turns 2 and 3 repeat the previous prompt
+    assert res.tokens_cached is None                               # the fake server doesn't report hits
+
+
+def test_cached_tokens_parsed_from_either_server():
+    from context_bench.llm import _cached
+    assert _cached({"prompt_tokens_details": {"cached_tokens": 512}}, {}) == 512
+    assert _cached({}, {"cache_n": 300}) == 300
+    assert _cached({"prompt_tokens_details": None}, {}) is None

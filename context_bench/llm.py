@@ -23,6 +23,7 @@ class ChatResult:
     tool_calls: list[dict] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
+    cached_tokens: int | None = None  # prompt tokens served from the server's prefix cache, if reported
     latency_s: float = 0.0
     prefill_s: float | None = None    # prompt processing time, if the server reports it (llama.cpp)
     decode_s: float | None = None     # generation time, if the server reports it (llama.cpp)
@@ -38,6 +39,18 @@ def api_key_from_env(env_file: Path = PROJECT_ROOT / ".env") -> str | None:
             name, sep, value = line.partition("=")
             if sep and name.strip() == "CBENCH_API_KEY" and value.strip():
                 return value.strip().strip('"').strip("'")
+    return None
+
+
+def _cached(usage: dict, timings: dict) -> int | None:
+    """Prompt tokens the server reused from its prefix cache: OpenAI-style
+    usage.prompt_tokens_details.cached_tokens (vLLM with --enable-prompt-tokens-details), else
+    llama.cpp's timings.cache_n; None if the server doesn't say."""
+    details = usage.get("prompt_tokens_details") or {}
+    if details.get("cached_tokens") is not None:
+        return int(details["cached_tokens"])
+    if "cache_n" in timings:
+        return int(timings["cache_n"])
     return None
 
 
@@ -75,6 +88,7 @@ class OpenAICompatClient:
             tool_calls=msg.get("tool_calls") or [],
             tokens_in=usage.get("prompt_tokens", 0),
             tokens_out=usage.get("completion_tokens", 0),
+            cached_tokens=_cached(usage, timings),
             latency_s=time.monotonic() - start,
             prefill_s=timings["prompt_ms"] / 1000 if "prompt_ms" in timings else None,
             decode_s=timings["predicted_ms"] / 1000 if "predicted_ms" in timings else None,

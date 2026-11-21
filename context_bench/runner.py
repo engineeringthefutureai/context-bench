@@ -171,11 +171,14 @@ class Experiment:
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
                 # helper_in_context for L8: the definition appeared in any tool output
                 ctx.text += "\n\n" + "\n\n".join(tools.transcript)
-                perf["tool_calls"] = agent.tool_calls
+                perf.update(tool_calls=agent.tool_calls, tokens_cached=agent.tokens_cached,
+                            tokens_cacheable=agent.tokens_cacheable)
             else:
                 chat = client.chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                    **({} if rc.thinking else {"thinking": False}))
             perf.update(finished_at=_now(), prefill_s=_round(chat.prefill_s), decode_s=_round(chat.decode_s))
+            if not agent:
+                perf["tokens_cached"] = chat.cached_tokens
             if agent and agent.no_fit:
                 result = _result(**base, label="no_fit", ctx_fits=False, tests=(0, 0, None),
                                  tokens=(agent.tokens_in, agent.tokens_out, agent.peak_ctx_tokens),

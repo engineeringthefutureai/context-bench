@@ -281,6 +281,9 @@ class AgentResult:
     transcript: list[dict] = field(default_factory=list)   # every message after the first two
     reasoning: str = ""       # all turns' reasoning, joined
     finish_reason: str = ""   # of the last turn
+    tokens_cached: int | None = None   # server-reported cache hits, summed (None if any turn didn't say)
+    tokens_cacheable: int = 0          # per turn after the first: the previous turn's prompt, which this
+                                       # turn's prompt starts with (messages are only ever appended)
 
 
 def _assistant_message(chat) -> dict:
@@ -306,7 +309,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     schemas = tool_schemas(agent_variant)
     schema_tokens = client.count_tokens(json.dumps(schemas))
     msgs = list(messages)
-    calls = errors = tokens_in = tokens_out = peak = 0
+    calls = errors = tokens_in = tokens_out = peak = cacheable = 0
+    cached: int | None = 0
+    prev_in = 0
     reasoning, start = [], time.monotonic()
     chat = None
     while True:
@@ -317,12 +322,16 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
         peak = max(peak, prompt)
         if prompt + max_tokens > context_window:
             return AgentResult("", calls, errors, tokens_in, tokens_out, peak, True,
-                               time.monotonic() - start, msgs[len(messages):], "\n\n".join(reasoning))
+                               time.monotonic() - start, msgs[len(messages):], "\n\n".join(reasoning),
+                               tokens_cached=cached, tokens_cacheable=cacheable)
         chat = client.chat(msgs, temperature=temperature, seed=seed, max_tokens=max_tokens,
                            tools=schemas if offer else None,
                            **({} if thinking else {"thinking": False}))
         tokens_in += chat.tokens_in
         tokens_out += chat.tokens_out
+        cacheable += min(prev_in, chat.tokens_in)
+        prev_in = chat.tokens_in
+        cached = None if cached is None or chat.cached_tokens is None else cached + chat.cached_tokens
         peak = max(peak, chat.tokens_in)
         if chat.reasoning:
             reasoning.append(chat.reasoning)
@@ -349,4 +358,4 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
             msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
     return AgentResult(chat.content, calls, errors, tokens_in, tokens_out, peak, False,
                        time.monotonic() - start, msgs[len(messages):], "\n\n".join(reasoning),
-                       chat.finish_reason)
+                       chat.finish_reason, tokens_cached=cached, tokens_cacheable=cacheable)

@@ -130,3 +130,8 @@ class RunResult:
     prefill_s: float | None = None      # prompt processing time, if the server reports it
     decode_s: float | None = None       # generation time, if the server reports it
     prompt_version: int = 1             # system prompt version (absent in older rows = 1)
+    # input-token split for cost (added 2026-11-21; absent in older rows)
+    tokens_cached: int | None = None    # server-reported prefix-cache hits, summed; None: not reported
+    tokens_cacheable: int = 0           # input tokens that repeat an earlier turn's prompt exactly (tool
+                                        #   loops: each turn resends the previous prompt), i.e. what any
+                                        #   prefix-caching provider could bill at the cached rate

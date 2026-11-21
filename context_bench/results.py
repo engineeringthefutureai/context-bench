@@ -124,6 +124,16 @@ def _table(header: list[str], rows: list[list]) -> list[str]:
             *("| " + " | ".join(str(c) for c in row) + " |" for row in rows)]
 
 
+def _cache_share(rs: list[dict]) -> str:
+    """Share of input tokens that repeat an earlier turn's prompt (tool loops), plus the server's
+    actual cache hits when every run reported them."""
+    total = sum(r["tokens_in"] for r in rs) or 1
+    out = f"{100 * sum(r.get('tokens_cacheable', 0) for r in rs) / total:.0f}%"
+    if all(r.get("tokens_cached") is not None for r in rs):
+        out += f" (hit {100 * sum(r['tokens_cached'] for r in rs) / total:.0f}%)"
+    return out
+
+
 def report(path: Path) -> str:
     """Label counts and reuse rate per configuration, reuse when the helper was seen vs not
     seen, and usage per configuration: mean tokens in/out, max peak_ctx_tokens (and % of the
@@ -161,13 +171,14 @@ def report(path: Path) -> str:
                                  for s in ("bad_format", "no_code", "tool_request")),
                         sum(1 for r in rs if r.get("lenient_total") and r["lenient_passed"] == r["lenient_total"]),
                         f"{sum(bool(r['reuse_passed']) for r in ru)}/{len(ru)}" if ru else "–",
-                        sum(r["tokens_in"] for r in rs) // len(rs), sum(r["tokens_out"] for r in rs) // len(rs),
+                        sum(r["tokens_in"] for r in rs) // len(rs), _cache_share(rs),
+                        sum(r["tokens_out"] for r in rs) // len(rs),
                         f"{peak} ({100 * peak / rs[0]['context_window']:.1f}%)",
                         f"{sum(r['latency_s'] for r in rs) / len(rs):.0f}s",
                         f"{sum(r['tool_calls'] for r in rs) / len(rs):.1f}"])
     out += _table(["Config", "runs", "ok", "broken", "no_fit", "tool_error", "ran out",
                    "fmt/no code/asked", "lenient ok", "reuse ok",
-                   "mean in", "mean out", "max peak", "mean latency", "mean tools"], summary)
+                   "mean in", "cacheable in", "mean out", "max peak", "mean latency", "mean tools"], summary)
 
     ru = [r for r in rows if r["reuse_passed"] is not None]
     if ru:
