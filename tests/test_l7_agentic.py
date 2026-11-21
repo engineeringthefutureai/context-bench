@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from context_bench.levels import LEVELS
-from context_bench.levels.l7_agentic import BUDGET_SPENT, MAX_TOOL_CALLS, RepoTools, run_agent, tool_schemas
+from context_bench.levels.l7_agentic import (BUDGET_SPENT, MAX_TOOL_CALLS, UNPARSED_CALL, RepoTools, run_agent,
+                                          tool_schemas)
 from context_bench.llm import ChatResult
 from context_bench.tasks import load_tasks
 from context_bench.workspace import load_workspace
@@ -123,3 +124,38 @@ def test_budget_turn_is_not_cacheable_and_turns_rebuild():
           {"role": "user", "content": BUDGET_SPENT}, {"role": "assistant", "content": "final"}]
     turns = turn_prompts(base, tr)
     assert [len(m) for m, _ in turns] == [2, 5] and [o for _, o in turns] == [True, False]
+
+
+def _run_fc(script, cost=0.5):
+    client = FakeClient(script)
+    res = run_agent(client, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+                    RepoTools(M), agent_variant="grep", temperature=None, seed=1, max_tokens=100,
+                    context_window=100_000, failed_call_cost=cost)
+    return client, res
+
+
+def test_bad_arguments_get_the_valid_ones_and_cost_half():
+    client, res = _run_fc([[("grep", {"pattern": "def", "path": "x"}), ("bogus", {})], "<file path=\"a.py\">x</file>"])
+    errs = [m["content"] for m in client.seen[1][0] if m["role"] == "tool"]
+    assert "grep takes: pattern (string, required), path_glob (string, optional)." in errs[0]
+    assert "Available tools: grep, list_files, read_file, find_references." in errs[1]
+    assert res.tool_calls == 2 and res.tool_errors == 2 and res.budget_used == 1.0
+
+
+def test_text_tool_call_gets_feedback_and_the_loop_goes_on():
+    text_call = "<tool_call>\n<function=grep>\n<parameter=pattern>\ndef\n</parameter>\n</function>\n</tool_call>"
+    client, res = _run_fc([text_call, [("read_file", {"path": "shopkit/money.py"})], "<file path=\"a.py\">x</file>"])
+    assert res.content.startswith("<file") and len(client.seen) == 3
+    assert client.seen[1][0][-1] == {"role": "user", "content": UNPARSED_CALL}
+    assert res.tool_calls == 2 and res.tool_errors == 1 and res.budget_used == 1.5
+
+
+def test_original_harness_ends_on_a_text_tool_call():
+    client, res = _run(["<tool_call><function=grep></function></tool_call>"])
+    assert len(client.seen) == 1 and res.tool_calls == 0
+
+
+def test_failed_calls_alone_cannot_loop_forever():
+    client, res = _run_fc(["<tool_call>x</tool_call>"] * (2 * MAX_TOOL_CALLS) + ["final"])
+    assert res.content == "final" and res.budget_used == MAX_TOOL_CALLS
+    assert client.seen[-1][1] is None            # last turn: tools withdrawn after BUDGET_SPENT

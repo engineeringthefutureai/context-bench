@@ -40,6 +40,12 @@ TOOLS_NOTE = """You can explore the repository with these tools: {tools}.
 You may make at most {max_calls} tool calls. When you are done, reply with the <file> blocks as
 described; that reply ends the task."""
 
+# Sent when a reply holds what looks like a tool call written as text (the server couldn't parse it
+# into a real one) and no <file> blocks. Generic format feedback, nothing about the task.
+UNPARSED_CALL = ("error: your reply looks like a tool call, but it could not be parsed, so nothing was run. "
+                 "Call tools through the tool-calling interface, or reply with the <file> blocks of your change.")
+_TEXT_CALL = re.compile(r"<tool_call>|<function[=_\s>]|<invoke\b")
+
 # Sent once the budget is spent (mechanics: the tools are gone, the answer is due).
 BUDGET_SPENT = "No tool calls left. Reply with the <file> blocks of your change."
 
@@ -67,6 +73,15 @@ _TOOLS = {
 }
 _VARIANTS = {"grep": ["grep", "list_files", "read_file", "find_references"],
              "hybrid": ["grep", "list_files", "read_file", "find_references", "semantic_search"]}
+
+
+def _usage(name: str, agent_variant: str) -> str:
+    """What a failed call should have looked like: the tool's arguments, or the tools that exist."""
+    if name not in _variant_tools(agent_variant):
+        return "Available tools: " + ", ".join(_variant_tools(agent_variant)) + "."
+    _, props, required = _TOOLS[name]
+    args = [f"{k} ({v['type']}, {'required' if k in required else 'optional'})" for k, v in props.items()]
+    return f"{name} takes: " + (", ".join(args) if args else "no arguments") + "."
 
 
 def _variant_tools(agent_variant: str) -> list[str]:
@@ -286,6 +301,7 @@ class AgentResult:
                                        # turn's prompt starts with (messages are only ever appended),
                                        # when both offered the same tools (chat templates put tool
                                        # definitions at the top, so dropping them changes the prefix)
+    budget_used: float = 0.0           # successful calls + failed calls x failed_call_cost
 
 
 def cacheable_prefix(prev_in: int, prev_offer: bool | None, cur_in: int, cur_offer: bool) -> int:
@@ -316,7 +332,8 @@ def _assistant_message(chat) -> dict:
 
 def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: str,
               temperature: float | None, seed: int, max_tokens: int,
-              context_window: int, thinking: bool = True) -> AgentResult:
+              context_window: int, thinking: bool = True,
+              failed_call_cost: float | None = None) -> AgentResult:
     """Tool loop: call the model, execute tool calls, feed results back, stop on a final answer
     or when the budget is spent. Before every turn, check prompt tokens + max_tokens against the
     context window; if it no longer fits, stop and report no_fit (never let the server truncate).
@@ -324,17 +341,25 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     A turn without tool calls is the final answer. Once MAX_TOOL_CALLS calls have run, the next turn
     gets no tools and a BUDGET_SPENT user message. Tool calls beyond the budget within one turn are
     answered with an error and not executed. Bad arguments, unknown tools and tool exceptions are
-    tool errors: the error text is returned to the model, and the loop goes on."""
+    tool errors: the error text is returned to the model, and the loop goes on.
+
+    failed_call_cost set (the current harness): a failed call is charged that much of the budget
+    instead of a whole call, its error also lists the tool's valid arguments, and a final-looking
+    reply that holds a tool call written as text (and no <file> blocks) is answered with
+    UNPARSED_CALL instead of ending the run. None: the original harness, kept for older runs."""
     schemas = tool_schemas(agent_variant)
     schema_tokens = client.count_tokens(json.dumps(schemas))
     msgs = list(messages)
+    feedback = failed_call_cost is not None
+    cost = failed_call_cost if feedback else 1.0
+    spent = 0.0                          # budget used: successful calls + failed calls x cost
     calls = errors = tokens_in = tokens_out = peak = cacheable = 0
     cached: int | None = 0
     prev_in, prev_offer = 0, None
     reasoning, start = [], time.monotonic()
     chat = None
     while True:
-        offer = calls < MAX_TOOL_CALLS
+        offer = spent < MAX_TOOL_CALLS
         if not offer and msgs[-1].get("content") != BUDGET_SPENT:
             msgs.append({"role": "user", "content": BUDGET_SPENT})
         prompt = client.count_prompt_tokens(msgs) + (schema_tokens if offer else 0)
@@ -342,7 +367,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
         if prompt + max_tokens > context_window:
             return AgentResult("", calls, errors, tokens_in, tokens_out, peak, True,
                                time.monotonic() - start, msgs[len(messages):], "\n\n".join(reasoning),
-                               tokens_cached=cached, tokens_cacheable=cacheable)
+                               tokens_cached=cached, tokens_cacheable=cacheable, budget_used=spent)
         chat = client.chat(msgs, temperature=temperature, seed=seed, max_tokens=max_tokens,
                            tools=schemas if offer else None,
                            **({} if thinking else {"thinking": False}))
@@ -355,12 +380,17 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
         if chat.reasoning:
             reasoning.append(chat.reasoning)
         msgs.append(_assistant_message(chat))
+        if (feedback and offer and not chat.tool_calls and "<file" not in chat.content
+                and _TEXT_CALL.search(chat.content)):
+            msgs.append({"role": "user", "content": UNPARSED_CALL})
+            calls, errors, spent = calls + 1, errors + 1, spent + cost
+            continue
         if not chat.tool_calls or not offer:
             break
         for tc in chat.tool_calls:
             fn = tc.get("function", {})
             name = fn.get("name", "")
-            if calls >= MAX_TOOL_CALLS:
+            if spent >= MAX_TOOL_CALLS:
                 out = "error: tool call budget spent; not executed"
                 errors += 1
             else:
@@ -370,11 +400,16 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                     if name not in _variant_tools(agent_variant) or not isinstance(args, dict):
                         raise ValueError(f"unknown tool {name!r}")
                     out = tools.call(name, args)
+                    spent += 1
                 except Exception as e:          # the model sees the error and can retry
                     out = f"error: {type(e).__name__}: {e}"
+                    if feedback:
+                        out += f". {_usage(name, agent_variant)}"
                     tools.transcript.append(out)
                     errors += 1
+                    spent += cost
             msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
     return AgentResult(chat.content, calls, errors, tokens_in, tokens_out, peak, False,
                        time.monotonic() - start, msgs[len(messages):], "\n\n".join(reasoning),
-                       chat.finish_reason, tokens_cached=cached, tokens_cacheable=cacheable)
+                       chat.finish_reason, tokens_cached=cached, tokens_cacheable=cacheable,
+                       budget_used=spent)

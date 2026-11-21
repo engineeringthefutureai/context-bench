@@ -44,13 +44,15 @@ def load(path: Path) -> list[dict]:
 
 def config_label(r: dict) -> str:
     """Short name for a configuration: level, its variant options, '+hint' for the reuse arm,
-    '@M' etc. for any repo other than S, and ' p1' etc. for rows made with an older system prompt."""
+    '@M' etc. for any repo other than S, ' p1' etc. for rows made with an older system prompt, and
+    ' h1' for L7 rows from the original tool harness (no failed-call feedback, RunConfig.failed_call_cost)."""
     parts = [r["level"]] + [r[k] for k in ("retriever", "query_mode", "agent_variant") if r[k] != "none"]
     return (" ".join(parts) + ("+hint" if r["prompt_arm"] != "base" else "")
             + ("+docs" if r.get("map_docs") else "")
             + (" nothink" if r.get("thinking") is False else "")
             + (f" @{r['repo_size']}" if r["repo_size"] != "S" else "")
-            + (f" p{r.get('prompt_version', 1)}" if r.get("prompt_version", 1) != PROMPT_VERSION else ""))
+            + (f" p{r.get('prompt_version', 1)}" if r.get("prompt_version", 1) != PROMPT_VERSION else "")
+            + (" h1" if r["level"] == "L7" and r.get("failed_call_cost") is None else ""))
 
 
 def _ran_out(r: dict) -> bool:

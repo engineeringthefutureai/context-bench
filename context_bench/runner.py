@@ -212,13 +212,16 @@ class Experiment:
                                                            if rc.agent_variant == "hybrid" else None))
                 agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
-                                  context_window=window, thinking=rc.thinking)
+                                  context_window=window, thinking=rc.thinking,
+                                  failed_call_cost=rc.failed_call_cost)
                 chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
                                   tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
                 # helper_in_context for L7: the definition appeared in any tool output
                 ctx.text += "\n\n" + "\n\n".join(tools.transcript)
-                perf.update(tool_calls=agent.tool_calls, tokens_cached=agent.tokens_cached,
+                perf.update(tool_calls=agent.tool_calls, tool_errors=agent.tool_errors,
+                            failed_call_cost=rc.failed_call_cost, budget_used=agent.budget_used,
+                            tokens_cached=agent.tokens_cached,
                             tokens_cacheable=agent.tokens_cacheable)
             else:
                 chat = model_client().chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
@@ -393,7 +396,8 @@ class Experiment:
                                           thinking=(thinking if thinking is not None else
                                                     c.get("thinking", self.config["generation"].get("thinking", True))),
                                           map_docs=c.get("map_docs", False),
-                                          prompt_version=PROMPT_VERSION)
+                                          prompt_version=PROMPT_VERSION,
+                                          failed_call_cost=c.get("failed_call_cost"))
                                 for t in fitting]
         return out
 

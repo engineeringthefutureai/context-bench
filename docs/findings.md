@@ -26,7 +26,7 @@ cycle: 386 runs, 20 tasks, both repos.
 | L4 | + top-3 files by search (BM25 / embeddings) | 63% / 48% |
 | L5 | + top-8 functions by search (best variant: embeddings + model-written queries) | 48-67% |
 | L6 | + every signature, no bodies (with / without first docstring line) | 11% / 11% |
-| L7 | agent with read-only tools (grep / grep + semantic search) | **78%** / 70% |
+| L7 | agent with read-only tools (grep / grep + semantic search) | **78%** / 70% (rerun: 67% / 67%) |
 
 ## Findings
 
@@ -130,6 +130,20 @@ concurrent requests; speculative decoding (2 draft tokens) accepts 91% / 83%. Th
 on the integrated GPU) adds 0.06-0.65 s per run once the repo is indexed (75 s for repo M, once).
 These timings come from a warm server that ended the run in swap; the final round's clean cold
 runs are the ones to quote.
+
+### 10. L7 rerun with failed-call feedback
+
+The tool harness was changed so that a failed tool call (wrong arguments, unknown tool, or a tool
+call written as text that vLLM couldn't parse) gets generic feedback and costs half a call of the
+15-call budget, instead of a whole call or ending the run. All 54 L7 runs were rerun with it. No
+"tool error" failures remain. The three runs that had failed that way all passed. No run produced
+an unparsable text tool call this time, so the "couldn't parse" feedback was never needed.
+
+Overall, L7 passed 36/54 (67%), against 40/54 (74%) in the first sample: grep 18/27 (from 21), hybrid
+18/27 (from 19). 20 of 54 runs flipped between the two samples in both directions, which is noise of
+the size noted below rather than an effect of the harness. Reuse held at 20/24. Cross-file fell
+from 7/8 to 4/8, convention from 7/8 to 6/8, and both variants fixed the trap this time. The
+L3-vs-L7 tie from finding 2 is better read as "L3 and L7 lead, the gap between them is within noise".
 
 ## How sure we are
 

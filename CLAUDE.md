@@ -66,6 +66,12 @@ spec only): target + definitions of referenced symbols + 1-hop callers, LSP-styl
 needed helper is never referenced from the target, so it adds little over L2; revisit once there are
 several cross-file / convention tasks. Results recorded as L8 were migrated to L7 (new run ids).
 
+L7 failed tool calls (bad arguments, unknown tool, a tool call written as text the server couldn't
+parse) get generic feedback (the tool's valid arguments / "couldn't parse, use the tool-calling
+interface") and the loop goes on; each costs `failed_call_cost` (0.5) of the 15-call budget. Rows from
+the original harness (no feedback, a text tool call ended the run) have no `failed_call_cost` and are
+labelled ` h1` in the report.
+
 Active vs legacy code: L7 must be able to tell live code from dead code (repo M: `common/`, `utils/strings.py`).
 It gets the means, not the instruction: `find_references` (where a name is used) and import counts
 in `list_files`. Nothing in the prompt says dead code exists. Measured at every level (`metrics.py`, backfilled by `cbench rescore`):

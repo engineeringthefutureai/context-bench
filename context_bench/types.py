@@ -66,10 +66,15 @@ class RunConfig:
     thinking: bool = True            # False: chat_template_kwargs enable_thinking=false (Qwen templates)
     map_docs: bool = False           # L6 variant: show each entry's first docstring line in the map
     prompt_version: int = 1          # system prompt version (prompt.SYSTEM_PROMPTS); new runs: PROMPT_VERSION
+    failed_call_cost: float | None = None  # L7: budget charged per failed tool call (bad arguments, unknown
+                                     # tool, a tool call written as text the server couldn't parse). Set:
+                                     # each failure gets feedback (valid arguments / "couldn't parse")
+                                     # and the loop goes on. None: the original harness (runs before
+                                     # 2026-11-21): failures cost a full call, a text tool call ended the run.
 
     # Fields added after results existed: left out of run_id while at their default, so older runs
     # keep their ids.
-    _LATE_DEFAULTS = {"thinking": True, "map_docs": False, "prompt_version": 1}
+    _LATE_DEFAULTS = {"thinking": True, "map_docs": False, "prompt_version": 1, "failed_call_cost": None}
 
     @property
     def run_id(self) -> str:
@@ -148,3 +153,7 @@ class RunResult:
     tokens_cacheable: int = 0           # input tokens that repeat an earlier turn's prompt exactly (tool
                                         #   loops: each turn resends the previous prompt), i.e. what any
                                         #   prefix-caching provider could bill at the cached rate
+    # L7 tool-call accounting (added 2026-11-21; absent in older rows)
+    tool_errors: int = 0                # failed tool calls (included in tool_calls)
+    failed_call_cost: float | None = None  # RunConfig.failed_call_cost
+    budget_used: float | None = None    # tool budget spent: successful calls + failed x failed_call_cost
