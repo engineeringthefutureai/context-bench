@@ -147,3 +147,17 @@ L4 bm25 7 / embed 5 · L5 bm25 task 5 / model queries 7 · L5 embed task 6 / mod
 BM25 beat embeddings at the same level here; needs a second sample before reading anything into it.
 Easiest task reuse-007 (ISO weeks; two runs were correct with isocalendar() and no reuse), hardest
 reuse-010 (duplicate keys must raise, 4/13).
+
+**Full cycle, thinking off (prompt v3, 20 tasks, S+M, 386 runs, one sample, 2026-11-21).** Pass rate:
+L0 0/2 · L1 25% · L1+hint 5% · L2 35% · L3 78% · L4 bm25 63% / embed 48% · L5 bm25 task 48% /
+model queries 56% · L5 embed task 52% / model queries 67% / +hint 56% · L6 11% / +docs 11% ·
+L7 grep 78% / hybrid 70%. By category, L7 is the only level strong on convention (7/8) and cross-file
+(7/8) besides L3 (2/4, 4/4); single-shot retrieval levels manage 25-40% there. Reuse when the
+helper's body was in view: L3 11/13, L5 model queries 11-12/13, L7 11/13. trap-001 fixed only by
+L7 grep (L2 passes with its own conversion). Dead code used by 5 patches, all embedding retrieval or
+L6+docs. L6 fails on protocol, not code: 23 of 27 failures announce they must look a helper up
+first ("Let me look at the relevant files") - the map shows names without bodies and provokes
+exploration it cannot do. Performance (indicative; 4 concurrent, ran into swap at the end, but L7
+latency matched earlier swap-free runs, 98 s -> 92 s): 16.5 tok/s per request, 65 combined; L3 on M
+hits the prefix cache for 90% of its input; L7 46% actual vs 77% cacheable; embedding work per run
+0.06-0.65 s.
