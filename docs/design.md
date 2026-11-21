@@ -1,6 +1,8 @@
 # Design notes
 
 Diagram of the levels and what each tests: [diagrams/context-levels.html](diagrams/context-levels.html).
+Task set and coverage: [diagrams/task-coverage.html](diagrams/task-coverage.html). Experiment flow:
+[diagrams/experiment-flow.html](diagrams/experiment-flow.html).
 
 ## Questions
 1. How do correctness and reuse of existing code change across the levels?
