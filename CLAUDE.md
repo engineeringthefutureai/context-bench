@@ -104,8 +104,11 @@ against them with `cbench validate-retrieval` (recall@k of planted helpers) befo
 is swappable and recorded per run. Implemented: BM25 (`retrieval/bm25.py`, code-aware tokens from
 `tokenize.py`) and validation with query = task text (`retrieval/validate.py`: function and file level,
 target file left out, recall@1/3/8 split by naming, the first decoy that outranks a helper). Functions are
-indexed as `chunk_text` (path, qualname, source), the same text L5 searches. L5 implements
-`task_vs_code` (BM25); other modes and `embed` raise NotImplementedError, and the sweep skips that
+indexed as `chunk_text` (path, qualname, source), the same text L5 searches. Embeddings: `embedders.py`
+(any `/v1/embeddings` endpoint, cached on disk per content under `.cache/embeddings/`) and
+`retrieval/dense.py` (brute-force cosine, `query_prefix` on queries only); `[embedder]` points at
+Ollama on the iGPU (`qwen3-embedding:0.6b`). L5 implements `task_vs_code` (BM25 or embed), L8 `grep`
+and `hybrid`; other L5 modes raise NotImplementedError, and the sweep skips that
 variant only (level + retriever + query mode + agent variant), not its siblings.
 
 ## Fixtures and tasks

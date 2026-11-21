@@ -19,8 +19,7 @@ def test_context_is_target_plus_tools_note_and_schemas_match():
     ctx = LEVELS["L8"](TASKS["reuse-001"], load_workspace(ROOT / "fixtures/repo_S"))
     assert ctx.text.startswith("File: shopkit/orders/export.py") and "grep, list_files, read_file, find_references" in ctx.text
     assert [t["function"]["name"] for t in tool_schemas("grep")] == ["grep", "list_files", "read_file", "find_references"]
-    with pytest.raises(NotImplementedError):
-        tool_schemas("hybrid")
+    assert tool_schemas("hybrid")[-1]["function"]["name"] == "semantic_search"
     for word in ("dead", "legacy", "unused", "reuse", "helper"):
         assert word not in ctx.text.lower().split("```")[-1]
 
@@ -88,3 +87,12 @@ def test_budget_is_enforced_then_tools_are_withdrawn():
 def test_no_fit_stops_before_the_server_truncates():
     _, res = _run([[("read_file", {"path": "shopkit/money.py"})], "final"], window=400)
     assert res.no_fit and res.content == ""
+
+
+def test_semantic_search_uses_the_supplied_retriever():
+    from context_bench.retrieval.bm25 import BM25Retriever
+    t = RepoTools(M, make_retriever=BM25Retriever)
+    out = t.semantic_search("format weight grams", k=2)
+    assert out.splitlines()[0].startswith("shopkit/shipping/packaging.py:") and "format_weight" in out.splitlines()[0]
+    with pytest.raises(RuntimeError):
+        RepoTools(M).semantic_search("x")

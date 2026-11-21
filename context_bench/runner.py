@@ -36,7 +36,9 @@ from .levels import LEVELS
 from .levels.l8_agentic import RepoTools, run_agent
 from .llm import ChatResult, OpenAICompatClient
 from .prompt import PROMPT_VERSION, render
+from .embedders import CachedEmbedder, OpenAICompatEmbedder
 from .retrieval.bm25 import BM25Retriever
+from .retrieval.dense import EmbeddingRetriever
 from .results import config_label
 from .tasks import load_tasks
 from .types import ContextBlock, RunConfig, RunResult, Task
@@ -62,6 +64,21 @@ class Experiment:
         self._sampling: dict[str, dict] = {}
         self._backend: dict[tuple[str, str], str] = {}
         self._repo_hash: dict[str, str] = {}
+        self._embedder = None
+
+    def embedder(self):
+        """The configured [embedder], with an on-disk cache under [paths].cache/embeddings."""
+        if self._embedder is None:
+            cfg = self.config["embedder"]
+            self._embedder = CachedEmbedder(OpenAICompatEmbedder(cfg["base_url"], cfg["model"]),
+                                            self._path(self.config["paths"]["cache"]) / "embeddings")
+        return self._embedder
+
+    def retrievers(self) -> dict:
+        """Retriever name -> factory. "embed" uses the configured embedder and query_prefix."""
+        prefix = self.config.get("embedder", {}).get("query_prefix", "")
+        return {"bm25": BM25Retriever,
+                "embed": lambda: EmbeddingRetriever(self.embedder(), query_prefix=prefix)}
 
     def _path(self, p: str) -> Path:
         return Path(p) if Path(p).is_absolute() else self.root / p
@@ -106,7 +123,11 @@ class Experiment:
 
         with tempfile.TemporaryDirectory(prefix="cbench-") as tmp:
             sandbox = make_sandbox(self._path(self.config["repos"][rc.repo_size]), Path(tmp) / "repo")
-            ctx = LEVELS[rc.level](task, load_workspace(sandbox), **_level_options(rc))
+            ws = load_workspace(sandbox)
+            ws.retrievers = {"embed": self.retrievers()["embed"]}
+            ctx = LEVELS[rc.level](task, ws, **_level_options(rc))
+            if rc.retriever == "embed" or rc.agent_variant == "hybrid":
+                perf["embedder"] = self.embedder().name
             messages = render(task, ctx, rc.prompt_arm, rc.prompt_version)
             prompt_tokens = client.count_prompt_tokens(messages)
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
@@ -125,7 +146,8 @@ class Experiment:
             agent = None
             perf["started_at"] = _now()
             if rc.level == "L8":
-                tools = RepoTools(sandbox)
+                tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
+                                                           if rc.agent_variant == "hybrid" else None))
                 agent = run_agent(client, messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking)
@@ -334,17 +356,16 @@ class Experiment:
                  and (not t.repo_sizes or repo_size in t.repo_sizes)]
         out = [f"repo {repo_size}: {len(ws.chunks)} functions/classes, {len(ws.files)} files, "
                f"{len(tasks)} tasks with needed helpers; query = task text"]
+        known = self.retrievers()
         for name in retrievers:
-            make = RETRIEVERS.get(name)
+            make = known.get(name)
             if make is None:
-                out.append(f"\n## {name}\nnot available (known: {', '.join(RETRIEVERS)})")
+                out.append(f"\n## {name}\nnot available (known: {', '.join(known)})")
                 continue
             out.append(f"\n## {name}\n" + validate(make, ws, tasks, naming, decoys)[1])
         return "\n".join(out) + "\n"
 
 
-# Retrievers by config name. "embed" joins once an embedder is configured.
-RETRIEVERS = {"bm25": BM25Retriever}
 
 
 def _variant(rc: RunConfig) -> tuple[str, ...]:

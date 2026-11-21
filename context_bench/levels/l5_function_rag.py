@@ -71,9 +71,11 @@ def parse_queries(reply: str, limit: int = N_QUERIES) -> list[str]:
     raise NotImplementedError
 
 
-def _make_retriever(name: str) -> Retriever:
+def _make_retriever(name: str, ws: Workspace) -> Retriever:
     if name == "bm25":
         return BM25Retriever()
+    if name in ws.retrievers:
+        return ws.retrievers[name]()
     raise NotImplementedError(f"retriever {name!r}")
 
 
@@ -115,8 +117,9 @@ def _render(picked: list[Chunk], ws: Workspace) -> str:
 def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
                   query_mode: str = "task_vs_code", drafter: Drafter | None = None,
                   planner: Planner | None = None) -> ContextBlock:
-    """Implemented: query_mode "task_vs_code" (query = task text). The target file's own chunks are
-    not indexed: the target is shown in full."""
+    """Implemented: query_mode "task_vs_code" (query = task text), with "bm25" or any retriever the
+    runner supplies in ws.retrievers (e.g. "embed"). The target file's own chunks are not indexed:
+    the target is shown in full."""
     if query_mode != "task_vs_code":
         raise NotImplementedError(f"query_mode {query_mode!r}")
     path = task.target_file
@@ -125,7 +128,7 @@ def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
     else:
         target = f"File: {path}\n(This file does not exist yet.)"
     chunks = [c for c in ws.chunks if c.path != path]
-    r = _make_retriever(retriever)
+    r = _make_retriever(retriever, ws)
     r.index([c.qualname for c in chunks], [chunk_text(c) for c in chunks])
     picked = _select(r.search(task.prompt, SEARCH_DEPTH), {c.qualname: c for c in chunks})
     text = target + ("\n\n" + _render(picked, ws) if picked else "")

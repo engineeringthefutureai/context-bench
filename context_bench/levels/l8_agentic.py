@@ -23,7 +23,10 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
+from ..chunking import chunks_from_source
+from ..retrieval.base import chunk_text
 from ..types import ContextBlock, Task
 from ..workspace import Workspace
 
@@ -69,8 +72,6 @@ _VARIANTS = {"grep": ["grep", "list_files", "read_file", "find_references"],
 def _variant_tools(agent_variant: str) -> list[str]:
     if agent_variant not in _VARIANTS:
         raise ValueError(f"unknown agent_variant {agent_variant!r}")
-    if agent_variant == "hybrid":
-        raise NotImplementedError("agent_variant 'hybrid' (semantic_search needs an embedder)")
     return _VARIANTS[agent_variant]
 
 
@@ -115,6 +116,7 @@ def _cap(lines: list[str]) -> list[str]:
 class RepoTools:
     """Read-only tools over the sandbox copy of the repo."""
     root: Path
+    make_retriever: Callable[[], Any] | None = None       # hybrid: builds the semantic_search index
     transcript: list[str] = field(default_factory=list)   # every tool output
 
     def _files(self) -> list[str]:
@@ -246,7 +248,24 @@ class RepoTools:
         return "\n".join(_cap("\n".join(lines).splitlines()))
 
     def semantic_search(self, query: str, k: int = 5) -> str:
-        raise NotImplementedError
+        """Top-k functions/classes by the configured retriever over every .py file's chunks (indexed
+        as chunk_text, like L5), as "path:start-end  qualname", the signature and the first
+        docstring line."""
+        if self.make_retriever is None:
+            raise RuntimeError("semantic_search is not available")
+        if not hasattr(self, "_semantic"):
+            chunks = [c for rel in self._trees()
+                      for c in chunks_from_source((self.root / rel).read_text(), rel)]
+            self._chunks = {c.qualname: c for c in chunks}
+            self._semantic = self.make_retriever()
+            self._semantic.index(list(self._chunks), [chunk_text(c) for c in self._chunks.values()])
+        out = []
+        for qualname, _ in self._semantic.search(query, max(1, min(int(k), 20))):
+            c = self._chunks[qualname]
+            doc = c.docstring.strip().splitlines()[0] if c.docstring.strip() else ""
+            out.append(f"{c.path}:{c.start_line}-{c.end_line}  {qualname}\n    {c.signature}"
+                       + (f"\n    {doc}" if doc else ""))
+        return "\n".join(out) or "(no results)"
 
 
 @dataclass

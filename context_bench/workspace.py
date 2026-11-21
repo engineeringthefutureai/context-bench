@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .chunking import chunks_from_source, iter_py_files
 from .types import Chunk
@@ -17,6 +17,9 @@ class Workspace:
     indexes: dict[tuple[str, str], Any] = field(default_factory=dict)
     # e.g. ("file", "bm25"), ("func", "embed"), ("summary", "embed") -> Retriever
     summaries: dict[str, str] = field(default_factory=dict)  # qualname -> one-line summary
+    # retriever name -> factory for retrievers that need outside resources (e.g. "embed" needs the
+    # configured embedder); set by the runner. BM25 needs none and is built directly.
+    retrievers: dict[str, Callable[[], Any]] = field(default_factory=dict)
 
 
 def load_workspace(repo: Path) -> Workspace:

@@ -45,3 +45,30 @@ def test_validate_on_repo_s_finds_matching_helper_first():
     target = {t.id: t.target_file for t in tasks}
     assert all(not any(d.startswith(target[r["task"]].removesuffix(".py").replace("/", "."))
                        for d in r["top3"]) for r in rows)
+
+
+class _FakeEmbedder:
+    """Bag of letters a-z: deterministic vectors, no server."""
+    name = "fake"
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, texts):
+        import numpy as np
+        self.calls += len(texts)
+        v = np.array([[t.lower().count(ch) for ch in "abcdefghijklmnopqrstuvwxyz"] for t in texts], dtype=np.float32) + 1e-3
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+def test_embedding_retriever_and_cache(tmp_path):
+    from context_bench.embedders import CachedEmbedder
+    from context_bench.retrieval.dense import EmbeddingRetriever
+    inner = _FakeEmbedder()
+    cached = CachedEmbedder(inner, tmp_path)
+    r = EmbeddingRetriever(cached)
+    r.index(["a", "b"], ["zzzz zzz", "aaaa bbb"])
+    assert r.search("aab", k=2)[0][0] == "b" and len(r.search("aab", k=1)) == 1
+    before = inner.calls
+    EmbeddingRetriever(cached).index(["a", "b"], ["zzzz zzz", "aaaa bbb"])   # all from disk
+    assert inner.calls == before
