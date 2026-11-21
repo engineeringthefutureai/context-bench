@@ -129,3 +129,25 @@ def test_thinking_default_from_config_and_override(tmp_path):
     assert {rc.thinking for rc in exp.configs(["L1"], thinking=True)} == {True}
     exp.config["generation"]["thinking"] = True
     assert {rc.thinking for rc in exp.configs(["L1"])} == {True}
+
+
+def test_bad_format_is_failed_but_scored_leniently(tmp_path):
+    from test_pieces5_8 import _reference_reply
+    good = _reference_reply("reuse-002", "shopkit/catalog/models.py")
+    fenced = good.replace('<file path="shopkit/catalog/models.py">', "```python").replace("</file>", "```")
+    exp = _experiment(tmp_path, FakeClient(fenced))
+    from context_bench.types import RunConfig
+    r = exp.run_one(RunConfig("reuse-002", "L1", exp.default_model, 1))
+    assert r.label == "broken" and r.format_status == "bad_format"
+    assert (r.lenient_passed, r.lenient_total, r.lenient_reuse) == (3, 3, True)
+
+
+def test_tool_request_and_rescore(tmp_path):
+    exp = _experiment(tmp_path, FakeClient("Let me check.\n<read_file>\n<path>x.py</path>\n</read_file>"))
+    exp.sweep(["L0"])
+    row = results.load(exp.results_path)[0]
+    assert row["format_status"] == "tool_request" and row["lenient_total"] is None
+    row["format_status"] = None
+    results.rewrite(exp.results_path, [row])
+    assert exp.rescore() == 1 and results.load(exp.results_path)[0]["format_status"] == "tool_request"
+    assert "(asked)" in results.report(exp.results_path)

@@ -28,6 +28,52 @@ def parse_files(text: str) -> dict[str, str]:
     return files
 
 
+_OPEN_RE = re.compile(r'<file\s+path\s*=\s*["\']([^"\']+)["\']\s*>\n?', re.IGNORECASE)
+_CODE_FENCE_RE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+_TOOL_RE = re.compile(r"<(function_calls|invoke|tool_call|read_file|search_files|list_files|"
+                      r"search_code|grep|open_file)\b", re.IGNORECASE)
+_CODE_HINT_RE = re.compile(r"^\s*(def |class |import |from \S+ import )", re.MULTILINE)
+
+
+def parse_files_lenient(text: str, target_file: str) -> dict[str, str]:
+    """For learning only, never for the label: what the model most likely meant when the strict
+    parse found nothing. In order:
+      1. strict <file> blocks;
+      2. <file path=...> openings whose closing tag is missing: content runs to the next opening,
+         or to the end (a wrapping code fence is removed);
+      3. otherwise the last ```python fenced block, taken as the task's target file.
+    Returns {} when there is no code at all."""
+    text = _THINK_RE.sub("", text)
+    if files := parse_files(text):
+        return files
+    openings = list(_OPEN_RE.finditer(text))
+    files = {}
+    for i, m in enumerate(openings):
+        end = openings[i + 1].start() if i + 1 < len(openings) else len(text)
+        body = re.sub(r"</file>\s*$", "", text[m.end():end].strip(), flags=re.IGNORECASE)
+        body = re.sub(r"\n?```\s*$", "", body.strip())
+        if body.strip():
+            files[m.group(1).strip()] = body.rstrip("\n") + "\n"
+    if files:
+        return files
+    blocks = [b for b in _CODE_FENCE_RE.findall(text) if b.strip()]
+    return {target_file: blocks[-1].rstrip("\n") + "\n"} if blocks else {}
+
+
+def format_status(text: str, strict_files: dict[str, str]) -> str:
+    """How the reply relates to the output protocol:
+    "ok" (strict <file> blocks), "tool_request" (pretend tool calls: the model asked to explore),
+    "bad_format" (code present, tags missing or broken), "no_code" (prose only)."""
+    if strict_files:
+        return "ok"
+    text = _THINK_RE.sub("", text)
+    if _TOOL_RE.search(text):
+        return "tool_request"
+    if "```" in text or _OPEN_RE.search(text) or _CODE_HINT_RE.search(text):
+        return "bad_format"
+    return "no_code"
+
+
 def make_sandbox(repo: Path, dst: Path) -> Path:
     """Fresh copy of the repo for one run (dst is replaced if it exists)."""
     if dst.exists():

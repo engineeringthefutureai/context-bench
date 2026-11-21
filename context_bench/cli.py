@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--dry-run", action="store_true", help="write judge dirs, don't call the judge")
 
     sub.add_parser("report", help="label counts per configuration")
+    sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
     return ap
 
 
@@ -73,6 +74,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "run":
         Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run, models=args.model, repo_sizes=args.repo_size,
                                          thinking=args.thinking)
+        return
+    if args.cmd == "rescore":
+        print(f"rescored {Experiment(Path(args.config)).rescore()} runs")
         return
     if args.cmd == "report":
         exp = Experiment(Path(args.config))

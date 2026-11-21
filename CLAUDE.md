@@ -76,7 +76,13 @@ Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `ok`.
 Reuse is a separate field, `reuse_passed` (reuse tasks only): each reuse task has
 `hidden_tests/test_reuse.py`, which spies on the needed helper (`tasks/_shared/reuse_spy.py`) and checks
 the new code really calls it. It is reported apart from the correctness tests, so "correct but
-re-implemented" stays visible. Kept simple on purpose: no duplication detector for now; a
+re-implemented" stays visible.
+
+Output protocol: the label is strict (no valid `<file>` block = failure), but every run records
+`format_status` (`ok` / `bad_format` / `no_code` / `tool_request`). For `bad_format`, the leniently
+extracted code is also run against the hidden tests (`lenient_passed/total`, `lenient_reuse`), for
+learning only. `tool_request` = the model asked to explore (pretend tool calls). `cbench rescore`
+recomputes these from saved responses without calling the model. Kept simple on purpose: no duplication detector for now; a
 "plagiarism scanner" for copied/re-implemented helpers may come later.
 
 ## Grading (blind, comparison-based)
@@ -126,6 +132,7 @@ pip install -e '.[dev]' && pytest
 cbench validate-retrieval --retrievers bm25,embed
 cbench one --task reuse-001 --level L1
 cbench run                       # resumable; --level L1 --level L3 to limit, --dry-run to list what is left
+cbench rescore                   # protocol fields from saved responses, no model calls
 cbench report
 ```
 Model under test: Qwen 3.8 27B, `Qwen3.8-27B-UD-Q6_K_XL.gguf` (KV cache q8_0), 128k context (`config/experiment.toml`);

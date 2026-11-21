@@ -29,7 +29,8 @@ from pathlib import Path
 import httpx
 
 from . import bundle, results
-from .apply import UnsafePath, apply_files, make_sandbox, parse_files, unified_patch
+from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_files,
+                    parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
 from .llm import OpenAICompatClient
@@ -138,6 +139,7 @@ class Experiment:
             except UnsafePath as e:
                 error = f"unsafe path: {e}"
             passed, total, reuse, tests_out = run_hidden_tests(sandbox, task.hidden_tests, self.shared_dir)
+        perf.update(self._protocol(task, rc.repo_size, chat.content, files))
 
         label = "ok" if total > 0 and passed == total else "broken"
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
@@ -152,6 +154,40 @@ class Experiment:
                             result=asdict(result))
         _log(result)
         return result
+
+    def _protocol(self, task: Task, repo_size: str, response: str, files: dict[str, str]) -> dict:
+        """format_status, and when the strict parse found nothing but there is code, the hidden-test
+        result of the leniently extracted code (a separate sandbox; the label is not affected)."""
+        out = {"format_status": format_status(response, files), "lenient_passed": None,
+               "lenient_total": None, "lenient_reuse": None}
+        if out["format_status"] == "ok" or not (lenient := parse_files_lenient(response, task.target_file)):
+            return out
+        with tempfile.TemporaryDirectory(prefix="cbench-lenient-") as tmp:
+            box = make_sandbox(self._path(self.config["repos"][repo_size]), Path(tmp) / "repo")
+            try:
+                apply_files(box, lenient)
+            except UnsafePath:
+                return out
+            p, n, reuse, _ = run_hidden_tests(box, task.hidden_tests, self.shared_dir)
+        out.update(lenient_passed=p, lenient_total=n, lenient_reuse=reuse)
+        return out
+
+    def rescore(self) -> int:
+        """Recompute the output-protocol fields of recorded runs from their saved responses (no model
+        calls): after the parser or classifier changes, or for runs recorded before they existed.
+        Skips runs whose repo has changed since (repo_hash). Rewrites results.jsonl; returns the count."""
+        rows, n = results.load(self.results_path), 0
+        for r in rows:
+            response = self.runs_dir / r["run_id"] / "response.txt"
+            task = self.tasks.get(r["task_id"])
+            if r["label"] == "no_fit" or task is None or not response.is_file() \
+                    or r.get("repo_hash") not in (None, self.repo_hash(r["repo_size"])):
+                continue
+            text = response.read_text()
+            r.update(self._protocol(task, r["repo_size"], text, parse_files(text)))
+            n += 1
+        results.rewrite(self.results_path, rows)
+        return n
 
     def configs(self, levels: list[str] | None = None, models: list[str] | None = None,
                 repo_sizes: list[str] | None = None, thinking: bool | None = None) -> list[RunConfig]:

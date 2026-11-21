@@ -21,6 +21,13 @@ def append(path: Path, result: RunResult) -> None:
         f.write(json.dumps(asdict(result)) + "\n")
 
 
+def rewrite(path: Path, rows: list[dict]) -> None:
+    """Replace the file with these rows (one per run_id), via a temp file so a crash can't truncate it."""
+    tmp = path.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    tmp.replace(path)
+
+
 def load(path: Path) -> list[dict]:
     """All result rows; if a run_id appears twice, the last line wins."""
     if not path.exists():
@@ -56,6 +63,12 @@ def _cell(r: dict) -> str:
         out += " ♻️" if r["reuse_passed"] else " ✗reuse"
     if r["helper_in_context"]:
         out += " 👁"
+    status = r.get("format_status")
+    if status == "bad_format":
+        lenient = f" →{r['lenient_passed']}/{r['lenient_total']}" if r.get("lenient_total") else ""
+        out += f" (fmt{lenient})"
+    elif status in ("no_code", "tool_request"):
+        out += " (asked)" if status == "tool_request" else " (no code)"
     return out
 
 
@@ -124,7 +137,10 @@ def report(path: Path) -> str:
 
     out = ["## Results per task", "",
            "✅ all tests pass · ❌ a test failed · ⛔ no_fit · ⚠️ tool_error · ✂ ran out of output tokens · "
-           "♻️ reused the helper · ✗reuse didn't · 👁 helper was in the context", ""]
+           "♻️ reused the helper · ✗reuse didn't · 👁 helper was in the context", "",
+           "Output protocol (label stays strict): (fmt →p/t) code present but <file> tags broken; p/t is "
+           "what that code scores when extracted leniently · (asked) pretend tool calls, i.e. asked to "
+           "explore · (no code) prose only", ""]
     out += _table(["Task (tier)", *configs],
                   [[f"{t} ({tier})", *(_cell(by_cell[(t, c)]) if (t, c) in by_cell else "—" for c in configs)]
                    for tier, t in tasks])
@@ -138,12 +154,16 @@ def report(path: Path) -> str:
         count = lambda lab: sum(r["label"] == lab for r in rs)
         summary.append([c, len(rs), count("ok"), count("broken"), count("no_fit"), count("tool_error"),
                         sum(map(_ran_out, rs)),
+                        "/".join(str(sum(r.get("format_status") == s for r in rs))
+                                 for s in ("bad_format", "no_code", "tool_request")),
+                        sum(1 for r in rs if r.get("lenient_total") and r["lenient_passed"] == r["lenient_total"]),
                         f"{sum(bool(r['reuse_passed']) for r in ru)}/{len(ru)}" if ru else "–",
                         sum(r["tokens_in"] for r in rs) // len(rs), sum(r["tokens_out"] for r in rs) // len(rs),
                         f"{peak} ({100 * peak / rs[0]['context_window']:.1f}%)",
                         f"{sum(r['latency_s'] for r in rs) / len(rs):.0f}s",
                         f"{sum(r['tool_calls'] for r in rs) / len(rs):.1f}"])
-    out += _table(["Config", "runs", "ok", "broken", "no_fit", "tool_error", "ran out", "reuse ok",
+    out += _table(["Config", "runs", "ok", "broken", "no_fit", "tool_error", "ran out",
+                   "fmt/no code/asked", "lenient ok", "reuse ok",
                    "mean in", "mean out", "max peak", "mean latency", "mean tools"], summary)
 
     ru = [r for r in rows if r["reuse_passed"] is not None]

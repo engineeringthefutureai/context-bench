@@ -112,6 +112,11 @@ class RunResult:
     thinking: bool = True               # was the model allowed to think (RunConfig.thinking)
     map_docs: bool = False              # L6 variant (RunConfig.map_docs)
     repo_hash: str | None = None        # fingerprint of the fixture repo's files when the run happened
+    # output protocol (for learning; the label stays strict)
+    format_status: str | None = None    # ok | bad_format | no_code | tool_request (apply.format_status)
+    lenient_passed: int | None = None   # hidden tests on the leniently extracted code, when the strict
+    lenient_total: int | None = None    #   parse found nothing but there was code (else None)
+    lenient_reuse: bool | None = None
     backend: str = "unknown"            # llama.cpp | vllm | ollama | unknown
     concurrency: int = 1                # runs sharing this server at the time (sweep workers per URL)
     started_at: str | None = None       # ISO UTC, first model call started
