@@ -42,6 +42,7 @@ class ContextBlock:
     text: str
     included: list[str] = field(default_factory=list)   # paths / qualnames placed in context
     retrieved: list[str] = field(default_factory=list)  # what retrieval returned (L4/L5), for recall
+    queries: list[str] = field(default_factory=list)    # search queries used (L5 model_queries)
     extra_tokens_in: int = 0      # side generations, e.g. the draft in draft_then_search
     extra_tokens_out: int = 0
 

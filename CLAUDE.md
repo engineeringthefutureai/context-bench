@@ -52,7 +52,10 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L8 | `l8_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search` |
 
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
-`draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost).
+`draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),
+`model_queries` (a planning call where the model writes up to 5 search queries from the task and
+target file; top 3 per query, merged to 8; planning tokens count toward cost; the planning
+instruction never mentions reuse).
 
 Ablation: `prompt_arm = reuse_hint` on L1 and L5.
 

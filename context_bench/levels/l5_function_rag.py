@@ -12,8 +12,31 @@ Variants:
     "draft_then_search" the model first drafts the code it would write (with L1 context); the draft
                         is searched against the function index; hits go into context. Draft tokens
                         count toward cost (extra_tokens_in / extra_tokens_out).
+    "model_queries"     model-planned retrieval: one planning call where the model, seeing the task
+                        and the target file only (L1 context), writes up to N_QUERIES search queries;
+                        the harness runs each through the retriever, takes the top K_PER_QUERY per
+                        query, merges them (deduplicated, ranked by best score) and keeps TOP_CHUNKS,
+                        the same budget as the other modes. Details below.
 
 Record retrieved qualnames in ContextBlock.retrieved so recall can be computed.
+
+model_queries in detail
+  Planning call: the same system prompt as every run; the user turn is the L1 context and the task,
+  followed by PLAN_INSTRUCTION. PLAN_INSTRUCTION is neutral on purpose: it asks for search queries
+  for code relevant to the change and never mentions reuse, helpers or existing code (that would
+  smuggle in the reuse_hint arm). Thinking follows [generation].thinking, like the final call.
+  Parsing: a JSON list of strings, else one query per non-empty line (bullets/numbering stripped);
+  at most N_QUERIES are used. If nothing parses, fall back to the task text as the only query and
+  say so in the run's error, so the run completes and the fallback stays visible.
+  Cost: the planning call's tokens go into extra_tokens_in / extra_tokens_out (as draft_then_search);
+  latency covers both calls. The planning exchange and the parsed queries are saved in the bundle
+  (transcript.jsonl) so query quality can be inspected; ContextBlock.queries holds the queries.
+  The final call uses the normal template: only <context> differs (target file + retrieved chunks,
+  same format as the other modes).
+  Measured: retrieval_recall, directly comparable with task_vs_code on the same tasks; queries per run
+  and which query found each needed helper (from the bundle).
+  Later, as a separate mode if wanted: planning with the L6 map in view ("map_queries"), so each mode
+  changes one thing.
 """
 from __future__ import annotations
 
@@ -23,11 +46,26 @@ from ..types import ContextBlock, Task
 from ..workspace import Workspace
 
 TOP_CHUNKS = 8
+N_QUERIES = 5          # model_queries: queries used from the planning reply
+K_PER_QUERY = 3        # model_queries: hits taken per query before merging
+
+PLAN_INSTRUCTION = ("Before making the change, list up to {n} search queries for finding code in this "
+                    "repository that is relevant to it. Reply with a JSON list of strings only.")
 
 # (task, L1-style context) -> (draft_text, tokens_in, tokens_out)
 Drafter = Callable[[Task, ContextBlock], tuple[str, int, int]]
+# (task, L1-style context) -> (raw planning reply, tokens_in, tokens_out); the runner supplies it and
+# records the exchange in the bundle
+Planner = Callable[[Task, ContextBlock], tuple[str, int, int]]
+
+
+def parse_queries(reply: str, limit: int = N_QUERIES) -> list[str]:
+    """JSON list of strings, else one query per non-empty line with bullets/numbering stripped;
+    at most `limit`, duplicates removed. [] if nothing usable."""
+    raise NotImplementedError
 
 
 def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
-                  query_mode: str = "task_vs_code", drafter: Drafter | None = None) -> ContextBlock:
+                  query_mode: str = "task_vs_code", drafter: Drafter | None = None,
+                  planner: Planner | None = None) -> ContextBlock:
     raise NotImplementedError

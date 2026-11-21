@@ -53,3 +53,24 @@ produced. Output: an overall ranking and 1-5 scores per dimension. A hand-graded
 - **Thinking on/off.** Measured on the 27B (L0-L3): thinking off passes 9/31 vs 20/31, mostly by
   breaking the output protocol (pretend tool calls, broken <file> tags), not by worse code; 22x fewer
   output tokens. Keep thinking on for results; `--no-thinking` stays available as an arm.
+
+## Retrieval: who decides what to look for
+Three points on one axis, cheapest first. The open question: how much of C's quality does B recover?
+
+| | Who decides what to retrieve | Model calls | Can correct itself |
+|---|---|---|---|
+| A: L5 `task_vs_code` | the harness, from the task text | 1 | no |
+| B: L5 `model_queries` | the model, once, upfront | 2 | no |
+| C: L8 agent | the model, as it goes | up to 16 | yes |
+
+- A's weakness is built in: recall depends on the task's wording, so opaque helpers ("product code"
+  vs `normalize_sku`) may never be found, at least with BM25.
+- B gives the model's urge to explore a channel: with thinking off, partial-context runs often
+  wrote their own queries ("Let me search for how slugs are generated", pretend `search_files`).
+  Same budget as A (8 chunks), same final template; planning tokens count toward cost.
+- C is the upper bound: it can follow references and tell live code from dead (`find_references`,
+  import counts in `list_files`).
+
+Build order: Retriever protocol + BM25 + `cbench validate-retrieval` (recall@k of the planted
+helpers per query mode; for A this needs no model at all) → L5 A (BM25) → L5 B → embedder + embed
+variants → L4 (same retriever, file level) → L8.
