@@ -190,11 +190,12 @@ class Experiment:
         return n
 
     def configs(self, levels: list[str] | None = None, models: list[str] | None = None,
-                repo_sizes: list[str] | None = None, thinking: bool | None = None) -> list[RunConfig]:
+                repo_sizes: list[str] | None = None, thinking: bool | None = None,
+                task_ids: list[str] | None = None) -> list[RunConfig]:
         """Expand [[config]] entries x models x repo sizes x seeds x tasks into RunConfigs.
         A config's optional `categories` and `tiers` keep only matching tasks (e.g. L0: tier 1).
         `levels` / `repo_sizes` keep only those (cbench run --level / --repo-size); `models` replaces the
-        sweep's models. Thinking comes from [generation].thinking (default on), a config's own
+        sweep's models; `task_ids` keeps only those tasks (cbench run --task). Thinking comes from [generation].thinking (default on), a config's own
         `thinking` key, or `thinking` here, which overrides both (cbench run --thinking/--no-thinking)."""
         sweep = self.config["sweep"]
         out = []
@@ -202,11 +203,15 @@ class Experiment:
             if levels and c["level"] not in levels:
                 continue
             tasks = [t for t in sorted(self.tasks.values(), key=lambda t: (t.tier, t.id))
-                     if ("categories" not in c or t.category in c["categories"])
+                     if (not task_ids or t.id in task_ids)
+                     and ("categories" not in c or t.category in c["categories"])
                      and ("tiers" not in c or t.tier in c["tiers"])]
             for model in models or c.get("models", sweep["models"]):
                 sizes = c.get("repo_sizes", sweep["default_repo_sizes"])
-                for size in [s for s in sizes if not repo_sizes or s in repo_sizes]:
+                for size in sweep["default_repo_sizes"]:
+                    if repo_sizes and size not in repo_sizes:
+                        continue
+                    fitting = [t for t in tasks if _runs_on(t, size, sizes, sweep["default_repo_sizes"])]
                     for seed in sweep["seeds"]:
                         out += [RunConfig(task_id=t.id, level=c["level"], model=model, seed=seed,
                                           repo_size=size, retriever=c.get("retriever", "none"),
@@ -217,18 +222,18 @@ class Experiment:
                                           thinking=(thinking if thinking is not None else
                                                     c.get("thinking", self.config["generation"].get("thinking", True))),
                                           map_docs=c.get("map_docs", False))
-                                for t in tasks]
+                                for t in fitting]
         return out
 
     def sweep(self, levels: list[str] | None = None, dry_run: bool = False,
               models: list[str] | None = None, repo_sizes: list[str] | None = None,
-              thinking: bool | None = None) -> None:
+              thinking: bool | None = None, task_ids: list[str] | None = None) -> None:
         """Run every config not already in results.jsonl (or whose repo has changed since: a recorded
         repo_hash that differs from the fixture now); failures aren't written, so they retry.
         A level that isn't implemented yet is skipped (reported once); a server error (timeout,
         connection, HTTP status) skips that run, so the next `cbench run` retries it."""
         recorded = {r["run_id"]: r.get("repo_hash") for r in results.load(self.results_path)}
-        todo = [rc for rc in self.configs(levels, models, repo_sizes, thinking)
+        todo = [rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)
                 if rc.run_id not in recorded
                 or recorded[rc.run_id] not in (None, self.repo_hash(rc.repo_size))]
         done = recorded.keys()
@@ -287,6 +292,16 @@ class Experiment:
     def validate_retrieval(self, retrievers: list[str], repo_size: str = "S") -> str:
         """recall@1/3/8 of planted helpers per retriever, function and file level."""
         raise NotImplementedError
+
+
+def _runs_on(task: Task, size: str, sizes, all_sizes: list[str]) -> bool:
+    """Whether `task` runs on repo `size` for a config whose repo_sizes is `sizes`: a list, or
+    "smallest" = only the smallest repo the task fits (for levels whose prompt doesn't change with the
+    rest of the repo, e.g. L0-L2: a task that fits S runs there once; an M-only task runs on M)."""
+    fits = [s for s in all_sizes if not task.repo_sizes or s in task.repo_sizes]
+    if sizes == "smallest":
+        return bool(fits) and size == fits[0]
+    return size in sizes and size in fits
 
 
 def _level_options(rc: RunConfig) -> dict:

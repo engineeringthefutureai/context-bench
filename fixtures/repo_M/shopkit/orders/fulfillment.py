@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 
 from shopkit.orders.models import Order
+from shopkit.shipping.packaging import format_weight
 from shopkit.utils.collections import chunked, group_by
 
 MAX_ITEMS_PER_PARCEL = 10
@@ -32,3 +33,10 @@ def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> l
         counts = group_by(batch, key=lambda s: s)
         parcels.append(Parcel(order.id, n, [(sku, len(v)) for sku, v in counts.items()]))
     return parcels
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    """Slip packed inside each parcel: order, parcel number, contents and weight."""
+    lines = [f"Order {parcel.order_id} - parcel {parcel.number}", f"Weight: {format_weight(weight_g)}"]
+    lines += [f"  {qty} x {sku}" for sku, qty in parcel.items]
+    return "\n".join(lines)

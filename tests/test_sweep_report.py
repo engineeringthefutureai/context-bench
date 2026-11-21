@@ -151,3 +151,12 @@ def test_tool_request_and_rescore(tmp_path):
     results.rewrite(exp.results_path, [row])
     assert exp.rescore() == 1 and results.load(exp.results_path)[0]["format_status"] == "tool_request"
     assert "(asked)" in results.report(exp.results_path)
+
+
+def test_smallest_repo_and_task_repo_sizes(tmp_path):
+    exp = _experiment(tmp_path, FakeClient(REPLY))
+    l1 = {(rc.task_id, rc.repo_size) for rc in exp.configs(["L1"]) if rc.prompt_arm == "base"}
+    assert ("reuse-002", "S") in l1 and ("reuse-002", "M") not in l1      # S tasks: once, on S
+    assert ("trap-001", "M") in l1 and ("trap-001", "S") not in l1        # M-only task: on M
+    l3 = {(rc.task_id, rc.repo_size) for rc in exp.configs(["L3"])}
+    assert ("trap-001", "S") not in l3 and {("reuse-002", "S"), ("reuse-002", "M")} <= l3

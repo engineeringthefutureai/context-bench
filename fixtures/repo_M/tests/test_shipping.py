@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from shopkit.shipping.carriers import estimated_delivery, tracking_link
-from shopkit.shipping.packaging import BOXES, chargeable_weight_g, dims_weight_g, pick_box
+from shopkit.shipping.packaging import BOXES, chargeable_weight_g, dims_weight_g, format_weight, pick_box
 from shopkit.shipping.rates import TooHeavy, shipping_cents
 from shopkit.shipping.zones import DOMESTIC, EU, REST_OF_WORLD, zone_for_country
 
@@ -40,3 +40,16 @@ def test_rates():
 def test_carriers():
     assert estimated_delivery("ups", "US", date(2026, 11, 20)) == date(2026, 11, 24)
     assert tracking_link("post", " ab12 ") == "https://track.example/post/AB12"
+
+
+def test_format_weight():
+    assert format_weight(1500) == "1.5 kg"
+    assert format_weight(1000) == "1 kg"
+    assert format_weight(1234) == "1.23 kg"
+    assert format_weight(250, "g") == "250 g"
+
+
+def test_packing_slip():
+    from shopkit.orders.fulfillment import Parcel, packing_slip
+    slip = packing_slip(Parcel("o1", 2, [("MUG-1", 3)]), 2500)
+    assert slip == "Order o1 - parcel 2\nWeight: 2.5 kg\n  3 x MUG-1"

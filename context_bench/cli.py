@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--level", action="append", help="only these levels (repeatable)")
     run.add_argument("--model", action="append", help="run these [models.*] instead of [sweep].models")
     run.add_argument("--repo-size", action="append", help="only these repo sizes (repeatable)")
+    run.add_argument("--task", action="append", help="only these tasks (repeatable)")
     run.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None,
                      help="every config with thinking on/off, overriding [generation].thinking")
     run.add_argument("--dry-run", action="store_true", help="list the runs still to do, don't run them")
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "run":
         Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run, models=args.model, repo_sizes=args.repo_size,
-                                         thinking=args.thinking)
+                                         thinking=args.thinking, task_ids=args.task)
         return
     if args.cmd == "rescore":
         print(f"rescored {Experiment(Path(args.config)).rescore()} runs")

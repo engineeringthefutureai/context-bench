@@ -9,7 +9,7 @@ from typing import Literal
 
 Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
 Label = Literal["ok", "broken", "tool_error", "no_fit"]
-Category = Literal["reuse", "cross_file", "convention", "control"]
+Category = Literal["reuse", "cross_file", "convention", "control", "trap"]
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class Task:
     needed_helpers: tuple[str, ...]    # qualnames, e.g. "shopkit.money.format_money"
     hidden_tests: Path                 # directory outside the repo; never shown to the model
     tier: int                          # difficulty ladder 1..6 (see CLAUDE.md); orthogonal to category
+    repo_sizes: tuple[str, ...] = ()   # repos the task applies to; () = all (e.g. trap tasks: M only)
 
 
 @dataclass(frozen=True)

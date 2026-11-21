@@ -27,6 +27,15 @@ def dims_weight_g(length_cm: float, width_cm: float, height_cm: float) -> int:
     return int(-(-grams // 1))
 
 
+def format_weight(grams: int, unit: str = "kg") -> str:
+    """Weight for display on labels, slips and the storefront. unit is "kg" (default), "g" or "lb":
+    kg drops trailing zeros (1500 -> "1.5 kg"), g is whole grams ("250 g"), lb has two decimals
+    (1500 -> "3.31 lb")."""
+    if unit == "g":
+        return f"{grams} g"
+    return f"{round(grams / 1000, 2):g} kg"
+
+
 def chargeable_weight_g(box: Box, contents_g: int) -> int:
     actual = contents_g + box.tare_g
     return max(actual, dims_weight_g(box.length_cm, box.width_cm, box.height_cm))

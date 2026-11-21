@@ -8,6 +8,7 @@ from typing import get_args
 from .types import Category, Task
 
 _FIELDS = {"id", "category", "tier", "target_file", "needed_helpers", "prompt"}
+_OPTIONAL = {"repo_sizes"}
 
 
 def load_tasks(root: Path) -> dict[str, Task]:
@@ -18,7 +19,7 @@ def load_tasks(root: Path) -> dict[str, Task]:
         where = toml_path.relative_to(root)
         if missing := _FIELDS - data.keys():
             raise ValueError(f"{where}: missing {sorted(missing)}")
-        if unknown := data.keys() - _FIELDS:
+        if unknown := data.keys() - _FIELDS - _OPTIONAL:
             raise ValueError(f"{where}: unknown {sorted(unknown)}")
         if data["id"] != toml_path.parent.name:
             raise ValueError(f"{where}: id {data['id']!r} doesn't match its directory")
@@ -32,6 +33,6 @@ def load_tasks(root: Path) -> dict[str, Task]:
         tasks[data["id"]] = Task(
             id=data["id"], category=data["category"], prompt=data["prompt"].strip(),
             target_file=data["target_file"], needed_helpers=tuple(data["needed_helpers"]),
-            hidden_tests=hidden, tier=data["tier"],
+            hidden_tests=hidden, tier=data["tier"], repo_sizes=tuple(data.get("repo_sizes", ())),
         )
     return tasks

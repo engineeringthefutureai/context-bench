@@ -123,6 +123,13 @@ is swappable and recorded per run.
   3 reuse, one helper, name matches task wording · 4 reuse, opaque naming / several helpers ·
   5 convention defined in other files · 6 cross-file feature needing coordinated edits.
   Seed ladder: `control-001`, `control-002`, `reuse-002`, `reuse-001`, `convention-001`, `cross-001`.
+- Trap tasks (`category = "trap"`): the helper's signature/docstring promise something its body no
+  longer does (documentation drift). Correct = reuse it *and* fix it. The outcomes separate without
+  extra machinery: trusting the docs -> broken with reuse; own implementation -> ok without reuse;
+  reuse + fix -> ok with reuse. Each keeps a `solutions/trusting.diff` that must fail. `trap-001`
+  (M only): `format_weight(grams, unit)` documents "lb" but returns kg.
+- Optional `repo_sizes = ["M"]` in task.toml limits a task to some repos. Config `repo_sizes =
+  "smallest"` (L0-L2) runs each task once, on the smallest repo it fits.
 - Every task is verified before commit: the unmodified fixture fails the hidden tests and a reference
   solution passes (`tasks/<id>/solutions/reference.diff`). Tasks that depend on repo context (tier 3+)
   also keep a plausible context-blind solution that fails (`context_blind.diff`). Reuse tasks: the
