@@ -500,9 +500,13 @@ class Experiment:
                                 and (not repo_sizes or r["repo_size"] in repo_sizes)}):
                 mine = [r for r in rows if r["task_id"] == task_id and r["repo_size"] == size
                         and r.get("repo_hash") == self.repo_hash(size)]
-                n = grade.grade_task(self.tasks[task_id], size, mine, repo=self._path(self.config["repos"][size]),
-                                     runs_dir=self.runs_dir, grades_path=self._path(self.config["paths"]["grades"]),
-                                     grading=grading, rubric=rubric, rubric_version=version, dry_run=dry_run)
+                try:
+                    n = grade.grade_task(self.tasks[task_id], size, mine, repo=self._path(self.config["repos"][size]),
+                                         runs_dir=self.runs_dir, grades_path=self._path(self.config["paths"]["grades"]),
+                                         grading=grading, rubric=rubric, rubric_version=version, dry_run=dry_run)
+                except RuntimeError as e:  # one failed judge shouldn't end the pass; rerun with --task later
+                    print(f"{task_id} @{size}: judge failed, skipped: {e}", file=sys.stderr)
+                    continue
                 print(f"{task_id} @{size}: {len(grade.collect_candidates(mine, self.runs_dir))} candidates"
                       + ("" if dry_run else f", {n} runs graded"), file=sys.stderr)
                 graded += n

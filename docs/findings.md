@@ -139,16 +139,56 @@ runs are the ones to quote.
 - **20 of 40 tasks, one trap.** Reuse 10, cross-file 3, convention 3, control 3, trap 1.
 - **One model, one synthetic repo.** No second model yet; shopkit is purpose-built so the model
   can't have memorised it.
-- **One judge.** Code quality comes from one blind Claude Code judge per task (below), not checked
-  by hand yet.
+- **One judge.** Code quality comes from one blind Claude Code judge per task (below). The 5
+  cases where it disagrees with the tests were checked by hand; the rest were not.
 
 ## Judged code quality
 
-*Pending: the blind grading pass over this cycle is running.*
+All 306 graded runs: per task and repo, one blind Claude Code judge ranked every distinct patch
+side by side and scored it 1-5 on correctness, reuse, conventions, scope and readability, without
+knowing how any patch was made. Grades never change test labels.
+
+**The judge agrees with the tests.** Patches that passed rank in the best fifth on average (rank
+percentile 0.22, correctness 4.8/5); failing ones rank near the bottom (0.71, 1.6/5). Its reuse score
+is 4.7 where the reuse spy passed and 1.8 where it failed. It disagrees on 5 of 306, and each time
+it has a point:
+
+- Three patches passed the tests but were poor code: one deleted `pick_list`, `packing_slip` and two
+  serializers and left `# lines 11-19` placeholders (cross-002, L5). One rewrote `Stock` with a lock
+  and a global decimal context (convention-001, L4). One hard-coded `$` instead of reusing
+  `format_money` (reuse-001, L4). **The hidden tests don't catch destructive or out-of-scope edits.**
+  A check that the repo's own test suite still passes after the patch would close that gap.
+- Two failed on one bug in otherwise good code (a syntax slip, a wrong edge case). For one of them
+  the judge's note corrects its own numbers but the stored score stayed 5. That is one data glitch
+  in 306.
+
+**Among passing patches, how the context was built still shows.** Rank percentile among the patches
+for the same task (0 = best):
+
+| Level | Graded | All patches | Passing only | Conventions | Readability |
+|---|---|---|---|---|---|
+| L1 | 27 | 0.70 | 0.45 | 3.3 | 3.5 |
+| L2 | 14 | 0.55 | 0.34 | 4.0 | 4.1 |
+| L3 | 25 | 0.22 | 0.13 | 4.6 | 4.7 |
+| L4 | 46 | 0.36 | 0.23 | 4.2 | 4.3 |
+| L5 | 123 | 0.41 | 0.24 | 4.2 | 4.3 |
+| L6 | 21 | 0.65 | 0.39 | 4.2 | 4.5 |
+| L7 | 50 | 0.25 | **0.12** | **4.8** | 4.7 |
+
+(Scores in the last two columns are means over passing patches.)
+
+L3 and L7 write the best passing code as well as the most of it, and L7 scores highest on following
+the shop's conventions, matching finding 2. Search levels are close behind on passing patches
+(0.23-0.24) but produce more failures. On the trap task the judge put L7 grep's reuse-and-fix first
+of 12 and the context-blind L2 conversion second: it ranks working code above reuse, as the rubric
+asks.
+
+The small per-configuration counts (2-20 graded runs) make per-variant judged differences noise for
+now; the level pattern is the signal. `cbench report` has the per-configuration table.
 
 ## Next
 
-1. Finish grading and add its results here.
+1. Add a regression check: the repo's own tests must still pass after a patch (catches destructive edits).
 2. Tune speculative decoding (4-5 draft tokens) on a thinking-on sample.
 3. Final round: `cbench run --clean --thinking`, one run at a time, server restarted before each.
 4. More tasks: 10 reuse, 5 cross-file, 3 convention, 3 control, and a second trap.
