@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 # StringUtils - common string functions for the storefront
-# author: dev team, 2017
+# author: dev team
 #
 import re
 import string

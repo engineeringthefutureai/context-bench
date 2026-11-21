@@ -24,6 +24,8 @@ class ChatResult:
     tokens_in: int = 0
     tokens_out: int = 0
     latency_s: float = 0.0
+    prefill_s: float | None = None    # prompt processing time, if the server reports it (llama.cpp)
+    decode_s: float | None = None     # generation time, if the server reports it (llama.cpp)
     finish_reason: str = ""
     message: dict = field(default_factory=dict)   # raw assistant message, for tool loops
 
@@ -48,14 +50,17 @@ class OpenAICompatClient:
         self._http = httpx.Client(base_url=base_url, headers=headers, timeout=timeout, transport=transport)
 
     def chat(self, messages: list[dict], *, temperature: float | None, seed: int,
-             max_tokens: int, tools: list[dict] | None = None) -> ChatResult:
+             max_tokens: int, tools: list[dict] | None = None, thinking: bool = True) -> ChatResult:
         """POST /v1/chat/completions; return content, tool calls and token usage.
-        temperature=None omits the field so the server default applies."""
+        temperature=None omits the field so the server default applies. thinking=False asks the chat
+        template to skip reasoning (enable_thinking=false; honoured by vLLM and llama.cpp --jinja)."""
         body = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "seed": seed}
         if temperature is not None:
             body["temperature"] = temperature
         if tools:
             body["tools"] = tools
+        if not thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         start = time.monotonic()
         resp = self._http.post("/v1/chat/completions", json=body)
         resp.raise_for_status()
@@ -63,6 +68,7 @@ class OpenAICompatClient:
         choice = data["choices"][0]
         msg = choice["message"]
         usage = data.get("usage") or {}
+        timings = data.get("timings") or {}         # llama.cpp only
         return ChatResult(
             content=msg.get("content") or "",
             reasoning=msg.get("reasoning_content") or msg.get("reasoning") or "",   # llama.cpp | Ollama
@@ -70,9 +76,22 @@ class OpenAICompatClient:
             tokens_in=usage.get("prompt_tokens", 0),
             tokens_out=usage.get("completion_tokens", 0),
             latency_s=time.monotonic() - start,
+            prefill_s=timings["prompt_ms"] / 1000 if "prompt_ms" in timings else None,
+            decode_s=timings["predicted_ms"] / 1000 if "predicted_ms" in timings else None,
             finish_reason=choice.get("finish_reason") or "",
             message=msg,
         )
+
+    def backend(self) -> str:
+        """Which server this is, from endpoints only it has: llama.cpp (/props), Ollama
+        (/api/version), vLLM (/version); else "unknown"."""
+        for path, name in (("/props", "llama.cpp"), ("/api/version", "ollama"), ("/version", "vllm")):
+            try:
+                if self._http.get(path).status_code == 200:
+                    return name
+            except httpx.HTTPError:
+                pass
+        return "unknown"
 
     def server_sampling(self) -> dict:
         """Effective default sampling settings (temperature, top_p, top_k, min_p, ...), e.g. from
@@ -97,10 +116,17 @@ class OpenAICompatClient:
 
     def count_prompt_tokens(self, messages: list[dict]) -> int:
         """Tokens of the full chat prompt as the server will see it (chat template applied), via
-        llama.cpp /apply-template + /tokenize; falls back to counting the raw message text."""
+        llama.cpp /apply-template + /tokenize, else vLLM's /tokenize with messages; falls back to
+        counting the raw message text."""
         try:
             resp = self._http.post("/apply-template", json={"messages": messages})
             resp.raise_for_status()
             return self.count_tokens(resp.json()["prompt"])
+        except (httpx.HTTPError, ValueError, KeyError):
+            pass
+        try:
+            resp = self._http.post("/tokenize", json={"model": self.model, "messages": messages})
+            resp.raise_for_status()
+            return int(resp.json()["count"])
         except (httpx.HTTPError, ValueError, KeyError):
             return sum(self.count_tokens(m.get("content") or "") + 8 for m in messages)

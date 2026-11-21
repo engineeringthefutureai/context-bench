@@ -58,11 +58,19 @@ class RunConfig:
     agent_variant: str = "none"      # none | grep | hybrid  (L8)
     prompt_arm: str = "base"         # base | reuse_hint
     temperature: float | None = None  # None = server default (not sent)
+    thinking: bool = True            # False: chat_template_kwargs enable_thinking=false (Qwen templates)
+    map_docs: bool = False           # L6 variant: show each entry's first docstring line in the map
+
+    # Fields added after results existed: left out of run_id while at their default, so older runs
+    # keep their ids.
+    _LATE_DEFAULTS = {"thinking": True, "map_docs": False}
 
     @property
     def run_id(self) -> str:
         """Stable hash of all fields; used to resume sweeps."""
-        blob = json.dumps(asdict(self), sort_keys=True)
+        fields = {k: v for k, v in asdict(self).items()
+                  if not (k in self._LATE_DEFAULTS and v == self._LATE_DEFAULTS[k])}
+        blob = json.dumps(fields, sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
@@ -100,3 +108,13 @@ class RunResult:
     tool_calls: int
     patch_path: str | None
     error: str | None = None
+    # performance (added 2026-11-20; absent in older rows)
+    thinking: bool = True               # was the model allowed to think (RunConfig.thinking)
+    map_docs: bool = False              # L6 variant (RunConfig.map_docs)
+    repo_hash: str | None = None        # fingerprint of the fixture repo's files when the run happened
+    backend: str = "unknown"            # llama.cpp | vllm | ollama | unknown
+    concurrency: int = 1                # runs sharing this server at the time (sweep workers per URL)
+    started_at: str | None = None       # ISO UTC, first model call started
+    finished_at: str | None = None      # ISO UTC, last model call finished
+    prefill_s: float | None = None      # prompt processing time, if the server reports it
+    decode_s: float | None = None       # generation time, if the server reports it

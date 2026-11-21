@@ -1,4 +1,4 @@
-# TaxHelper - flat tax rates per state (v1). Rates as fractions.
+# TaxHelper - tax rates per state. Rates as fractions.
 
 STATE_TAX = {
     'CA': 0.0725, 'NY': 0.04, 'TX': 0.0625, 'WA': 0.065, 'FL': 0.06, 'IL': 0.0625,

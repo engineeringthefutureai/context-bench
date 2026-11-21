@@ -1,6 +1,6 @@
-# report generation - builds HTML tables for the old admin panel
+# report generation - builds HTML tables for the admin panel
 
-from shopkit.legacy_v1.StringUtils import formatPrice, padLeft
+from shopkit.common.StringUtils import formatPrice, padLeft
 
 
 class ReportGenerator(object):
@@ -40,7 +40,7 @@ class ReportGenerator(object):
 
 
 def salesReport(orders):
-    """orders: list of v1 order dicts"""
+    """orders: list of order dicts (see OrderManager)"""
     rg = ReportGenerator('Sales Report')
     rg.setHeaders(['Order', 'Items', 'Total'])
     grandTotal = 0.0

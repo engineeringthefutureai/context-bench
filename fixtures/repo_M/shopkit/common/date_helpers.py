@@ -1,4 +1,4 @@
-# date helpers v1 - uses time tuples, not datetime
+# date helpers
 import time
 
 SECONDS_PER_DAY = 86400

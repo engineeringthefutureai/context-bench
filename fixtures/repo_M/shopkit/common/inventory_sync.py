@@ -1,7 +1,7 @@
-# nightly inventory sync with the old warehouse system (flat file, pipe-separated)
+# nightly inventory sync with the warehouse system (flat file, pipe-separated)
 # line format: SKU|QTY|LOCATION
 
-from shopkit.legacy_v1.StringUtils import cleanSKU
+from shopkit.common.StringUtils import cleanSKU
 
 LOW_STOCK = 3
 stockLevels = {}

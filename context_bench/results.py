@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from dataclasses import asdict
 from pathlib import Path
 
@@ -37,6 +38,8 @@ def config_label(r: dict) -> str:
     '@M' etc. for any repo other than S."""
     parts = [r["level"]] + [r[k] for k in ("retriever", "query_mode", "agent_variant") if r[k] != "none"]
     return (" ".join(parts) + ("+hint" if r["prompt_arm"] != "base" else "")
+            + ("+docs" if r.get("map_docs") else "")
+            + (" nothink" if r.get("thinking") is False else "")
             + (f" @{r['repo_size']}" if r["repo_size"] != "S" else ""))
 
 
@@ -54,6 +57,50 @@ def _cell(r: dict) -> str:
     if r["helper_in_context"]:
         out += " 👁"
     return out
+
+
+def _busy_seconds(rows: list[dict]) -> float:
+    """Wall time during which at least one of these runs was calling the model: the union of their
+    [started_at, finished_at] spans, so gaps between sweeps don't count."""
+    spans = sorted((datetime.fromisoformat(r["started_at"]), datetime.fromisoformat(r["finished_at"]))
+                   for r in rows if r.get("started_at") and r.get("finished_at"))
+    total, end = 0.0, None
+    for start, finish in spans:
+        if end is None or start > end:
+            total += (finish - start).total_seconds()
+            end = finish
+        elif finish > end:
+            total += (finish - end).total_seconds()
+            end = finish
+    return total
+
+
+def _rate(tokens: int, seconds: float) -> str:
+    return f"{tokens / seconds:.1f}" if seconds else "–"
+
+
+def performance(rows: list[dict]) -> list[str]:
+    """Per model and backend: tokens/s per request (output tokens / model-call time), combined
+    tokens/s (all output / busy wall time, which counts concurrent requests once), concurrency, and
+    the server's own prefill/decode split where it reports one (llama.cpp)."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        if r["label"] != "no_fit" and r["latency_s"]:
+            groups.setdefault((r["model"], r.get("backend", "unknown")), []).append(r)
+    table = []
+    for (model, backend), rs in sorted(groups.items()):
+        out = sum(r["tokens_out"] for r in rs)
+        timed = [r for r in rs if r.get("started_at")]
+        dec = [r for r in rs if r.get("decode_s")]
+        pre = [r for r in rs if r.get("prefill_s")]
+        conc = sorted({r.get("concurrency", 1) for r in rs})
+        table.append([model, backend, len(rs), "/".join(map(str, conc)), f"{out:,}",
+                      _rate(out, sum(r["latency_s"] for r in rs)),
+                      _rate(sum(r["tokens_out"] for r in timed), _busy_seconds(timed)) if timed else "–",
+                      _rate(sum(r["tokens_in"] for r in pre), sum(r["prefill_s"] for r in pre)) if pre else "–",
+                      _rate(sum(r["tokens_out"] for r in dec), sum(r["decode_s"] for r in dec)) if dec else "–"])
+    return _table(["Model", "backend", "runs", "concurrency", "output tokens", "tok/s per request",
+                   "tok/s combined", "prefill tok/s", "decode tok/s"], table)
 
 
 def _table(header: list[str], rows: list[list]) -> list[str]:
@@ -108,6 +155,12 @@ def report(path: Path) -> str:
             vis.append([name, len(group), sum(bool(r["reuse_passed"]) for r in group),
                         sum(r["label"] == "ok" for r in group)])
         out += _table(["", "reuse runs", "reused", "tests ok"], vis)
+
+    out += ["", "## Performance per model", "",
+            "Per request = output tokens / model-call time (thinking included). Combined = all output /"
+            " wall time the server was busy, so concurrent requests count once. backend, concurrency and"
+            " combined exist only for runs recorded since 2026-11-20 (older rows: unknown / 1 / –).", ""]
+    out += performance(rows)
 
     errors = [r for r in rows if r.get("error")]
     if errors:

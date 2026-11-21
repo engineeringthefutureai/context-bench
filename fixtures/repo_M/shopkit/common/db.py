@@ -1,5 +1,5 @@
-# tiny "database" layer used by v1 before the move to services.
-# tables are dicts of dicts kept in module globals.
+# tiny storage layer: tables are dicts of dicts kept in module globals.
+
 
 TABLES = {'products': {}, 'customers': {}, 'orders': {}}
 _nextId = {'products': 1, 'customers': 1, 'orders': 1}

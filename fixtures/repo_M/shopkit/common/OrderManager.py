@@ -1,11 +1,11 @@
-# OrderManager - order handling for v1 checkout
+# OrderManager - order handling for checkout
 #
 # orders are plain dicts:
 #   {'orderId': 'A1', 'items': [{'sku': .., 'qty': .., 'price': 12.5}], 'status': 'NEW', 'coupon': None}
 # prices are floats (dollars)
 
 import time
-from shopkit.legacy_v1.StringUtils import cleanSKU, formatPrice
+from shopkit.common.StringUtils import cleanSKU, formatPrice
 
 ORDERS = {}
 STATUS_NEW = 'NEW'

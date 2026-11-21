@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .chunking import iter_py_files
+from .chunking import chunks_from_source, iter_py_files
 from .types import Chunk
 
 
@@ -20,8 +20,7 @@ class Workspace:
 
 
 def load_workspace(repo: Path) -> Workspace:
-    """Read every source file and extract chunks. Indexes are added by the levels that need them.
-
-    Chunks stay empty until chunking.extract_chunks is implemented (needed from L5/L6/L7 on)."""
+    """Read every source file and extract chunks. Indexes are added by the levels that need them."""
     files = {p.relative_to(repo).as_posix(): p.read_text() for p in iter_py_files(repo)}
-    return Workspace(repo=repo, files=files, chunks=[])
+    chunks = [c for path, text in files.items() for c in chunks_from_source(text, path)]
+    return Workspace(repo=repo, files=files, chunks=chunks)

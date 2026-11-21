@@ -22,11 +22,16 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--query-mode", default="none")
     one.add_argument("--agent-variant", default="none")
     one.add_argument("--prompt-arm", default="base")
+    one.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None,
+                     help="override [generation].thinking")
+    one.add_argument("--map-docs", action="store_true", help="L6: docstring first lines in the map")
 
     run = sub.add_parser("run", help="full sweep from config (resumable)")
     run.add_argument("--level", action="append", help="only these levels (repeatable)")
     run.add_argument("--model", action="append", help="run these [models.*] instead of [sweep].models")
-    run.add_argument("--repo-size", action="append", help="run these [repos] instead of [sweep] sizes")
+    run.add_argument("--repo-size", action="append", help="only these repo sizes (repeatable)")
+    run.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None,
+                     help="every config with thinking on/off, overriding [generation].thinking")
     run.add_argument("--dry-run", action="store_true", help="list the runs still to do, don't run them")
 
     idx = sub.add_parser("index", help="build caches, e.g. function summaries")
@@ -57,13 +62,17 @@ def main(argv: list[str] | None = None) -> None:
         rc = RunConfig(task_id=args.task, level=args.level, model=args.model or exp.default_model,
                        seed=args.seed, repo_size=args.repo_size, retriever=args.retriever,
                        query_mode=args.query_mode, agent_variant=args.agent_variant,
-                       prompt_arm=args.prompt_arm)
+                       prompt_arm=args.prompt_arm,
+                       thinking=(args.thinking if args.thinking is not None
+                                 else exp.config["generation"].get("thinking", True)),
+                       map_docs=args.map_docs)
         result = exp.run_one(rc)
         results.append(exp.results_path, result)
         print(json.dumps(asdict(result), indent=2))
         return
     if args.cmd == "run":
-        Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run, models=args.model, repo_sizes=args.repo_size)
+        Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run, models=args.model, repo_sizes=args.repo_size,
+                                         thinking=args.thinking)
         return
     if args.cmd == "report":
         exp = Experiment(Path(args.config))

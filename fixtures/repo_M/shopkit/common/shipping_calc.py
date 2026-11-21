@@ -1,4 +1,4 @@
-# shipping cost calculation (v1)
+# shipping cost calculation
 # weights are in POUNDS, prices returned as float dollars
 
 FREE_SHIPPING_LIMIT = 75.0

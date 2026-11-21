@@ -40,3 +40,16 @@ produced. Output: an overall ranking and 1-5 scores per dimension. A hand-graded
 - Level modules are self-contained; duplication between them is intentional for readability.
 - No duplication detector for now (simple first). Reuse = a spy-based hidden test; the judge covers how a
   non-reusing patch re-implemented things. A "plagiarism scanner" may come later.
+
+## Later (noted, not scheduled)
+- **Tasks that trip full context (L3).** On repo M (~37k tokens) the 27B at L3 passes everything,
+  decoys and dead code included (2026-11-20). Once the core levels exist, design prompts where
+  seeing everything is not enough (e.g. many plausible candidates, conflicting conventions). If L3
+  still wins on quality, the comparison becomes efficiency: tokens_in and latency per passing run.
+- **Trap reuse tasks** (with L6): a helper whose signature/docstring promises one thing while its
+  body has drifted (ignored parameter, stale docstring). Correct = reuse it *and* fix it. Signature-
+  only context (L6) should fall for it; body-level context (L3, L5, L7, L8) can notice. Needs an
+  M-only helper, so the task runs on repo M only.
+- **Thinking on/off.** Measured on the 27B (L0-L3): thinking off passes 9/31 vs 20/31, mostly by
+  breaking the output protocol (pretend tool calls, broken <file> tags), not by worse code; 22x fewer
+  output tokens. Keep thinking on for results; `--no-thinking` stays available as an arm.

@@ -1,7 +1,7 @@
-# CustomerUtils - customer helpers from the v1 account pages
+# CustomerUtils - customer helpers for the account pages
 
-from shopkit.legacy_v1 import db
-from shopkit.legacy_v1.StringUtils import isEmail, toTitleCase
+from shopkit.common import db
+from shopkit.common.StringUtils import isEmail, toTitleCase
 
 VIP_THRESHOLD = 1000.0      # lifetime spend, dollars
 _cache = {}

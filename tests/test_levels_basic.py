@@ -45,3 +45,15 @@ def test_l2_relative_submodule_and_test_file():
     assert LEVELS["L2"](_task("pkg/a/target.py"), ws).included == [
         "pkg/a/target.py", "pkg/a/sib.py", "pkg/b.py", "pkg/a/sub/deep.py", "pkg/c/__init__.py",
         "tests/test_target.py"]
+
+
+def test_l6_map_signatures_with_and_without_docs():
+    from context_bench.levels.l6_repo_map import build_context as l6
+    task, ws = TASKS["reuse-002"], WS
+    plain, docs = l6(task, ws).text, l6(task, ws, docs=True).text
+    assert plain.startswith("File: shopkit/catalog/models.py\n```python")
+    assert "  def slug_for_title(title: str) -> str\n" in plain
+    assert "  def slug_for_title(title: str) -> str  # URL slug for a product or campaign title." in docs
+    assert "    fields: sku: str, qty: int, unit_cents: int" in plain       # dataclass fields shown
+    assert "slug_for_title(self.title)" not in plain and "return " not in plain.split("Repository map")[1]
+    assert "shopkit/catalog/models.py\n  " not in plain.split("Repository map")[1]   # target not repeated
