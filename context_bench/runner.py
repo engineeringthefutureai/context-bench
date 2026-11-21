@@ -483,6 +483,29 @@ class Experiment:
             print(f"{len(failed)} runs failed with an unexpected error (not recorded; rerun to retry): "
                   + ", ".join(failed), file=sys.stderr)
 
+    def grade(self, task_ids: list[str] | None = None, dry_run: bool = False) -> int:
+        """cbench grade: one blind judge per task and repo over the patches of the current prompt version
+        on the fixture as it is now (grade.py). Returns the number of runs graded."""
+        from . import grade
+        grading = self.config["grading"]
+        rubric = self._path(grading["rubric"])
+        version = (re.search(r"rubric_version:\s*(\S+)", rubric.read_text()) or [None, "?"])[1]
+        rows = [r for r in results.load(self.results_path)
+                if r.get("prompt_version", 1) == PROMPT_VERSION and r["task_id"] in self.tasks
+                and (not task_ids or r["task_id"] in task_ids)]
+        graded = 0
+        for task_id in sorted({r["task_id"] for r in rows}):
+            for size in sorted({r["repo_size"] for r in rows if r["task_id"] == task_id}):
+                mine = [r for r in rows if r["task_id"] == task_id and r["repo_size"] == size
+                        and r.get("repo_hash") == self.repo_hash(size)]
+                n = grade.grade_task(self.tasks[task_id], size, mine, repo=self._path(self.config["repos"][size]),
+                                     runs_dir=self.runs_dir, grades_path=self._path(self.config["paths"]["grades"]),
+                                     grading=grading, rubric=rubric, rubric_version=version, dry_run=dry_run)
+                print(f"{task_id} @{size}: {len(grade.collect_candidates(mine, self.runs_dir))} candidates"
+                      + ("" if dry_run else f", {n} runs graded"), file=sys.stderr)
+                graded += n
+        return graded
+
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""
         raise NotImplementedError

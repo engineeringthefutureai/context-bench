@@ -94,9 +94,14 @@ def main(argv: list[str] | None = None) -> None:
         exp = Experiment(Path(args.config))
         print(exp.validate_retrieval(args.retrievers.split(","), args.repo_size), end="")
         return
+    if args.cmd == "grade":
+        exp = Experiment(Path(args.config))
+        n = exp.grade(args.task, dry_run=args.dry_run)
+        print(f"judge dirs written to {exp.config['grading']['work_dir']}" if args.dry_run else f"graded {n} runs")
+        return
     if args.cmd == "report":
         exp = Experiment(Path(args.config))
-        print(results.report(exp.results_path), end="")
+        print(results.report(exp.results_path, exp._path(exp.config["paths"]["grades"])), end="")
         return
     raise NotImplementedError(f"command '{args.cmd}' not implemented yet")
 

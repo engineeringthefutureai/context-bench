@@ -152,7 +152,7 @@ def embedder_performance(rows: list[dict]) -> list[str]:
                    "tokens/s", "texts/s"], table) if table else []
 
 
-def report(path: Path) -> str:
+def report(path: Path, grades_path: Path | None = None) -> str:
     """Label counts and reuse rate per configuration, reuse when the helper was seen vs not
     seen, and usage per configuration: mean tokens in/out, max peak_ctx_tokens (and % of the
     window), latency, tool calls. Plus a task x configuration matrix. Markdown."""
@@ -226,6 +226,14 @@ def report(path: Path) -> str:
                 " and queries), share served from the on-disk cache, time waiting on the server, and its"
                 " throughput while busy.", ""]
         out += emb
+
+    if grades_path is not None:
+        from .grade import report as grade_report
+        if judged := grade_report(rows, grades_path):
+            out += ["", "## Judged quality (blind, comparison-based)", "",
+                    "Per configuration, over tasks with more than one distinct patch: mean rank percentile among"
+                    " the candidates for the same task (0 = best) and mean 1-5 scores. Labels are not affected.", ""]
+            out += judged
 
     errors = [r for r in rows if r.get("error")]
     if errors:
