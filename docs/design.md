@@ -98,3 +98,12 @@ decoys `cleanSKU` (dead) and `sku_code` (dead) right behind it, and the agent pi
 Search surfaces candidates; judging them is the model's job (decoys in results are not a retrieval
 failure). Hybrid used semantic_search once per reuse/trap task and was cheaper than grep on average
 (32k vs 40k input tokens), finishing early when the first query hit.
+
+**L5 model_queries (thinking off, prompt v3, S+M, 2026-11-21).** Passing: bm25 7/13 (task_vs_code
+7/13), embed 8/13 (6/13). Recall moves, pass rate barely: reuse-001 on M goes from recall 0.0 to
+0.5 (bm25) / 1.0 (embed) - the model's queries ("product code clean normalize sku format",
+"format_money cents invoice line_total") find what the task text can't. The remaining failures are
+the single-shot thinking-off ones (format, sloppy code, trusting the trap helper: 2/4 with reuse in
+every L5 variant even with its body in context). The model writes queries like grep patterns
+("make_slug|slugify|to_slug", "search: def format_weight") and guesses plausible names from priors.
+Cost: ~3k input tokens and ~20 s per run vs L8 hybrid's 32k and 64 s.
