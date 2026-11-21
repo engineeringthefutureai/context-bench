@@ -7,7 +7,8 @@ of building the model's context (the levels below). For each run it records:
 
 - **Correctness:** do the task's hidden tests pass?
 - **Reuse:** did the new code actually call the existing project helper the task needs? (a hidden reuse test)
-- **Visibility:** was the needed helper's definition actually in what the model saw (`helper_in_context`)?
+- **Visibility:** did the model see the needed helper? `helper_in_context` (its def line in any form:
+  source, L6 signature, tool output) and `helper_body_in_context` (its full source, so it could see what it does).
 - **Cost:** input/output tokens, latency, tool calls.
 
 The harness measures; it doesn't argue for an outcome. Implement every level as well as it can

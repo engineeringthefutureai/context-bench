@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -44,15 +47,24 @@ class CachedEmbedder:
         self.inner, self.name = inner, inner.name
         self.dir = Path(cache_dir) / inner.name.replace("/", "_").replace(":", "_")
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()      # sweep workers share one instance
 
     def _path(self, text: str) -> Path:
         return self.dir / (hashlib.sha256(text.encode()).hexdigest()[:32] + ".npy")
 
+    def _save(self, path: Path, v: np.ndarray) -> None:
+        """Write to a temp file and rename, so a reader never sees a half-written vector."""
+        fd, tmp = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            np.save(f, v)
+        os.replace(tmp, path)
+
     def embed(self, texts: list[str]) -> np.ndarray:
-        cached = {t: np.load(self._path(t)) for t in set(texts) if self._path(t).is_file()}
-        missing = [t for t in dict.fromkeys(texts) if t not in cached]
-        if missing:
-            for t, v in zip(missing, self.inner.embed(missing)):
-                np.save(self._path(t), v)
-                cached[t] = v
+        with self._lock:     # one embedding pass at a time: no duplicate work on a cold cache
+            cached = {t: np.load(self._path(t)) for t in set(texts) if self._path(t).is_file()}
+            missing = [t for t in dict.fromkeys(texts) if t not in cached]
+            if missing:
+                for t, v in zip(missing, self.inner.embed(missing)):
+                    self._save(self._path(t), v)
+                    cached[t] = v
         return np.stack([cached[t] for t in texts]) if texts else np.zeros((0, 0), dtype=np.float32)

@@ -1,0 +1,72 @@
+"""Regression tests for the 2026-11-21 code review findings."""
+import json
+import threading
+from pathlib import Path
+
+import numpy as np
+
+from context_bench.apply import parse_files_lenient
+from context_bench.levels import LEVELS
+from context_bench.levels.l5_function_rag import parse_queries
+from context_bench.runner import _had_tool_calls, _helper_body_visible, _helper_visible, _recall
+from context_bench.tasks import load_tasks
+from context_bench.types import ContextBlock
+from context_bench.workspace import load_workspace
+
+ROOT = Path(__file__).resolve().parents[1]
+TASKS = load_tasks(ROOT / "tasks")
+M = load_workspace(ROOT / "fixtures" / "repo_M")
+
+
+def test_embedding_cache_is_atomic_and_thread_safe(tmp_path):
+    from context_bench.embedders import CachedEmbedder
+    class Slow:
+        name = "slow"
+        calls = 0
+        def embed(self, texts):
+            Slow.calls += len(texts)
+            return np.ones((len(texts), 4), dtype=np.float32) / 2
+    cached = CachedEmbedder(Slow(), tmp_path)
+    texts = [f"chunk {i}" for i in range(50)]
+    threads = [threading.Thread(target=cached.embed, args=(texts,)) for _ in range(4)]
+    [t.start() for t in threads]; [t.join() for t in threads]
+    assert Slow.calls == 50                     # embedded once, not once per thread
+    assert not list(cached.dir.glob("*.tmp")) and len(list(cached.dir.glob("*.npy"))) == 50
+
+
+def test_rescore_keeps_tool_request_from_the_raw_message(tmp_path):
+    t = tmp_path / "transcript.jsonl"
+    t.write_text(json.dumps({"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "x"}]}}) + "\n")
+    assert _had_tool_calls(t, "L1") and not _had_tool_calls(t, "L8")
+    assert not _had_tool_calls(tmp_path / "missing.jsonl", "L1")
+
+
+def test_lenient_unclosed_file_block_drops_both_fence_lines():
+    assert parse_files_lenient('<file path="a.py">\n```python\nx = 1\n```', "t.py") == {"a.py": "x = 1\n"}
+
+
+def test_parse_queries_skips_brackets_in_prose():
+    assert parse_queries('Queries for [cart]:\n["csv export", "money format"]') == ["csv export", "money format"]
+    assert parse_queries('[1, 2]\n["real query"]') == ["real query"]
+
+
+def test_visibility_loose_and_strict_are_consistent_across_levels():
+    trap = TASKS["trap-001"]
+    l6 = LEVELS["L6"](trap, M)                       # signatures only
+    assert _helper_visible(trap, l6) and not _helper_body_visible(trap, l6, M)
+    grep_line = ContextBlock(text="shopkit/shipping/packaging.py:30: def format_weight(grams: int, unit: str = \"kg\") -> str:")
+    assert _helper_visible(trap, grep_line) and not _helper_body_visible(trap, grep_line, M)
+    l3 = LEVELS["L3"](trap, M)
+    assert _helper_visible(trap, l3) and _helper_body_visible(trap, l3, M)
+    decorated = ContextBlock(text="  @staticmethod def format_weight(grams)")
+    assert _helper_visible(trap, decorated)
+
+
+def test_recall_resolves_the_defining_file():
+    trap = TASKS["trap-001"]
+    by_file = ContextBlock(text="", retrieved=["shopkit/shipping/packaging.py"])
+    assert _recall(trap, by_file, M) == 1.0
+    method_task = trap.__class__(**{**trap.__dict__, "needed_helpers": ("shopkit.orders.models.Order.add_line",)}) \
+        if any(c.qualname == "shopkit.orders.models.Order.add_line" for c in M.chunks) else None
+    if method_task:
+        assert _recall(method_task, ContextBlock(text="", retrieved=["shopkit/orders/models.py"]), M) == 1.0

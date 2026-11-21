@@ -99,7 +99,8 @@ class RunResult:
     sampling: dict               # what the server actually used (llm.server_sampling())
     repo_size: str
     ctx_fits: bool               # false -> label "no_fit"; never truncate silently
-    helper_in_context: bool | None  # was every needed helper's definition visible? None: task needs none
+    helper_in_context: bool | None  # every needed helper's def line seen in any form (signature,
+                                    #   source, tool output)? None: task needs none
     retrieval_recall: float | None
     label: str
     reuse_passed: bool | None    # reuse tasks: did test_reuse.py pass? None for other tasks
@@ -132,6 +133,8 @@ class RunResult:
     prompt_version: int = 1             # system prompt version (absent in older rows = 1)
     # input-token split for cost (added 2026-11-21; absent in older rows)
     tokens_cached: int | None = None    # server-reported prefix-cache hits, summed; None: not reported
+    helper_body_in_context: bool | None = None  # strict visibility: each needed helper's full source
+                                        #   was in view (helper_in_context also counts signatures)
     tokens_cacheable: int = 0           # input tokens that repeat an earlier turn's prompt exactly (tool
                                         #   loops: each turn resends the previous prompt), i.e. what any
                                         #   prefix-caching provider could bill at the cached rate

@@ -120,13 +120,17 @@ class OpenAICompatClient:
         return {k: params[k] for k in _SAMPLING_KEYS if k in params}
 
     def count_tokens(self, text: str) -> int:
-        """Exact count if the server exposes a tokenize endpoint, else an estimate."""
-        try:
-            resp = self._http.post("/tokenize", json={"content": text})
-            resp.raise_for_status()
-            return len(resp.json()["tokens"])
-        except (httpx.HTTPError, ValueError, KeyError):
-            return len(text) // 3 + 1   # conservative: errs towards "doesn't fit"
+        """Exact count from /tokenize (llama.cpp's or vLLM's request format), else an estimate."""
+        for body in ({"content": text},                      # llama.cpp
+                     {"model": self.model, "prompt": text}):    # vLLM
+            try:
+                resp = self._http.post("/tokenize", json=body)
+                resp.raise_for_status()
+                data = resp.json()
+                return int(data["count"]) if "count" in data else len(data["tokens"])
+            except (httpx.HTTPError, ValueError, KeyError):
+                continue
+        return len(text) // 3 + 1   # conservative: errs towards "doesn't fit"
 
     def count_prompt_tokens(self, messages: list[dict]) -> int:
         """Tokens of the full chat prompt as the server will see it (chat template applied), via

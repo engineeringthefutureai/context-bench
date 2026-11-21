@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> None:
         exp = Experiment(Path(args.config))
         rc = RunConfig(task_id=args.task, level=args.level, model=args.model or exp.default_model,
                        seed=args.seed, repo_size=args.repo_size, retriever=args.retriever,
+                       temperature=exp.config["generation"].get("temperature"),   # as the sweep does
                        query_mode=args.query_mode, agent_variant=args.agent_variant,
                        prompt_arm=args.prompt_arm,
                        thinking=(args.thinking if args.thinking is not None

@@ -23,6 +23,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 import threading
+import traceback
 import tomllib
 from dataclasses import asdict
 from pathlib import Path
@@ -43,7 +44,7 @@ from .retrieval.dense import EmbeddingRetriever
 from .results import config_label
 from .tasks import load_tasks
 from .types import ContextBlock, RunConfig, RunResult, Task
-from .workspace import load_workspace
+from .workspace import Workspace, load_workspace
 
 
 class Experiment:
@@ -148,7 +149,7 @@ class Experiment:
             messages = render(task, ctx, rc.prompt_arm, rc.prompt_version)
             prompt_tokens = client.count_prompt_tokens(messages)
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
-                        sampling=self._sampling[rc.model])
+                        sampling=self._sampling[rc.model], ws=ws)
 
             if prompt_tokens + max_out > window:
                 result = _result(**base, label="no_fit", ctx_fits=False, tests=(0, 0, None),
@@ -247,10 +248,12 @@ class Experiment:
         return out
 
     def rescore(self) -> int:
-        """Recompute the output-protocol fields of recorded runs from their saved responses (no model
-        calls): after the parser or classifier changes, or for runs recorded before they existed.
+        """Recompute the output-protocol fields of recorded runs from their saved responses, and the
+        helper visibility fields from their saved prompts and tool outputs (no model calls): after
+        the parser, classifier or visibility rules change, or for runs recorded before they existed.
         Skips runs whose repo has changed since (repo_hash). Rewrites results.jsonl; returns the count."""
         rows, n = results.load(self.results_path), 0
+        workspaces = {size: load_workspace(self._path(path)) for size, path in self.config["repos"].items()}
         for r in rows:
             response = self.runs_dir / r["run_id"] / "response.txt"
             task = self.tasks.get(r["task_id"])
@@ -258,7 +261,14 @@ class Experiment:
                     or r.get("repo_hash") not in (None, self.repo_hash(r["repo_size"])):
                 continue
             text = response.read_text()
-            r.update(self._protocol(task, r["repo_size"], text, parse_files(text)))
+            files = parse_files(text)
+            r.update(self._protocol(task, r["repo_size"], text, files))
+            if not files and _had_tool_calls(self.runs_dir / r["run_id"] / "transcript.jsonl", r["level"]):
+                r["format_status"] = "tool_request"     # as run_one decided from the raw message
+            if (seen := _seen_text(self.runs_dir / r["run_id"])) is not None:
+                ctx, ws = ContextBlock(text=seen), workspaces[r["repo_size"]]
+                r["helper_in_context"] = _helper_visible(task, ctx)
+                r["helper_body_in_context"] = _helper_body_visible(task, ctx, ws)
             n += 1
         results.rewrite(self.results_path, rows)
         return n
@@ -345,6 +355,7 @@ class Experiment:
                 print(f"  {rc.task_id} {config_label(asdict(rc))}", file=sys.stderr)
             return
         unimplemented: set[str] = set()
+        failed: list[str] = []
         lock = threading.Lock()
         counter = iter(range(1, len(todo) + 1))
 
@@ -370,6 +381,13 @@ class Experiment:
                     print(f"({i}/{len(todo)}) {tag} server error, will retry next run: "
                           f"{type(e).__name__}: {e}", file=sys.stderr)
                     continue
+                except Exception as e:      # never let one run end this worker and its queue
+                    with lock:
+                        failed.append(tag)
+                    print(f"({i}/{len(todo)}) {tag} failed, will retry next run: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    continue
                 with lock:
                     results.append(self.results_path, result)
                     print(f"  ({i}/{len(todo)} done, {url})", file=sys.stderr)
@@ -386,6 +404,9 @@ class Experiment:
             t.start()
         for t in threads:
             t.join()
+        if failed:
+            print(f"{len(failed)} runs failed with an unexpected error (not recorded; rerun to retry): "
+                  + ", ".join(failed), file=sys.stderr)
 
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""
@@ -413,6 +434,33 @@ class Experiment:
         return "\n".join(out) + "\n"
 
 
+
+
+def _seen_text(run_dir: Path) -> str | None:
+    """Everything the model was shown, from a bundle: the prompt's user turn plus every tool output
+    (L8). None if the bundle has no prompt."""
+    prompt = run_dir / "prompt.json"
+    if not prompt.is_file():
+        return None
+    parts = [m.get("content") or "" for m in json.loads(prompt.read_text()) if m.get("role") == "user"]
+    transcript = run_dir / "transcript.jsonl"
+    if transcript.is_file():
+        for line in transcript.read_text().splitlines():
+            m = json.loads(line)
+            if m.get("role") == "tool":
+                parts.append(m.get("content") or "")
+    return "\n\n".join(parts)
+
+
+def _had_tool_calls(transcript: Path, level: str) -> bool:
+    """Single-shot runs: the saved raw message shows the server lifted tool calls out of the reply."""
+    if level == "L8" or not transcript.is_file():
+        return False
+    for line in transcript.read_text().splitlines():
+        entry = json.loads(line)
+        if (entry.get("message") or {}).get("tool_calls"):
+            return True
+    return False
 
 
 def _variant(rc: RunConfig) -> tuple[str, ...]:
@@ -445,24 +493,36 @@ def _level_options(rc: RunConfig) -> dict:
 
 
 def _helper_visible(task: Task, ctx: ContextBlock) -> bool | None:
-    """Every needed helper's definition (def/class line) appears in the context text."""
+    """Loose: every needed helper's def/class line appears in the context in any form - a source
+    line, a signature-only map entry (L6, also after a decorator), or a tool output line such as
+    grep's "path:N: def name(". Matches by bare name, so a same-named function elsewhere counts too."""
     if not task.needed_helpers:
         return None
-    return all(re.search(rf"^\s*(?:async\s+)?(?:def|class)\s+{re.escape(q.rsplit('.', 1)[1])}\b",
+    return all(re.search(rf"(?:^|[\s:@)])(?:async\s+)?(?:def|class)\s+{re.escape(q.rsplit('.', 1)[1])}\b",
                          ctx.text, re.M) for q in task.needed_helpers)
 
 
-def _recall(task: Task, ctx: ContextBlock) -> float | None:
-    """Share of needed helpers whose qualname or module file is among the retrieved items."""
+def _helper_body_visible(task: Task, ctx: ContextBlock, ws: Workspace) -> bool | None:
+    """Strict: every needed helper's full source (signature, docstring and body, as in the repo)
+    appears verbatim in the context, i.e. the model could read what it actually does."""
+    if not task.needed_helpers:
+        return None
+    sources = {c.qualname: c.source for c in ws.chunks}
+    return all(q in sources and sources[q].strip() in ctx.text for q in task.needed_helpers)
+
+
+def _recall(task: Task, ctx: ContextBlock, ws: Workspace) -> float | None:
+    """Share of needed helpers whose qualname, or the file that defines it, is among the retrieved
+    items (functions for L5, paths for file-level retrieval)."""
     if not ctx.retrieved or not task.needed_helpers:
         return None
+    files = {c.qualname: c.path for c in ws.chunks}
     def hit(q: str) -> bool:
-        module_file = q.rsplit(".", 1)[0].replace(".", "/") + ".py"
-        return q in ctx.retrieved or module_file in ctx.retrieved
+        return q in ctx.retrieved or files.get(q) in ctx.retrieved
     return sum(hit(q) for q in task.needed_helpers) / len(task.needed_helpers)
 
 
-def _result(*, rc, task, model_cfg, window, max_out, ctx, sampling, label, ctx_fits, tests, tokens, latency,
+def _result(*, rc, task, model_cfg, window, max_out, ctx, sampling, ws, label, ctx_fits, tests, tokens, latency,
             patch_path, error) -> RunResult:
     passed, total, reuse = tests
     tokens_in, tokens_out, peak = tokens
@@ -472,10 +532,10 @@ def _result(*, rc, task, model_cfg, window, max_out, ctx, sampling, label, ctx_f
         prompt_arm=rc.prompt_arm, model=model_cfg["model"], quant=model_cfg.get("quant", ""),
         embedder="none", seed=rc.seed, temperature=rc.temperature, sampling=sampling,
         repo_size=rc.repo_size, ctx_fits=ctx_fits, helper_in_context=_helper_visible(task, ctx),
-        retrieval_recall=_recall(task, ctx), label=label, reuse_passed=reuse, tests_passed=passed,
+        retrieval_recall=_recall(task, ctx, ws), label=label, reuse_passed=reuse, tests_passed=passed,
         tests_total=total, tokens_in=tokens_in, tokens_out=tokens_out, peak_ctx_tokens=peak,
         context_window=window, max_output_tokens=max_out, latency_s=round(latency, 2), tool_calls=0, patch_path=patch_path,
-        error=error)
+        error=error, helper_body_in_context=_helper_body_visible(task, ctx, ws))
 
 
 def _now() -> str:

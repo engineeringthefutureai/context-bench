@@ -169,3 +169,18 @@ def test_variant_key_separates_implemented_siblings():
     b = RunConfig(task_id="t", level="L5", model="m", seed=1, retriever="embed", query_mode="task_vs_code")
     assert _variant(a) == ("L5", "bm25", "task_vs_code") != _variant(b)
     assert _variant(RunConfig(task_id="t", level="L1", model="m", seed=1)) == ("L1",)
+
+
+def test_sweep_worker_survives_an_unexpected_error(tmp_path, capsys):
+    exp = _experiment(tmp_path, FakeClient(REPLY))
+    real, calls = exp.run_one, []
+    def flaky(rc, *a, **k):
+        calls.append(rc.run_id)
+        if len(calls) == 1:
+            raise KeyError("boom")              # not an HTTP error: used to end the worker
+        return real(rc, *a, **k)
+    exp.run_one = flaky
+    exp.sweep(["L1"])
+    rows = results.load(exp.results_path)
+    assert len(calls) > 1 and len(rows) == len(calls) - 1      # the rest ran; the failure isn't recorded
+    assert "1 runs failed with an unexpected error" in capsys.readouterr().err

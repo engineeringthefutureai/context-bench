@@ -52,6 +52,7 @@ def parse_files_lenient(text: str, target_file: str) -> dict[str, str]:
         end = openings[i + 1].start() if i + 1 < len(openings) else len(text)
         body = re.sub(r"</file>\s*$", "", text[m.end():end].strip(), flags=re.IGNORECASE)
         body = re.sub(r"\n?```\s*$", "", body.strip())
+        body = re.sub(r"^```[\w+-]*[ \t]*\n", "", body)      # and its opening line
         if body.strip():
             files[m.group(1).strip()] = body.rstrip("\n") + "\n"
     if files:

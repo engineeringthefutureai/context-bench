@@ -79,14 +79,15 @@ def parse_queries(reply: str, limit: int = N_QUERIES) -> list[str]:
     fences ("<...", "```") are skipped, so a reply that ignored the instruction yields []."""
     text = reply.strip()
     queries: list[str] = []
-    m = re.search(r"\[.*\]", text, re.S)
-    if m:
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\[", text):          # the first '[' that starts a JSON list of strings
         try:
-            data = json.loads(m.group(0))
-            if isinstance(data, list):
-                queries = [q.strip() for q in data if isinstance(q, str) and q.strip()]
+            data, _ = decoder.raw_decode(text, m.start())
         except ValueError:
-            pass
+            continue
+        if isinstance(data, list) and (found := [q.strip() for q in data if isinstance(q, str) and q.strip()]):
+            queries = found
+            break
     if not queries:
         for line in text.splitlines():
             line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", line).strip().strip('"').strip(",").strip()
