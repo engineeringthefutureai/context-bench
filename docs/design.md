@@ -138,3 +138,12 @@ signature by far, and a call site alone is often enough. Dead code: 5 patches im
 (`sku_code`, `cleanSKU`, `slugify`, `kgToLbs` x2), all failing - all single-shot runs whose context came
 from embeddings or the L6 map; none at L3 or L7, where the model can see (L3) or check (L7) that the
 code is dead. Dead share of context on M: L3 ~10%, embed retrieval 14-18%, BM25 4-7%, L7 3-9%.
+
+**Reuse tasks 003-010 (thinking off, prompt v3, repo M, 2026-11-21; one run each).** Passing of 8:
+L1 1 · L2 5 (exactly the 4 tasks whose target imports the helper's module reused it) · L3 8 ·
+L4 bm25 7 / embed 5 · L5 bm25 task 5 / model queries 7 · L5 embed task 6 / model queries 4 /
++hint 5 · L6 2 / +docs 1 (signature seen 8/8, body 0/8; 6/8 broke the output format) · L7 grep
+6 / hybrid 7 (all L7 failures were format slips: a malformed <file tag). No patch used dead code.
+BM25 beat embeddings at the same level here; needs a second sample before reading anything into it.
+Easiest task reuse-007 (ISO weeks; two runs were correct with isocalendar() and no reuse), hardest
+reuse-010 (duplicate keys must raise, 4/13).
