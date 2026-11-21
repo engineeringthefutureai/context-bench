@@ -34,7 +34,7 @@ from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
 from .llm import OpenAICompatClient
-from .prompt import render
+from .prompt import PROMPT_VERSION, render
 from .retrieval.bm25 import BM25Retriever
 from .results import config_label
 from .tasks import load_tasks
@@ -99,14 +99,14 @@ class Experiment:
         gen = self.config["generation"]
         max_out, window = gen["max_output_tokens"], model_cfg["context_window"]
         client = self._client(rc.model, base_url)
-        perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
+        perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version, repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
                     concurrency=concurrency)
         run_dir = self.runs_dir / rc.run_id
 
         with tempfile.TemporaryDirectory(prefix="cbench-") as tmp:
             sandbox = make_sandbox(self._path(self.config["repos"][rc.repo_size]), Path(tmp) / "repo")
             ctx = LEVELS[rc.level](task, load_workspace(sandbox), **_level_options(rc))
-            messages = render(task, ctx, rc.prompt_arm)
+            messages = render(task, ctx, rc.prompt_arm, rc.prompt_version)
             prompt_tokens = client.count_prompt_tokens(messages)
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
                         sampling=self._sampling[rc.model])
@@ -141,6 +141,8 @@ class Experiment:
                 error = f"unsafe path: {e}"
             passed, total, reuse, tests_out = run_hidden_tests(sandbox, task.hidden_tests, self.shared_dir)
         perf.update(self._protocol(task, rc.repo_size, chat.content, files))
+        if chat.tool_calls and not files:       # the server parsed pretend tool calls out of the text
+            perf["format_status"] = "tool_request"
 
         label = "ok" if total > 0 and passed == total else "broken"
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
@@ -151,8 +153,12 @@ class Experiment:
                          error=error)
         _set(result, perf)
         bundle.write_bundle(run_dir, patch=patch, messages=messages, response=chat.content,
-                            reasoning=chat.reasoning, transcript=None, tests_output=tests_out,
-                            result=asdict(result))
+                            reasoning=chat.reasoning,
+                            # raw message when the text alone doesn't explain the reply (e.g. the
+                            # server lifted pretend tool calls out of an otherwise empty content)
+                            transcript=([{"finish_reason": chat.finish_reason, "message": chat.message}]
+                                        if chat.tool_calls or not chat.content.strip() else None),
+                            tests_output=tests_out, result=asdict(result))
         _log(result)
         return result
 
@@ -222,7 +228,8 @@ class Experiment:
                                           temperature=self.config["generation"].get("temperature"),
                                           thinking=(thinking if thinking is not None else
                                                     c.get("thinking", self.config["generation"].get("thinking", True))),
-                                          map_docs=c.get("map_docs", False))
+                                          map_docs=c.get("map_docs", False),
+                                          prompt_version=PROMPT_VERSION)
                                 for t in fitting]
         return out
 

@@ -78,7 +78,7 @@ def test_thinking_off_is_a_separate_run_and_reaches_the_request(tmp_path):
     import hashlib, json as _json
     from dataclasses import asdict
     on = RunConfig("t", "L1", "m", 1)
-    old = {k: v for k, v in asdict(on).items() if k not in ("thinking", "map_docs")}  # ids before these fields
+    old = {k: v for k, v in asdict(on).items() if k not in ("thinking", "map_docs", "prompt_version")}  # ids before these fields
     assert on.run_id == hashlib.sha256(_json.dumps(old, sort_keys=True).encode()).hexdigest()[:16]
     assert RunConfig("t", "L1", "m", 1, thinking=False).run_id != on.run_id
     client = FakeClient(REPLY)

@@ -95,3 +95,17 @@ def test_parse_files_tag_is_case_and_quote_insensitive():
     from context_bench.apply import parse_files
     assert parse_files("<File path='a.py'>\nx = 1\n</File>") == {"a.py": "x = 1\n"}
     assert parse_files('<file  path = "b.py" >\ny = 2\n</FILE>') == {"b.py": "y = 2\n"}
+
+
+def test_prompt_versions_keep_old_ids_and_label_old_rows():
+    from context_bench.prompt import PROMPT_VERSION, SYSTEM_PROMPTS
+    from context_bench.results import config_label
+    from context_bench.types import RunConfig
+    assert PROMPT_VERSION == 2 and SYSTEM_PROMPTS[1] != SYSTEM_PROMPTS[2]
+    for text in SYSTEM_PROMPTS.values():                    # neutral: no reuse, search or dead-code talk
+        assert not any(w in text.lower() for w in ("reuse", "helper", "legacy", "dead code", "grep"))
+    old, new = RunConfig("t", "L1", "m", 1), RunConfig("t", "L1", "m", 1, prompt_version=2)
+    assert old.run_id != new.run_id
+    row = {"level": "L1", "retriever": "none", "query_mode": "none", "agent_variant": "none",
+           "prompt_arm": "base", "repo_size": "S"}
+    assert config_label(row) == "L1 p1" and config_label({**row, "prompt_version": 2}) == "L1"

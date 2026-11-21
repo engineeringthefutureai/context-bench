@@ -62,10 +62,11 @@ class RunConfig:
     temperature: float | None = None  # None = server default (not sent)
     thinking: bool = True            # False: chat_template_kwargs enable_thinking=false (Qwen templates)
     map_docs: bool = False           # L6 variant: show each entry's first docstring line in the map
+    prompt_version: int = 1          # system prompt version (prompt.SYSTEM_PROMPTS); new runs: PROMPT_VERSION
 
     # Fields added after results existed: left out of run_id while at their default, so older runs
     # keep their ids.
-    _LATE_DEFAULTS = {"thinking": True, "map_docs": False}
+    _LATE_DEFAULTS = {"thinking": True, "map_docs": False, "prompt_version": 1}
 
     @property
     def run_id(self) -> str:
@@ -125,3 +126,4 @@ class RunResult:
     finished_at: str | None = None      # ISO UTC, last model call finished
     prefill_s: float | None = None      # prompt processing time, if the server reports it
     decode_s: float | None = None       # generation time, if the server reports it
+    prompt_version: int = 1             # system prompt version (absent in older rows = 1)

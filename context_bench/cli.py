@@ -57,6 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     from . import results
     from .runner import Experiment
+    from .prompt import PROMPT_VERSION
     from .types import RunConfig
 
     if args.cmd == "one":
@@ -67,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
                        prompt_arm=args.prompt_arm,
                        thinking=(args.thinking if args.thinking is not None
                                  else exp.config["generation"].get("thinking", True)),
-                       map_docs=args.map_docs)
+                       map_docs=args.map_docs, prompt_version=PROMPT_VERSION)
         result = exp.run_one(rc)
         results.append(exp.results_path, result)
         print(json.dumps(asdict(result), indent=2))
