@@ -20,11 +20,16 @@ def test_run_id_is_stable_and_sensitive():
 
 def test_load_real_tasks():
     tasks = load_tasks(ROOT / "tasks")
-    assert sorted(tasks) == ["control-001", "control-002", "convention-001", "cross-001", "reuse-001", "reuse-002",
-                             "trap-001"]
-    assert {t.id: t.tier for t in tasks.values()} == {
-        "control-001": 1, "control-002": 2, "reuse-002": 3, "reuse-001": 4, "convention-001": 5, "cross-001": 6,
-        "trap-001": 4}
+    seed = {"control-001": 1, "control-002": 2, "reuse-002": 3, "reuse-001": 4, "convention-001": 5,
+            "cross-001": 6, "trap-001": 4}
+    assert {i: tasks[i].tier for i in seed} == seed                  # the seed ladder
+    import tomllib
+    registry = tomllib.loads((ROOT / "helpers" / "registry.toml").read_text())
+    planted = {h["qualname"] for h in registry["helper"]}
+    for task in tasks.values():
+        assert set(task.needed_helpers) <= planted, task.id          # every needed helper is registered
+        for q in task.needed_helpers:                                 # rule 5: task text never names it
+            assert q.rsplit(".", 1)[1] not in task.prompt, task.id
     t = tasks["reuse-001"]
     assert t.needed_helpers == ("shopkit.utils.text.normalize_sku", "shopkit.money.format_money")
     assert t.prompt.startswith("Finance wants") and t.hidden_tests.is_dir()

@@ -134,7 +134,10 @@ variant only (level + retriever + query mode + agent variant), not its siblings.
   import the helper's module directly and half don't. Changing an S file changes both repos.
   M deliberately has no `tests/test_<stem>.py` for existing task targets, so L2 shows them nothing extra.
 - `tasks/<id>/task.toml` + `hidden_tests/`. Target: 40 tasks — 20 reuse, 8 cross-file, 6 convention,
-  6 control. `reuse-001` is the worked example.
+  6 control. `reuse-001` is the worked example. Now 15: reuse-001..010 (003-010 are M-only, built on
+  M's planted helpers, each with a behaviour quirk a naive rewrite gets wrong), cross-001,
+  convention-001, control-001/002, trap-001. `tests/test_tasks_verified.py` checks every task's
+  contract (unmodified fails, reference passes + reuses, context-blind fails reuse, trap trusting fails).
 - Every task also has a `tier` (difficulty ladder, orthogonal to category):
   1 spec-only new function (control) · 2 local edit, all info in the target file (control) ·
   3 reuse, one helper, name matches task wording · 4 reuse, opaque naming / several helpers ·
