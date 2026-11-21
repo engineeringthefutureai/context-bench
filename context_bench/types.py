@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
+Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7"]
 Label = Literal["ok", "broken", "tool_error", "no_fit"]
 Category = Literal["reuse", "cross_file", "convention", "control", "trap"]
 
@@ -60,7 +60,7 @@ class RunConfig:
     repo_size: str = "S"
     retriever: str = "none"          # none | bm25 | embed | <your own>
     query_mode: str = "none"         # none | task_vs_code | task_vs_summary | draft_then_search  (L5)
-    agent_variant: str = "none"      # none | grep | hybrid  (L8)
+    agent_variant: str = "none"      # none | grep | hybrid  (L7)
     prompt_arm: str = "base"         # base | reuse_hint
     temperature: float | None = None  # None = server default (not sent)
     thinking: bool = True            # False: chat_template_kwargs enable_thinking=false (Qwen templates)
@@ -106,7 +106,7 @@ class RunResult:
     reuse_passed: bool | None    # reuse tasks: did test_reuse.py pass? None for other tasks
     tests_passed: int
     tests_total: int
-    tokens_in: int               # summed over every model call in the run (L8: all turns; L5 draft included)
+    tokens_in: int               # summed over every model call in the run (L7: all turns; L5 draft included)
     tokens_out: int
     peak_ctx_tokens: int         # largest single prompt sent; vs context_window = how full the window got
     context_window: int

@@ -7,6 +7,15 @@ from test_pieces5_8 import FakeClient, _experiment
 REPLY = '<file path="shopkit/utils/units.py">\ndef parse_weight(text):\n    return 0\n</file>'
 
 
+def _unimplemented_level(exp, monkeypatch):
+    """A config for a level that exists but isn't built ("L9"), to exercise the skip path."""
+    from context_bench import levels
+    def stub(task, ws, **kw):
+        raise NotImplementedError("stub level")
+    monkeypatch.setitem(levels.LEVELS, "L9", stub)
+    exp.config["config"].append({"level": "L9"})
+
+
 def test_configs_expand_and_filter(tmp_path):
     exp = _experiment(tmp_path, FakeClient(REPLY))
     rcs = exp.configs()
@@ -17,10 +26,11 @@ def test_configs_expand_and_filter(tmp_path):
     assert len({rc.run_id for rc in rcs}) == len(rcs)            # no duplicate configs
 
 
-def test_sweep_resumes_skips_unimplemented_and_retries_server_errors(tmp_path):
+def test_sweep_resumes_skips_unimplemented_and_retries_server_errors(tmp_path, monkeypatch):
     client = FakeClient(REPLY)
     exp = _experiment(tmp_path, client)
-    exp.sweep(["L0", "L7"])                                       # L7 isn't implemented yet: skipped
+    _unimplemented_level(exp, monkeypatch)
+    exp.sweep(["L0", "L9"])                                       # L9 isn't implemented: skipped
     rows = results.load(exp.results_path)
     assert [(r["task_id"], r["level"]) for r in rows] == [("control-001", "L0")]
     exp.sweep(["L0"])                                             # already done: no new call

@@ -35,7 +35,9 @@ def _clean_exp(tmp_path, monkeypatch, cmd):
 def test_clean_restarts_before_every_run_serially(tmp_path, monkeypatch):
     marker = tmp_path / "restarts.log"
     exp, client, urls = _clean_exp(tmp_path, monkeypatch, f"echo restart >> {marker}")
-    exp.sweep(["L0", "L7"], clean=True)           # L7 isn't implemented: no restart spent on it
+    from test_sweep_report import _unimplemented_level
+    _unimplemented_level(exp, monkeypatch)
+    exp.sweep(["L0", "L9"], clean=True)           # L9 isn't implemented: no restart spent on it
     rows = results.load(exp.results_path)
     assert len(rows) == 1 and rows[0]["cold_start"] is True and rows[0]["concurrency"] == 1
     assert marker.read_text().count("restart") == 1

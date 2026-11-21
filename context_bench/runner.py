@@ -4,7 +4,7 @@
   2. build the context with LEVELS[level](task, workspace, **variant options)
   3. render the fixed prompt; count tokens; if tokens + max_output_tokens > context_window
      -> ctx_fits=false, label no_fit, stop
-  4. call the model (L8: run the tool loop, which applies the same fit check before every turn);
+  4. call the model (L7: run the tool loop, which applies the same fit check before every turn);
      log usage to stderr as it goes (tokens in/out,
      peak context vs window, latency, tool calls) so it's visible during testing
   5. parse <file> blocks, apply them, save the patch
@@ -37,7 +37,7 @@ from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
-from .levels.l8_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
+from .levels.l7_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
 from .llm import ChatResult, OpenAICompatClient, env_value
 from .prompt import PROMPT_VERSION, render
 from .embedders import CachedEmbedder, OpenAICompatEmbedder
@@ -203,7 +203,7 @@ class Experiment:
                 return result
 
             agent = None
-            if rc.level == "L8":
+            if rc.level == "L7":
                 tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
                                                            if rc.agent_variant == "hybrid" else None))
                 agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
@@ -212,7 +212,7 @@ class Experiment:
                 chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
                                   tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
-                # helper_in_context for L8: the definition appeared in any tool output
+                # helper_in_context for L7: the definition appeared in any tool output
                 ctx.text += "\n\n" + "\n\n".join(tools.transcript)
                 perf.update(tool_calls=agent.tool_calls, tokens_cached=agent.tokens_cached,
                             tokens_cacheable=agent.tokens_cacheable)
@@ -262,7 +262,7 @@ class Experiment:
                          patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
                          error="; ".join(e for e in (error, ctx.note) if e) or None)
         _set(result, perf)
-        # L8: the whole tool conversation. Otherwise side exchanges (e.g. the L5 planning call), plus
+        # L7: the whole tool conversation. Otherwise side exchanges (e.g. the L5 planning call), plus
         # the raw message when the text alone doesn't explain the reply (the server lifted pretend
         # tool calls out of an otherwise empty content).
         transcript = agent.transcript if agent else list(ctx.transcript)
@@ -318,7 +318,7 @@ class Experiment:
         return n
 
     def backfill_cacheable(self, model_key: str) -> int:
-        """tokens_cacheable (and the true per-turn peak) for L8 runs recorded before they existed or
+        """tokens_cacheable (and the true per-turn peak) for L7 runs recorded before they existed or
         with peak = total input (a bug fixed 2026-11-21): rebuild every turn's request from the bundle (prompt.json + transcript.jsonl) and count its prompt tokens on `model_key`'s server
         (tokenizer only, no generation). Only rows of that model. Returns the count."""
         model = self.config["models"][model_key]["model"]
@@ -327,7 +327,7 @@ class Experiment:
         schema_cache: dict[str, int] = {}
         for r in rows:
             run = self.runs_dir / r["run_id"]
-            if r["level"] != "L8" or r["model"] != model or not (run / "transcript.jsonl").is_file() \
+            if r["level"] != "L7" or r["model"] != model or not (run / "transcript.jsonl").is_file() \
                     or ("tokens_cacheable" in r and r["peak_ctx_tokens"] < r["tokens_in"]):
                 continue
             messages = json.loads((run / "prompt.json").read_text())
@@ -498,7 +498,7 @@ class Experiment:
 
 def _seen_text(run_dir: Path) -> str | None:
     """Everything the model was shown, from a bundle: the prompt's user turn plus every tool output
-    (L8). None if the bundle has no prompt."""
+    (L7). None if the bundle has no prompt."""
     prompt = run_dir / "prompt.json"
     if not prompt.is_file():
         return None
@@ -514,7 +514,7 @@ def _seen_text(run_dir: Path) -> str | None:
 
 def _had_tool_calls(transcript: Path, level: str) -> bool:
     """Single-shot runs: the saved raw message shows the server lifted tool calls out of the reply."""
-    if level == "L8" or not transcript.is_file():
+    if level == "L7" or not transcript.is_file():
         return False
     for line in transcript.read_text().splitlines():
         entry = json.loads(line)
@@ -547,7 +547,7 @@ def _level_options(rc: RunConfig) -> dict:
         return {"retriever": rc.retriever, "query_mode": rc.query_mode}
     if rc.level == "L6":
         return {"docs": rc.map_docs}
-    if rc.level == "L8":
+    if rc.level == "L7":
         return {"agent_variant": rc.agent_variant}
     return {}
 

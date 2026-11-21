@@ -1,11 +1,11 @@
-"""L8: repo tools and the tool loop (fake client, no server)."""
+"""L7: repo tools and the tool loop (fake client, no server)."""
 import json
 from pathlib import Path
 
 import pytest
 
 from context_bench.levels import LEVELS
-from context_bench.levels.l8_agentic import BUDGET_SPENT, MAX_TOOL_CALLS, RepoTools, run_agent, tool_schemas
+from context_bench.levels.l7_agentic import BUDGET_SPENT, MAX_TOOL_CALLS, RepoTools, run_agent, tool_schemas
 from context_bench.llm import ChatResult
 from context_bench.tasks import load_tasks
 from context_bench.workspace import load_workspace
@@ -16,7 +16,7 @@ TASKS = load_tasks(ROOT / "tasks")
 
 
 def test_context_is_target_plus_tools_note_and_schemas_match():
-    ctx = LEVELS["L8"](TASKS["reuse-001"], load_workspace(ROOT / "fixtures/repo_S"))
+    ctx = LEVELS["L7"](TASKS["reuse-001"], load_workspace(ROOT / "fixtures/repo_S"))
     assert ctx.text.startswith("File: shopkit/orders/export.py") and "grep, list_files, read_file, find_references" in ctx.text
     assert [t["function"]["name"] for t in tool_schemas("grep")] == ["grep", "list_files", "read_file", "find_references"]
     assert tool_schemas("hybrid")[-1]["function"]["name"] == "semantic_search"
@@ -112,7 +112,7 @@ def test_cached_tokens_parsed_from_either_server():
 
 
 def test_budget_turn_is_not_cacheable_and_turns_rebuild():
-    from context_bench.levels.l8_agentic import cacheable_prefix, turn_prompts
+    from context_bench.levels.l7_agentic import cacheable_prefix, turn_prompts
     assert cacheable_prefix(100, True, 150, True) == 100
     assert cacheable_prefix(100, True, 150, False) == 0 and cacheable_prefix(0, None, 50, True) == 0
     many = [("grep", {"pattern": "def"})] * MAX_TOOL_CALLS

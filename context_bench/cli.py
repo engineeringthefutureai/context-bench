@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("report", help="label counts per configuration")
     rs = sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
-    rs.add_argument("--cacheable", metavar="MODEL", help="also backfill tokens_cacheable for older L8 runs of "
+    rs.add_argument("--cacheable", metavar="MODEL", help="also backfill tokens_cacheable for older L7 runs of "
                     "this [models.*] entry (counts tokens on its server, no generation)")
     return ap
 
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
         exp = Experiment(Path(args.config))
         print(f"rescored {exp.rescore()} runs")
         if args.cacheable:
-            print(f"backfilled tokens_cacheable for {exp.backfill_cacheable(args.cacheable)} L8 runs")
+            print(f"backfilled tokens_cacheable for {exp.backfill_cacheable(args.cacheable)} L7 runs")
         return
     if args.cmd == "validate-retrieval":
         exp = Experiment(Path(args.config))

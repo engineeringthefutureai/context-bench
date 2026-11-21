@@ -2,7 +2,7 @@
 
 ## What this project is
 
-A small, controlled experiment harness: the same coding tasks, the same model, and nine different ways
+A small, controlled experiment harness: the same coding tasks, the same model, and eight different ways
 of building the model's context (the levels below). For each run it records:
 
 - **Correctness:** do the task's hidden tests pass?
@@ -49,8 +49,7 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L4 | `l4_file_rag` | Target + top-3 files by retrieval (`retriever`) |
 | L5 | `l5_function_rag` | Target + top-8 functions with path, import header, signature, docstring, body (`retriever`, `query_mode`) |
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class (`map_docs = true`: + first docstring line, "L6+docs") |
-| L7 | `l7_symbol_graph` | Target + definitions of referenced symbols + 1-hop callers |
-| L8 | `l8_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search` |
+| L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search` |
 
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),
@@ -60,10 +59,16 @@ instruction never mentions reuse).
 
 Ablation: `prompt_arm = reuse_hint` on L1 and L5.
 
-Active vs legacy code: L8 must be able to tell live code from dead code (repo M: `common/`, `utils/strings.py`).
+Deprioritized (not a level, not registered, no config): **symbol graph** (`levels/lx_symbol_graph.py`,
+spec only): target + definitions of referenced symbols + 1-hop callers, LSP-style. It was L7 until
+2026-11-21, when the agentic level moved from L8 to L7 (eight levels, L0-L7). On reuse tasks the
+needed helper is never referenced from the target, so it adds little over L2; revisit once there are
+several cross-file / convention tasks. Results recorded as L8 were migrated to L7 (new run ids).
+
+Active vs legacy code: L7 must be able to tell live code from dead code (repo M: `common/`, `utils/strings.py`).
 It gets the means, not the instruction: `find_references` (where a name is used) and import counts
 in `list_files`. Nothing in the prompt says dead code exists. Measured at every level:
-`legacy_ctx_share` (share of context tokens from dead paths; L8: tool output) and `legacy_used`
+`legacy_ctx_share` (share of context tokens from dead paths; L7: tool output) and `legacy_used`
 (the patch imports or calls dead code). Dead paths are `[legacy].paths` in `helpers/registry.toml`,
 harness-only. A `legacy_hint` prompt arm, if ever wanted, is an opt-in ablation like `reuse_hint`.
 
@@ -75,7 +80,7 @@ share the same repo and system prompt. Both arms keep separate run ids. Crude on
 more seeds, a second size and the model axis come later.
 
 Optional model axis (later): an older and a current model of the same family and size, same quantization, on
-L1/L2/L3/L5/L8, to separate the effect of the model from the effect of context building.
+L1/L2/L3/L5/L7, to separate the effect of the model from the effect of context building.
 
 ## Labels and reuse
 Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `ok`.
@@ -110,7 +115,7 @@ target file left out, recall@1/3/8 split by naming, the first decoy that outrank
 indexed as `chunk_text` (path, qualname, source), the same text L5 searches. Embeddings: `embedders.py`
 (any `/v1/embeddings` endpoint, cached on disk per content under `.cache/embeddings/`) and
 `retrieval/dense.py` (brute-force cosine, `query_prefix` on queries only); `[embedder]` points at
-Ollama on the iGPU (`qwen3-embedding:0.6b`). L4 implements both retrievers (whole files indexed as `file_text`, like validate-retrieval). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L8 `grep`
+Ollama on the iGPU (`qwen3-embedding:0.6b`). L4 implements both retrievers (whole files indexed as `file_text`, like validate-retrieval). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L7 `grep`
 and `hybrid`; other L5 modes raise NotImplementedError, and the sweep skips that
 variant only (level + retriever + query mode + agent variant), not its siblings.
 

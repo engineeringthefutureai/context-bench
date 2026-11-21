@@ -1,4 +1,4 @@
-"""L8 — agentic. Target file as initial context, plus tools the model calls to explore the repo.
+"""L7 — agentic. Target file as initial context, plus tools the model calls to explore the repo.
 
 Variants:
   agent_variant = "grep"    tools: grep, list_files, read_file, find_references
@@ -12,7 +12,7 @@ TOOLS_NOTE says that dead code exists or should be avoided (that would be a hint
 Budget: at most 15 tool calls; then the model must return its <file> blocks.
 Malformed tool calls are counted; if the run ends with tool errors and no file blocks, the label
 is "tool_error".
-helper_in_context for L8 = the helper's definition appeared in any tool output.
+helper_in_context for L7 = the helper's definition appeared in any tool output.
 """
 from __future__ import annotations
 

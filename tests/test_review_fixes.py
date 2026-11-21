@@ -37,7 +37,7 @@ def test_embedding_cache_is_atomic_and_thread_safe(tmp_path):
 def test_rescore_keeps_tool_request_from_the_raw_message(tmp_path):
     t = tmp_path / "transcript.jsonl"
     t.write_text(json.dumps({"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "x"}]}}) + "\n")
-    assert _had_tool_calls(t, "L1") and not _had_tool_calls(t, "L8")
+    assert _had_tool_calls(t, "L1") and not _had_tool_calls(t, "L7")
     assert not _had_tool_calls(tmp_path / "missing.jsonl", "L1")
 
 

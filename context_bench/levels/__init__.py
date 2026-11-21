@@ -8,10 +8,11 @@ from ..types import ContextBlock, Task
 from ..workspace import Workspace
 from . import (
     l0_no_context, l1_one_file, l2_manual_files, l3_whole_project, l4_file_rag,
-    l5_function_rag, l6_repo_map, l7_symbol_graph, l8_agentic,
+    l5_function_rag, l6_repo_map, l7_agentic,
 )
 
 # level -> build_context(task, workspace, **variant_options) -> ContextBlock
+# L0-L7: eight levels. lx_symbol_graph is deprioritized and deliberately not registered.
 LEVELS: dict[str, Callable[..., ContextBlock]] = {
     "L0": l0_no_context.build_context,
     "L1": l1_one_file.build_context,
@@ -20,8 +21,7 @@ LEVELS: dict[str, Callable[..., ContextBlock]] = {
     "L4": l4_file_rag.build_context,
     "L5": l5_function_rag.build_context,
     "L6": l6_repo_map.build_context,
-    "L7": l7_symbol_graph.build_context,
-    "L8": l8_agentic.build_context,
+    "L7": l7_agentic.build_context,
 }
 
 __all__ = ["LEVELS", "Task", "Workspace", "ContextBlock"]
