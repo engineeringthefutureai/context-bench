@@ -18,6 +18,9 @@ model's context:
 
 Deprioritized: a symbol-graph level (definitions of referenced symbols + 1-hop callers).
 
+Diagram of the ladder and what each level tests: [docs/diagrams/context-levels.html](docs/diagrams/context-levels.html)
+(source: `docs/diagrams/context-levels.json`, rendered with archify).
+
 For every run we record whether the hidden tests pass, whether the model reused code the repo already
 has or wrote its own version, whether it referenced things that don't exist, and what the run cost in
 tokens and time.

@@ -1,5 +1,7 @@
 # Design notes
 
+Diagram of the levels and what each tests: [diagrams/context-levels.html](diagrams/context-levels.html).
+
 ## Questions
 1. How do correctness and reuse of existing code change across the levels?
 2. When the model doesn't reuse an existing helper, was that helper visible to it?
