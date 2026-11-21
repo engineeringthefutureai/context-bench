@@ -218,7 +218,7 @@ class Experiment:
             label, error = "tool_error", f"{agent.tool_errors} tool errors and no <file> blocks"
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
                          tokens=(chat.tokens_in + ctx.extra_tokens_in, chat.tokens_out + ctx.extra_tokens_out,
-                                 max(prompt_tokens, chat.tokens_in, agent.peak_ctx_tokens if agent else 0)),
+                                 agent.peak_ctx_tokens if agent else max(prompt_tokens, chat.tokens_in)),
                          latency=chat.latency_s + ctx.extra_latency_s,
                          patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
                          error="; ".join(e for e in (error, ctx.note) if e) or None)
@@ -279,8 +279,8 @@ class Experiment:
         return n
 
     def backfill_cacheable(self, model_key: str) -> int:
-        """tokens_cacheable for L8 runs recorded before it existed: rebuild every turn's request from
-        the bundle (prompt.json + transcript.jsonl) and count its prompt tokens on `model_key`'s server
+        """tokens_cacheable (and the true per-turn peak) for L8 runs recorded before they existed or
+        with peak = total input (a bug fixed 2026-11-21): rebuild every turn's request from the bundle (prompt.json + transcript.jsonl) and count its prompt tokens on `model_key`'s server
         (tokenizer only, no generation). Only rows of that model. Returns the count."""
         model = self.config["models"][model_key]["model"]
         client = self._client(model_key)
@@ -288,19 +288,20 @@ class Experiment:
         schema_cache: dict[str, int] = {}
         for r in rows:
             run = self.runs_dir / r["run_id"]
-            if r["level"] != "L8" or r["model"] != model or "tokens_cacheable" in r \
-                    or not (run / "transcript.jsonl").is_file():
+            if r["level"] != "L8" or r["model"] != model or not (run / "transcript.jsonl").is_file() \
+                    or ("tokens_cacheable" in r and r["peak_ctx_tokens"] < r["tokens_in"]):
                 continue
             messages = json.loads((run / "prompt.json").read_text())
             transcript = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines()]
             if r["agent_variant"] not in schema_cache:
                 schema_cache[r["agent_variant"]] = client.count_tokens(json.dumps(tool_schemas(r["agent_variant"])))
-            total, prev = 0, (0, None)
+            total, prev, peak = 0, (0, None), 0
             for msgs, offer in turn_prompts(messages, transcript):
                 tokens = client.count_prompt_tokens(msgs) + (schema_cache[r["agent_variant"]] if offer else 0)
                 total += cacheable_prefix(prev[0], prev[1], tokens, offer)
-                prev = (tokens, offer)
+                prev, peak = (tokens, offer), max(peak, tokens)
             r["tokens_cacheable"] = total
+            r["peak_ctx_tokens"] = peak
             n += 1
         results.rewrite(self.results_path, rows)
         return n

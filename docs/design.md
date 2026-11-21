@@ -107,3 +107,15 @@ the single-shot thinking-off ones (format, sloppy code, trusting the trap helper
 every L5 variant even with its body in context). The model writes queries like grep patterns
 ("make_slug|slugify|to_slug", "search: def format_weight") and guesses plausible names from priors.
 Cost: ~3k input tokens and ~20 s per run vs L8 hybrid's 32k and 64 s.
+
+**Full thinking-off rerun (prompt v3, 152 runs, 2026-11-21).** Second sample of every built config.
+31 of 152 runs flipped against the first sample (17 ok->broken, 14 broken->ok): a single config's
+count moves by about +-3 of 13 between samples, so only differences larger than that mean anything.
+Stable across both samples: L8 grep/hybrid 10-13/13, L3 9/13, L5 6-10/13, L6 2-6/13, L0-L2 0-2.
+trap-001 identical to before: only L8 (both variants) reuses and fixes; L2 writes its own conversion
+(4/4, no reuse); everything else trusts the helper (2/4 with reuse). Performance: vLLM 14 tok/s per
+request, 53 combined at concurrency 4 (long L8 prompts); actual prefix-cache hits 82% for L3 on M
+(the repo prefix is shared by every task), 31-48% for L8 vs 70-74% cacheable (1024-token blocks).
+Embedder (iGPU): ~600 tokens/s cold, repo M indexed once in 75 s, a new query 40-200 ms; with a
+warm cache it adds nothing measurable per run. L8 peak prompt per turn: 7-8.5k tokens (vs 42k for
+L3 on M); a bug that recorded L8's total input as its peak is fixed and backfilled.
