@@ -69,7 +69,9 @@ harness-only. A `legacy_hint` prompt arm, if ever wanted, is an opt-in ablation 
 
 **Current scope: one model (Qwen 3.8 27B), one shot per config (seed 1), server-default temperature.**
 During development thinking is off (`[generation].thinking = false`, labelled "nothink"); the final
-round reruns everything with thinking on (`cbench run --thinking`). Both arms keep separate run ids. Crude on purpose;
+round reruns everything with thinking on, in clean mode (`cbench run --clean --thinking`): one run at a
+time, the model server restarted before each, so no prefix cache carries over between tasks that all
+share the same repo and system prompt. Both arms keep separate run ids. Crude on purpose;
 more seeds, a second size and the model axis come later.
 
 Optional model axis (later): an older and a current model of the same family and size, same quantization, on
@@ -151,6 +153,8 @@ pip install -e '.[dev]' && pytest
 cbench validate-retrieval --retrievers bm25,embed
 cbench one --task reuse-001 --level L1
 cbench run                       # resumable; --level L1 --level L3 to limit, --dry-run to list what is left
+cbench run --clean --thinking    # final round: serial, model server restarted before every run (cold cache;
+                                 # CBENCH_RESTART_CMD in .env), --rerun to redo recorded configs
 cbench rescore                   # protocol fields from saved responses, no model calls
 cbench report
 ```

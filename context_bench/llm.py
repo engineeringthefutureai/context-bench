@@ -31,15 +31,20 @@ class ChatResult:
     message: dict = field(default_factory=dict)   # raw assistant message, for tool loops
 
 
-def api_key_from_env(env_file: Path = PROJECT_ROOT / ".env") -> str | None:
-    if key := os.environ.get("CBENCH_API_KEY"):
-        return key
+def env_value(name: str, env_file: Path = PROJECT_ROOT / ".env") -> str | None:
+    """A setting from the environment, else from the project's .env file (gitignored)."""
+    if value := os.environ.get(name):
+        return value
     if env_file.is_file():
         for line in env_file.read_text().splitlines():
-            name, sep, value = line.partition("=")
-            if sep and name.strip() == "CBENCH_API_KEY" and value.strip():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == name and value.strip():
                 return value.strip().strip('"').strip("'")
     return None
+
+
+def api_key_from_env(env_file: Path = PROJECT_ROOT / ".env") -> str | None:
+    return env_value("CBENCH_API_KEY", env_file)
 
 
 def _cached(usage: dict, timings: dict) -> int | None:
@@ -95,6 +100,16 @@ class OpenAICompatClient:
             finish_reason=choice.get("finish_reason") or "",
             message=msg,
         )
+
+    def ready(self) -> bool:
+        """The server is up and serving: /health answers 200 (vLLM, llama.cpp), else /v1/models does."""
+        for path in ("/health", "/v1/models"):
+            try:
+                if self._http.get(path, timeout=5).status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                pass
+        return False
 
     def backend(self) -> str:
         """Which server this is, from endpoints only it has: llama.cpp (/props), Ollama

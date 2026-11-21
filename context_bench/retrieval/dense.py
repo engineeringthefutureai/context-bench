@@ -27,6 +27,9 @@ class EmbeddingRetriever:
         """Top-k by cosine (vectors are normalised); ties keep index order."""
         if not self.ids:
             return []
-        scores = self.vectors @ self.embedder.embed([self.query_prefix + query])[0]
+        # Queries skip the on-disk cache (a cached query would hide the embedder's real cost); the
+        # documents' vectors stand for an index built ahead of time, which is how RAG is deployed.
+        embedder = getattr(self.embedder, "inner", self.embedder)
+        scores = self.vectors @ embedder.embed([self.query_prefix + query])[0]
         order = sorted(range(len(self.ids)), key=lambda i: (-scores[i], i))[:k]
         return [(self.ids[i], float(scores[i])) for i in order]

@@ -20,7 +20,9 @@ import hashlib
 import json
 import re
 import sys
+import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 import threading
 import traceback
@@ -36,7 +38,7 @@ from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
 from .levels.l8_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
-from .llm import ChatResult, OpenAICompatClient
+from .llm import ChatResult, OpenAICompatClient, env_value
 from .prompt import PROMPT_VERSION, render
 from .embedders import CachedEmbedder, OpenAICompatEmbedder
 from .retrieval.bm25 import BM25Retriever
@@ -117,14 +119,50 @@ class Experiment:
                 self._clients[model_key, url] = client
             return self._clients[model_key, url]
 
-    def run_one(self, rc: RunConfig, base_url: str | None = None, concurrency: int = 1) -> RunResult:
+    def restart_server(self, model_key: str, url: str) -> None:
+        """Clean mode: run CBENCH_RESTART_CMD (environment or .env; a shell command that returns once
+        the old server has stopped), wait up to CBENCH_READY_TIMEOUT seconds (default 1200) for the
+        server to answer as ready, then send one tiny warm-up request that shares nothing with our
+        prompts (too short to leave a reusable cache block). Raises if any step fails."""
+        cmd = env_value("CBENCH_RESTART_CMD")
+        if not cmd:
+            raise RuntimeError("clean mode needs CBENCH_RESTART_CMD (environment or .env)")
+        timeout = float(env_value("CBENCH_READY_TIMEOUT") or 1200)
+        subprocess.run(cmd, shell=True, check=True, timeout=timeout,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        with self._client_lock:                  # pooled connections died with the old server
+            self._clients.pop((model_key, url), None)
+        client = self._client_factory(self.config["models"][model_key], url)
+        deadline = time.monotonic() + timeout
+        while not client.ready():
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"model server not ready {timeout:.0f}s after restart")
+            time.sleep(2)
+        client.chat([{"role": "user", "content": "Reply with OK."}], temperature=None, seed=1,
+                    max_tokens=8, thinking=False)
+
+    def run_one(self, rc: RunConfig, base_url: str | None = None, concurrency: int = 1,
+                cold_start: bool = False) -> RunResult:
         """One run; base_url picks one of the model's servers (default: the first); concurrency is
-        how many runs share that server (recorded, so latency can be read in context)."""
+        how many runs share that server (recorded, so latency can be read in context).
+        cold_start=True restarts the server (restart_server) right before the run's first model call,
+        so no prefix cache survives from earlier runs; context building happens first, so a run whose
+        level isn't implemented never costs a restart."""
         task = self.tasks[rc.task_id]
         model_cfg = self.config["models"][rc.model]
         gen = self.config["generation"]
         max_out, window = gen["max_output_tokens"], model_cfg["context_window"]
         client = self._client(rc.model, base_url)
+        url = base_url or self.base_urls(rc.model)[0]
+        restarted = False
+
+        def model_client():
+            """The client for model calls; in clean mode the first call restarts the server."""
+            nonlocal client, restarted
+            if cold_start and not restarted:
+                self.restart_server(rc.model, url)
+                client, restarted = self._client(rc.model, url), True
+            return client
         perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version, repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
                     concurrency=concurrency)
         run_dir = self.runs_dir / rc.run_id
@@ -141,7 +179,7 @@ class Experiment:
                 def planner(t: Task, l1: ContextBlock, instruction: str):
                     msgs = render(t, l1, rc.prompt_arm, rc.prompt_version)
                     msgs[-1] = {**msgs[-1], "content": msgs[-1]["content"] + "\n\n" + instruction}
-                    plan = client.chat(msgs, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
+                    plan = model_client().chat(msgs, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                        **({} if rc.thinking else {"thinking": False}))
                     return plan.content, plan.tokens_in, plan.tokens_out, plan.latency_s
                 options["planner"] = planner
@@ -168,7 +206,7 @@ class Experiment:
             if rc.level == "L8":
                 tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
                                                            if rc.agent_variant == "hybrid" else None))
-                agent = run_agent(client, messages, tools, agent_variant=rc.agent_variant,
+                agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking)
                 chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
@@ -179,9 +217,10 @@ class Experiment:
                 perf.update(tool_calls=agent.tool_calls, tokens_cached=agent.tokens_cached,
                             tokens_cacheable=agent.tokens_cacheable)
             else:
-                chat = client.chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
-                                   **({} if rc.thinking else {"thinking": False}))
-            perf.update(finished_at=_now(), prefill_s=_round(chat.prefill_s), decode_s=_round(chat.decode_s))
+                chat = model_client().chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
+                                           **({} if rc.thinking else {"thinking": False}))
+            perf.update(finished_at=_now(), prefill_s=_round(chat.prefill_s), decode_s=_round(chat.decode_s),
+                        cold_start=restarted)
             if uses_embedder:
                 perf.update(self.embedder().stats.snapshot())
             if not agent:
@@ -345,13 +384,17 @@ class Experiment:
 
     def sweep(self, levels: list[str] | None = None, dry_run: bool = False,
               models: list[str] | None = None, repo_sizes: list[str] | None = None,
-              thinking: bool | None = None, task_ids: list[str] | None = None, rerun: bool = False) -> None:
+              thinking: bool | None = None, task_ids: list[str] | None = None, rerun: bool = False,
+              clean: bool = False) -> None:
         """Run every config not already in results.jsonl (or whose repo has changed since: a recorded
         repo_hash that differs from the fixture now); rerun=True runs them all again (rows are appended;
         the report reads the latest per run_id). Failures aren't written, so they retry. Configs that
         collapse to the same run_id (e.g. a thinking arm under --no-thinking) run once.
         A level or variant that isn't implemented yet is skipped (reported once); a server error (timeout,
-        connection, HTTP status) skips that run, so the next `cbench run` retries it."""
+        connection, HTTP status) skips that run, so the next `cbench run` retries it.
+        clean=True: serial (one run at a time, each model's first server only) and the server is
+        restarted before every run (restart_server), so every run starts from a cold prefix cache. A
+        failed restart stops the sweep."""
         recorded = {r["run_id"]: r.get("repo_hash") for r in results.load(self.results_path)}
         unique = list({rc.run_id: rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)}.values())
         todo = [rc for rc in unique
@@ -379,13 +422,21 @@ class Experiment:
                     i = next(counter)
                 tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
                 try:
-                    result = self.run_one(rc, url, concurrency=workers_per_url[rc.model, url])
+                    result = self.run_one(rc, url, concurrency=workers_per_url[rc.model, url], cold_start=clean)
                 except NotImplementedError as e:
                     with lock:
                         if _variant(rc) not in unimplemented:
                             unimplemented.add(_variant(rc))
                             print(f"skipping {' '.join(_variant(rc))}: not implemented ({e})", file=sys.stderr)
                     continue
+                except (RuntimeError, subprocess.SubprocessError) as e:
+                    if not clean:
+                        raise
+                    with lock:                  # no cold server: stop, don't fall back to a warm one
+                        queue.clear()
+                        failed.append(f"{tag} (restart: {e})")
+                    print(f"({i}/{len(todo)}) {tag} restart failed, stopping: {e}", file=sys.stderr)
+                    return
                 except httpx.HTTPError as e:
                     print(f"({i}/{len(todo)}) {tag} server error, will retry next run: "
                           f"{type(e).__name__}: {e}", file=sys.stderr)
@@ -403,11 +454,11 @@ class Experiment:
 
         # one queue per model, one worker per server of that model
         threads = []
-        workers_per_url = {(m, u): self.base_urls(m).count(u) for m in {rc.model for rc in todo}
-                           for u in self.base_urls(m)}
+        urls = {m: (self.base_urls(m)[:1] if clean else self.base_urls(m)) for m in {rc.model for rc in todo}}
+        workers_per_url = {(m, u): us.count(u) for m, us in urls.items() for u in us}
         for model in dict.fromkeys(rc.model for rc in todo):
             queue = [rc for rc in todo if rc.model == model]
-            for url in self.base_urls(model):
+            for url in urls[model]:
                 threads.append(threading.Thread(target=worker, args=(url, queue)))
         for t in threads:
             t.start()
