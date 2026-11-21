@@ -94,7 +94,7 @@ is swappable and recorded per run.
 
 ## Fixtures and tasks
 - `fixtures/repo_S/` — seed test repo (`shopkit`, ~2k tokens) with the first three planted helpers.
-- `fixtures/repo_M/` — the grown `shopkit` (~32k tokens at L3 plus ~4k of legacy_v1, ~110 files, stdlib only, its own passing
+- `fixtures/repo_M/` — the grown `shopkit` (36,133 tokens at L3 incl. ~4k of legacy_v1, ~110 files, stdlib only, its own passing
   `tests/`). A strict superset of S: every S file is byte-identical, so every task runs on both
   (`--repo-size M`). 25 helpers (13 matching / 12 opaque naming, 9 in `utils/`), each called somewhere
   in M, plus near-miss decoys (`[[decoy]]` in the registry) that fail the hidden tests if used instead.
