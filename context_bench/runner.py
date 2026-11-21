@@ -133,6 +133,9 @@ class Experiment:
             sandbox = make_sandbox(self._path(self.config["repos"][rc.repo_size]), Path(tmp) / "repo")
             ws = load_workspace(sandbox)
             ws.retrievers = {"embed": self.retrievers()["embed"]}
+            uses_embedder = rc.retriever == "embed" or rc.agent_variant == "hybrid"
+            if uses_embedder:
+                self.embedder().stats.reset()
             options = _level_options(rc)
             if rc.query_mode == "model_queries":
                 def planner(t: Task, l1: ContextBlock, instruction: str):
@@ -144,8 +147,8 @@ class Experiment:
                 options["planner"] = planner
             perf["started_at"] = _now()
             ctx = LEVELS[rc.level](task, ws, **options)
-            if rc.retriever == "embed" or rc.agent_variant == "hybrid":
-                perf["embedder"] = self.embedder().name
+            if uses_embedder:
+                perf.update(embedder=self.embedder().name, **self.embedder().stats.snapshot())
             messages = render(task, ctx, rc.prompt_arm, rc.prompt_version)
             prompt_tokens = client.count_prompt_tokens(messages)
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
@@ -179,6 +182,8 @@ class Experiment:
                 chat = client.chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                    **({} if rc.thinking else {"thinking": False}))
             perf.update(finished_at=_now(), prefill_s=_round(chat.prefill_s), decode_s=_round(chat.decode_s))
+            if uses_embedder:
+                perf.update(self.embedder().stats.snapshot())
             if not agent:
                 perf["tokens_cached"] = chat.cached_tokens
             if agent and agent.no_fit:
@@ -339,14 +344,17 @@ class Experiment:
 
     def sweep(self, levels: list[str] | None = None, dry_run: bool = False,
               models: list[str] | None = None, repo_sizes: list[str] | None = None,
-              thinking: bool | None = None, task_ids: list[str] | None = None) -> None:
+              thinking: bool | None = None, task_ids: list[str] | None = None, rerun: bool = False) -> None:
         """Run every config not already in results.jsonl (or whose repo has changed since: a recorded
-        repo_hash that differs from the fixture now); failures aren't written, so they retry.
+        repo_hash that differs from the fixture now); rerun=True runs them all again (rows are appended;
+        the report reads the latest per run_id). Failures aren't written, so they retry. Configs that
+        collapse to the same run_id (e.g. a thinking arm under --no-thinking) run once.
         A level or variant that isn't implemented yet is skipped (reported once); a server error (timeout,
         connection, HTTP status) skips that run, so the next `cbench run` retries it."""
         recorded = {r["run_id"]: r.get("repo_hash") for r in results.load(self.results_path)}
-        todo = [rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)
-                if rc.run_id not in recorded
+        unique = list({rc.run_id: rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)}.values())
+        todo = [rc for rc in unique
+                if rerun or rc.run_id not in recorded
                 or recorded[rc.run_id] not in (None, self.repo_hash(rc.repo_size))]
         done = recorded.keys()
         print(f"{len(todo)} runs to do ({len(done)} already in {self.results_path.name})", file=sys.stderr)

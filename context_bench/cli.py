@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None,
                      help="every config with thinking on/off, overriding [generation].thinking")
     run.add_argument("--dry-run", action="store_true", help="list the runs still to do, don't run them")
+    run.add_argument("--rerun", action="store_true", help="run recorded configs again too (latest row wins)")
 
     idx = sub.add_parser("index", help="build caches, e.g. function summaries")
     idx.add_argument("--summaries", action="store_true")
@@ -78,7 +79,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "run":
         Experiment(Path(args.config)).sweep(args.level, dry_run=args.dry_run, models=args.model, repo_sizes=args.repo_size,
-                                         thinking=args.thinking, task_ids=args.task)
+                                         thinking=args.thinking, task_ids=args.task, rerun=args.rerun)
         return
     if args.cmd == "rescore":
         exp = Experiment(Path(args.config))

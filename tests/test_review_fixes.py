@@ -70,3 +70,29 @@ def test_recall_resolves_the_defining_file():
         if any(c.qualname == "shopkit.orders.models.Order.add_line" for c in M.chunks) else None
     if method_task:
         assert _recall(method_task, ContextBlock(text="", retrieved=["shopkit/orders/models.py"]), M) == 1.0
+
+
+def test_embed_stats_are_per_thread_and_count_cache_hits(tmp_path):
+    from context_bench.embedders import CachedEmbedder, EmbedStats
+    class Inner:
+        name = "fake"
+        stats = EmbedStats()
+        def embed(self, texts):
+            self.stats.add(embed_texts=len(texts), embed_tokens=3 * len(texts), embed_s=0.5)
+            return np.ones((len(texts), 2), dtype=np.float32)
+    c = CachedEmbedder(Inner(), tmp_path)
+    c.stats.reset(); c.embed(["a", "b"]); c.embed(["a", "c"])
+    assert c.stats.snapshot() == {"embed_texts": 3, "embed_tokens": 9, "embed_s": 1.0, "embed_cache_hits": 1}
+    seen = {}
+    t = threading.Thread(target=lambda: seen.update(c.stats.snapshot()))
+    t.start(); t.join()
+    assert seen["embed_texts"] == 0             # another thread (another run) starts from zero
+
+
+def test_report_has_embedder_section():
+    from context_bench.results import embedder_performance
+    row = {"level": "L5", "retriever": "embed", "query_mode": "task_vs_code", "agent_variant": "none",
+           "prompt_arm": "base", "repo_size": "S", "prompt_version": 3, "embedder": "e",
+           "embed_texts": 10, "embed_cache_hits": 30, "embed_s": 2.0, "embed_tokens": 400}
+    out = "\n".join(embedder_performance([row]))
+    assert "| e | L5 embed task_vs_code | 1 | 10 | 75% | 2.00s | 200 | 5.0 |" in out

@@ -135,6 +135,11 @@ class RunResult:
     tokens_cached: int | None = None    # server-reported prefix-cache hits, summed; None: not reported
     helper_body_in_context: bool | None = None  # strict visibility: each needed helper's full source
                                         #   was in view (helper_in_context also counts signatures)
+    # embedder work in this run (added 2026-11-21; absent in older rows / runs without embeddings)
+    embed_texts: int = 0                # texts sent to the embedding server (cache misses + queries)
+    embed_tokens: int = 0               # tokens the embedding server reported for them
+    embed_s: float = 0.0                # wall time waiting on the embedding server
+    embed_cache_hits: int = 0           # texts served from the on-disk cache instead
     tokens_cacheable: int = 0           # input tokens that repeat an earlier turn's prompt exactly (tool
                                         #   loops: each turn resends the previous prompt), i.e. what any
                                         #   prefix-caching provider could bill at the cached rate

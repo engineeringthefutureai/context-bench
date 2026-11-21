@@ -134,6 +134,24 @@ def _cache_share(rs: list[dict]) -> str:
     return out
 
 
+def embedder_performance(rows: list[dict]) -> list[str]:
+    """One row per (embedder, configuration) for runs that recorded embedder work."""
+    rows = [r for r in rows if r.get("embedder", "none") != "none" and "embed_s" in r]
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        groups.setdefault((r["embedder"], config_label(r)), []).append(r)
+    table = []
+    for (emb, cfg), rs in sorted(groups.items()):
+        texts, hits = sum(r["embed_texts"] for r in rs), sum(r["embed_cache_hits"] for r in rs)
+        secs, toks = sum(r["embed_s"] for r in rs), sum(r["embed_tokens"] for r in rs)
+        table.append([emb, cfg, len(rs), f"{texts / len(rs):.0f}",
+                      f"{100 * hits / (hits + texts):.0f}%" if hits + texts else "–",
+                      f"{secs / len(rs):.2f}s", f"{toks / secs:.0f}" if secs and toks else "–",
+                      f"{texts / secs:.1f}" if secs else "–"])
+    return _table(["Embedder", "Config", "runs", "texts sent/run", "cache hits", "embed time/run",
+                   "tokens/s", "texts/s"], table) if table else []
+
+
 def report(path: Path) -> str:
     """Label counts and reuse rate per configuration, reuse when the helper was seen vs not
     seen, and usage per configuration: mean tokens in/out, max peak_ctx_tokens (and % of the
@@ -195,6 +213,12 @@ def report(path: Path) -> str:
             " wall time the server was busy, so concurrent requests count once. backend, concurrency and"
             " combined exist only for runs recorded since 2026-11-20 (older rows: unknown / 1 / –).", ""]
     out += performance(rows)
+    if emb := embedder_performance(rows):
+        out += ["", "## Embedder", "",
+                "Per configuration that uses embeddings: texts sent to the embedding server per run (cache misses"
+                " and queries), share served from the on-disk cache, time waiting on the server, and its"
+                " throughput while busy.", ""]
+        out += emb
 
     errors = [r for r in rows if r.get("error")]
     if errors:
