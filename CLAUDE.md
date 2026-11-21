@@ -107,7 +107,7 @@ target file left out, recall@1/3/8 split by naming, the first decoy that outrank
 indexed as `chunk_text` (path, qualname, source), the same text L5 searches. Embeddings: `embedders.py`
 (any `/v1/embeddings` endpoint, cached on disk per content under `.cache/embeddings/`) and
 `retrieval/dense.py` (brute-force cosine, `query_prefix` on queries only); `[embedder]` points at
-Ollama on the iGPU (`qwen3-embedding:0.6b`). L5 implements `task_vs_code` (BM25 or embed), L8 `grep`
+Ollama on the iGPU (`qwen3-embedding:0.6b`). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L8 `grep`
 and `hybrid`; other L5 modes raise NotImplementedError, and the sweep skips that
 variant only (level + retriever + query mode + agent variant), not its siblings.
 

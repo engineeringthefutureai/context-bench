@@ -46,6 +46,9 @@ class ContextBlock:
     queries: list[str] = field(default_factory=list)    # search queries used (L5 model_queries)
     extra_tokens_in: int = 0      # side generations, e.g. the draft in draft_then_search
     extra_tokens_out: int = 0
+    extra_latency_s: float = 0.0  # side generations' wall time (counted in the run's latency)
+    transcript: list[dict] = field(default_factory=list)  # side exchanges, saved in the bundle
+    note: str | None = None       # something the run's error field should show (e.g. a fallback)
 
 
 @dataclass(frozen=True)

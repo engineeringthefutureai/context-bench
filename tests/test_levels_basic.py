@@ -82,4 +82,23 @@ def test_l5_skips_overlapping_chunks_and_unimplemented_variants():
     with pytest.raises(NotImplementedError):
         LEVELS["L5"](TASKS["reuse-002"], WS, retriever="embed")
     with pytest.raises(NotImplementedError):
-        LEVELS["L5"](TASKS["reuse-002"], WS, query_mode="model_queries")
+        LEVELS["L5"](TASKS["reuse-002"], WS, query_mode="task_vs_summary")
+
+
+def test_l5_model_queries_plans_merges_and_falls_back():
+    from context_bench.levels.l5_function_rag import parse_queries, _merge
+    assert parse_queries('```json\n["slug rules", "url path", "slug rules"]\n```') == ["slug rules", "url path"]
+    assert parse_queries("1. product title slug\n- url helpers\n") == ["product title slug", "url helpers"]
+    assert parse_queries('<file path="a.py">\n```python\n') == []
+    assert _merge([[("a", 9), ("b", 8)], [("c", 1), ("a", 0.5)]]) == [("a", 9), ("c", 1), ("b", 8)]
+    seen = {}
+    def planner(task, l1, instruction):
+        seen["l1"], seen["instr"] = l1.text, instruction
+        return '["slug for title url"]', 100, 20, 1.5
+    ctx = LEVELS["L5"](TASKS["reuse-002"], WS, query_mode="model_queries", planner=planner)
+    assert seen["l1"].startswith("File: shopkit/catalog/models.py") and "reus" not in seen["instr"].lower()
+    assert ctx.queries == ["slug for title url"] and ctx.retrieved[0] == "shopkit.utils.text.slug_for_title"
+    assert len(ctx.retrieved) <= 3 and (ctx.extra_tokens_in, ctx.extra_tokens_out, ctx.extra_latency_s) == (100, 20, 1.5)
+    assert ctx.transcript[0]["queries"] == ["slug for title url"] and ctx.note is None
+    bad = LEVELS["L5"](TASKS["reuse-002"], WS, query_mode="model_queries", planner=lambda *a: ("<file>", 1, 1, 0.1))
+    assert bad.queries == [TASKS["reuse-002"].prompt] and "fell back" in bad.note

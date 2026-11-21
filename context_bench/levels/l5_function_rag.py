@@ -15,8 +15,10 @@ Variants:
     "model_queries"     model-planned retrieval: one planning call where the model, seeing the task
                         and the target file only (L1 context), writes up to N_QUERIES search queries;
                         the harness runs each through the retriever, takes the top K_PER_QUERY per
-                        query, merges them (deduplicated, ranked by best score) and keeps TOP_CHUNKS,
-                        the same budget as the other modes. Details below.
+                        query, merges them round-robin by rank (every query's #1, then every #2, ...;
+                        ranks, not scores, because BM25 scores don't compare across queries),
+                        deduplicated, and keeps at most TOP_CHUNKS, the same budget as the other
+                        modes. Details below.
 
 Record retrieved qualnames in ContextBlock.retrieved so recall can be computed.
 
@@ -40,6 +42,8 @@ model_queries in detail
 """
 from __future__ import annotations
 
+import json
+import re
 from typing import Callable
 
 from ..chunking import import_header
@@ -55,20 +59,50 @@ RETRIEVED_HEADER = ("Retrieved code from other files (the most relevant function
 N_QUERIES = 5          # model_queries: queries used from the planning reply
 K_PER_QUERY = 3        # model_queries: hits taken per query before merging
 
-PLAN_INSTRUCTION = ("Before making the change, list up to {n} search queries for finding code in this "
-                    "repository that is relevant to it. Reply with a JSON list of strings only.")
+# Appended to the normal user turn for the planning call only. Neutral: what to search for is the
+# model's call; no mention of reuse, helpers or existing code.
+PLAN_INSTRUCTION = ("First step, before making the change: list up to {n} search queries for finding code "
+                    "in this repository that is relevant to it. The code they find will be shown to you, "
+                    "and you will make the change in your next reply. For this step, reply with a JSON "
+                    "list of strings only.")
 
 # (task, L1-style context) -> (draft_text, tokens_in, tokens_out)
 Drafter = Callable[[Task, ContextBlock], tuple[str, int, int]]
-# (task, L1-style context) -> (raw planning reply, tokens_in, tokens_out); the runner supplies it and
-# records the exchange in the bundle
-Planner = Callable[[Task, ContextBlock], tuple[str, int, int]]
+# (task, L1-style context, instruction) -> (raw planning reply, tokens_in, tokens_out, latency_s); the
+# runner supplies it (same system prompt, prompt arm and thinking setting as the final call)
+Planner = Callable[[Task, ContextBlock, str], tuple[str, int, int, float]]
 
 
 def parse_queries(reply: str, limit: int = N_QUERIES) -> list[str]:
     """JSON list of strings, else one query per non-empty line with bullets/numbering stripped;
-    at most `limit`, duplicates removed. [] if nothing usable."""
-    raise NotImplementedError
+    at most `limit`, duplicates removed. [] if nothing usable. Lines that look like markup or code
+    fences ("<...", "```") are skipped, so a reply that ignored the instruction yields []."""
+    text = reply.strip()
+    queries: list[str] = []
+    m = re.search(r"\[.*\]", text, re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list):
+                queries = [q.strip() for q in data if isinstance(q, str) and q.strip()]
+        except ValueError:
+            pass
+    if not queries:
+        for line in text.splitlines():
+            line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", line).strip().strip('"').strip(",").strip()
+            if line and not line.startswith(("<", "```", "[", "]")):
+                queries.append(line)
+    return list(dict.fromkeys(queries))[:limit]
+
+
+def _merge(results: list[list[tuple[str, float]]]) -> list[tuple[str, float]]:
+    """Round-robin by rank over the per-query hit lists, first occurrence wins."""
+    merged: dict[str, float] = {}
+    for rank in range(max((len(r) for r in results), default=0)):
+        for hits in results:
+            if rank < len(hits) and hits[rank][0] not in merged:
+                merged[hits[rank][0]] = hits[rank][1]
+    return list(merged.items())
 
 
 def _make_retriever(name: str, ws: Workspace) -> Retriever:
@@ -117,10 +151,11 @@ def _render(picked: list[Chunk], ws: Workspace) -> str:
 def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
                   query_mode: str = "task_vs_code", drafter: Drafter | None = None,
                   planner: Planner | None = None) -> ContextBlock:
-    """Implemented: query_mode "task_vs_code" (query = task text), with "bm25" or any retriever the
+    """Implemented: query_mode "task_vs_code" (query = task text) and "model_queries" (needs
+    `planner`), with "bm25" or any retriever the
     runner supplies in ws.retrievers (e.g. "embed"). The target file's own chunks are not indexed:
     the target is shown in full."""
-    if query_mode != "task_vs_code":
+    if query_mode not in ("task_vs_code", "model_queries"):
         raise NotImplementedError(f"query_mode {query_mode!r}")
     path = task.target_file
     if path in ws.files:
@@ -128,9 +163,29 @@ def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
     else:
         target = f"File: {path}\n(This file does not exist yet.)"
     chunks = [c for c in ws.chunks if c.path != path]
+    by_id = {c.qualname: c for c in chunks}
     r = _make_retriever(retriever, ws)
     r.index([c.qualname for c in chunks], [chunk_text(c) for c in chunks])
-    picked = _select(r.search(task.prompt, SEARCH_DEPTH), {c.qualname: c for c in chunks})
+
+    extra = dict(extra_tokens_in=0, extra_tokens_out=0, extra_latency_s=0.0, transcript=[], note=None)
+    if query_mode == "task_vs_code":
+        queries = [task.prompt]
+        hits = r.search(task.prompt, SEARCH_DEPTH)
+    else:
+        if planner is None:
+            raise ValueError("model_queries needs a planner")
+        instruction = PLAN_INSTRUCTION.format(n=N_QUERIES)
+        reply, t_in, t_out, latency = planner(task, ContextBlock(text=target, included=[path]), instruction)
+        queries = parse_queries(reply)
+        if not queries:
+            queries, extra["note"] = [task.prompt], "model_queries: no queries parsed; fell back to the task text"
+        per_query = [r.search(q, K_PER_QUERY) for q in queries]
+        hits = _merge(per_query)
+        extra.update(extra_tokens_in=t_in, extra_tokens_out=t_out, extra_latency_s=latency,
+                     transcript=[{"step": "planning", "instruction": instruction, "reply": reply,
+                                  "queries": queries,
+                                  "hits": {q: [d for d, _ in h] for q, h in zip(queries, per_query)}}])
+    picked = _select(hits, by_id)
     text = target + ("\n\n" + _render(picked, ws) if picked else "")
     return ContextBlock(text=text, included=[path] + [c.qualname for c in picked],
-                        retrieved=[c.qualname for c in picked], queries=[task.prompt])
+                        retrieved=[c.qualname for c in picked], queries=queries, **extra)

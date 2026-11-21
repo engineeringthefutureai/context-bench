@@ -131,7 +131,17 @@ class Experiment:
             sandbox = make_sandbox(self._path(self.config["repos"][rc.repo_size]), Path(tmp) / "repo")
             ws = load_workspace(sandbox)
             ws.retrievers = {"embed": self.retrievers()["embed"]}
-            ctx = LEVELS[rc.level](task, ws, **_level_options(rc))
+            options = _level_options(rc)
+            if rc.query_mode == "model_queries":
+                def planner(t: Task, l1: ContextBlock, instruction: str):
+                    msgs = render(t, l1, rc.prompt_arm, rc.prompt_version)
+                    msgs[-1] = {**msgs[-1], "content": msgs[-1]["content"] + "\n\n" + instruction}
+                    plan = client.chat(msgs, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
+                                       **({} if rc.thinking else {"thinking": False}))
+                    return plan.content, plan.tokens_in, plan.tokens_out, plan.latency_s
+                options["planner"] = planner
+            perf["started_at"] = _now()
+            ctx = LEVELS[rc.level](task, ws, **options)
             if rc.retriever == "embed" or rc.agent_variant == "hybrid":
                 perf["embedder"] = self.embedder().name
             messages = render(task, ctx, rc.prompt_arm, rc.prompt_version)
@@ -150,7 +160,6 @@ class Experiment:
                 return result
 
             agent = None
-            perf["started_at"] = _now()
             if rc.level == "L8":
                 tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
                                                            if rc.agent_variant == "hybrid" else None))
@@ -200,17 +209,18 @@ class Experiment:
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
                          tokens=(chat.tokens_in + ctx.extra_tokens_in, chat.tokens_out + ctx.extra_tokens_out,
                                  max(prompt_tokens, chat.tokens_in, agent.peak_ctx_tokens if agent else 0)),
-                         latency=chat.latency_s,
+                         latency=chat.latency_s + ctx.extra_latency_s,
                          patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
-                         error=error)
+                         error="; ".join(e for e in (error, ctx.note) if e) or None)
         _set(result, perf)
+        # L8: the whole tool conversation. Otherwise side exchanges (e.g. the L5 planning call), plus
+        # the raw message when the text alone doesn't explain the reply (the server lifted pretend
+        # tool calls out of an otherwise empty content).
+        transcript = agent.transcript if agent else list(ctx.transcript)
+        if not agent and (chat.tool_calls or not chat.content.strip()):
+            transcript.append({"finish_reason": chat.finish_reason, "message": chat.message})
         bundle.write_bundle(run_dir, patch=patch, messages=messages, response=chat.content,
-                            reasoning=chat.reasoning,
-                            # raw message when the text alone doesn't explain the reply (e.g. the
-                            # server lifted pretend tool calls out of an otherwise empty content)
-                            transcript=(agent.transcript if agent else
-                                        [{"finish_reason": chat.finish_reason, "message": chat.message}]
-                                        if chat.tool_calls or not chat.content.strip() else None),
+                            reasoning=chat.reasoning, transcript=transcript or None,
                             tests_output=tests_out, result=asdict(result))
         _log(result)
         return result
