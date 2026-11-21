@@ -283,7 +283,26 @@ class AgentResult:
     finish_reason: str = ""   # of the last turn
     tokens_cached: int | None = None   # server-reported cache hits, summed (None if any turn didn't say)
     tokens_cacheable: int = 0          # per turn after the first: the previous turn's prompt, which this
-                                       # turn's prompt starts with (messages are only ever appended)
+                                       # turn's prompt starts with (messages are only ever appended),
+                                       # when both offered the same tools (chat templates put tool
+                                       # definitions at the top, so dropping them changes the prefix)
+
+
+def cacheable_prefix(prev_in: int, prev_offer: bool | None, cur_in: int, cur_offer: bool) -> int:
+    """Tokens of this turn's prompt that repeat the previous turn's prompt exactly: all of it when
+    both turns offered the same tools (or none), else 0 (prev_offer None = no previous turn)."""
+    return min(prev_in, cur_in) if prev_offer is not None and prev_offer == cur_offer else 0
+
+
+def turn_prompts(messages: list[dict], transcript: list[dict]) -> list[tuple[list[dict], bool]]:
+    """Rebuild each turn's request from a saved run: (messages sent, tools offered) per assistant
+    reply. Tools were offered unless the turn followed the BUDGET_SPENT message."""
+    msgs, out = list(messages), []
+    for m in transcript:
+        if m.get("role") == "assistant":
+            out.append((list(msgs), msgs[-1].get("content") != BUDGET_SPENT))
+        msgs.append(m)
+    return out
 
 
 def _assistant_message(chat) -> dict:
@@ -311,7 +330,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     msgs = list(messages)
     calls = errors = tokens_in = tokens_out = peak = cacheable = 0
     cached: int | None = 0
-    prev_in = 0
+    prev_in, prev_offer = 0, None
     reasoning, start = [], time.monotonic()
     chat = None
     while True:
@@ -329,8 +348,8 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                            **({} if thinking else {"thinking": False}))
         tokens_in += chat.tokens_in
         tokens_out += chat.tokens_out
-        cacheable += min(prev_in, chat.tokens_in)
-        prev_in = chat.tokens_in
+        cacheable += cacheable_prefix(prev_in, prev_offer, chat.tokens_in, offer)
+        prev_in, prev_offer = chat.tokens_in, offer
         cached = None if cached is None or chat.cached_tokens is None else cached + chat.cached_tokens
         peak = max(peak, chat.tokens_in)
         if chat.reasoning:

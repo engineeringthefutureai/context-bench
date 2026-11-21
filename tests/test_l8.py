@@ -109,3 +109,17 @@ def test_cached_tokens_parsed_from_either_server():
     assert _cached({"prompt_tokens_details": {"cached_tokens": 512}}, {}) == 512
     assert _cached({}, {"cache_n": 300}) == 300
     assert _cached({"prompt_tokens_details": None}, {}) is None
+
+
+def test_budget_turn_is_not_cacheable_and_turns_rebuild():
+    from context_bench.levels.l8_agentic import cacheable_prefix, turn_prompts
+    assert cacheable_prefix(100, True, 150, True) == 100
+    assert cacheable_prefix(100, True, 150, False) == 0 and cacheable_prefix(0, None, 50, True) == 0
+    many = [("grep", {"pattern": "def"})] * MAX_TOOL_CALLS
+    _, res = _run([many, "final"])
+    assert res.tokens_cacheable == 0                 # turn 2 dropped the tools: new prefix
+    base = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    tr = [{"role": "assistant", "content": "", "tool_calls": [{}]}, {"role": "tool", "content": "x"},
+          {"role": "user", "content": BUDGET_SPENT}, {"role": "assistant", "content": "final"}]
+    turns = turn_prompts(base, tr)
+    assert [len(m) for m, _ in turns] == [2, 5] and [o for _, o in turns] == [True, False]

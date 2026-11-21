@@ -49,7 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--dry-run", action="store_true", help="write judge dirs, don't call the judge")
 
     sub.add_parser("report", help="label counts per configuration")
-    sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
+    rs = sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
+    rs.add_argument("--cacheable", metavar="MODEL", help="also backfill tokens_cacheable for older L8 runs of "
+                    "this [models.*] entry (counts tokens on its server, no generation)")
     return ap
 
 
@@ -78,7 +80,10 @@ def main(argv: list[str] | None = None) -> None:
                                          thinking=args.thinking, task_ids=args.task)
         return
     if args.cmd == "rescore":
-        print(f"rescored {Experiment(Path(args.config)).rescore()} runs")
+        exp = Experiment(Path(args.config))
+        print(f"rescored {exp.rescore()} runs")
+        if args.cacheable:
+            print(f"backfilled tokens_cacheable for {exp.backfill_cacheable(args.cacheable)} L8 runs")
         return
     if args.cmd == "validate-retrieval":
         exp = Experiment(Path(args.config))

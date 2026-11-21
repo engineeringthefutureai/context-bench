@@ -17,6 +17,7 @@ Grading is a separate, later stage: `cbench grade` (context_bench/grade.py).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sys
 import tempfile
@@ -33,7 +34,7 @@ from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests
 from .levels import LEVELS
-from .levels.l8_agentic import RepoTools, run_agent
+from .levels.l8_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
 from .llm import ChatResult, OpenAICompatClient
 from .prompt import PROMPT_VERSION, render
 from .embedders import CachedEmbedder, OpenAICompatEmbedder
@@ -258,6 +259,33 @@ class Experiment:
                 continue
             text = response.read_text()
             r.update(self._protocol(task, r["repo_size"], text, parse_files(text)))
+            n += 1
+        results.rewrite(self.results_path, rows)
+        return n
+
+    def backfill_cacheable(self, model_key: str) -> int:
+        """tokens_cacheable for L8 runs recorded before it existed: rebuild every turn's request from
+        the bundle (prompt.json + transcript.jsonl) and count its prompt tokens on `model_key`'s server
+        (tokenizer only, no generation). Only rows of that model. Returns the count."""
+        model = self.config["models"][model_key]["model"]
+        client = self._client(model_key)
+        rows, n = results.load(self.results_path), 0
+        schema_cache: dict[str, int] = {}
+        for r in rows:
+            run = self.runs_dir / r["run_id"]
+            if r["level"] != "L8" or r["model"] != model or "tokens_cacheable" in r \
+                    or not (run / "transcript.jsonl").is_file():
+                continue
+            messages = json.loads((run / "prompt.json").read_text())
+            transcript = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines()]
+            if r["agent_variant"] not in schema_cache:
+                schema_cache[r["agent_variant"]] = client.count_tokens(json.dumps(tool_schemas(r["agent_variant"])))
+            total, prev = 0, (0, None)
+            for msgs, offer in turn_prompts(messages, transcript):
+                tokens = client.count_prompt_tokens(msgs) + (schema_cache[r["agent_variant"]] if offer else 0)
+                total += cacheable_prefix(prev[0], prev[1], tokens, offer)
+                prev = (tokens, offer)
+            r["tokens_cacheable"] = total
             n += 1
         results.rewrite(self.results_path, rows)
         return n
