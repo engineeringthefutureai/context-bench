@@ -157,3 +157,6 @@ class RunResult:
     tool_errors: int = 0                # failed tool calls (included in tool_calls)
     failed_call_cost: float | None = None  # RunConfig.failed_call_cost
     budget_used: float | None = None    # tool budget spent: successful calls + failed x failed_call_cost
+    # regression check (added 2026-11-21; backfilled by cbench rescore). Label unaffected.
+    repo_tests_passed: int | None = None  # the repo's own tests/ after the patch; None: no <file> blocks
+    repo_tests_total: int | None = None

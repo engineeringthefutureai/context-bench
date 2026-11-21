@@ -145,6 +145,23 @@ the size noted below rather than an effect of the harness. Reuse held at 20/24. 
 from 7/8 to 4/8, convention from 7/8 to 6/8, and both variants fixed the trap this time. The
 L3-vs-L7 tie from finding 2 is better read as "L3 and L7 lead, the gap between them is within noise".
 
+### 11. Regression check: the repo's own tests after each patch
+
+Since the judge found a passing patch that deleted code, every run now also runs the repo's own test
+suite (105 tests on repo M, 0.1 s) on the patched sandbox. It is reported apart from the label, like
+reuse, and was backfilled for all saved runs. Every task's reference solution keeps it green.
+
+Of 181 passing runs, 179 kept the repo's own tests green. The two that didn't:
+
+- cross-002, L5 embeddings + model queries: the patch the judge flagged, which deleted `pick_list`,
+  `packing_slip` and two serializers (104/105).
+- trap-001, L7 hybrid (rerun): it fixed `format_weight` correctly, but along the way changed
+  `pick_box` to return the box's name instead of the box, breaking its callers, and left
+  "-- wait," inside the docstring (104/105). The judge hasn't seen this run yet.
+
+Across all patches, including failing ones, the share that kept the repo's tests green ranges from
+71% (L6) and 81% (L1) to 96% (L3) and 100% (L2), with L4 93%, L5 88% and L7 90%.
+
 ## How sure we are
 
 - **One sample per configuration.** A full rerun flipped 31 of 152 runs between pass and fail:
@@ -204,7 +221,7 @@ now; the level pattern is the signal. `cbench report` has the per-configuration 
 
 ## Next
 
-1. Add a regression check: the repo's own tests must still pass after a patch (catches destructive edits).
+1. Grade the L7 rerun.
 2. Tune speculative decoding (4-5 draft tokens) on a thinking-on sample.
 3. Final round: `cbench run --clean --thinking`, one run at a time, server restarted before each.
 4. More tasks: 10 reuse, 5 cross-file, 3 convention, 3 control, and a second trap.

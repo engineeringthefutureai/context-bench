@@ -31,6 +31,16 @@ def run_hidden_tests(sandbox: Path, tests_dir: Path, shared_dir: Path,
     return passed, total, reuse_passed, out
 
 
+def run_repo_tests(sandbox: Path, shared_dir: Path, timeout: int = 120) -> tuple[int, int, str]:
+    """The repository's own test suite (sandbox/tests, as patched) after the change: (passed, total,
+    output). Catches patches that pass the hidden tests while breaking or deleting code elsewhere.
+    (0, 0, "") when the repo has no tests/ directory."""
+    tests = sandbox / "tests"
+    if not tests.is_dir():
+        return 0, 0, ""
+    return _pytest(sandbox, shared_dir, timeout, [str(tests)])
+
+
 def _pytest(sandbox: Path, shared_dir: Path, timeout: int, args: list[str]) -> tuple[int, int, str]:
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(sandbox), str(shared_dir)]),
            "PYTHONDONTWRITEBYTECODE": "1"}

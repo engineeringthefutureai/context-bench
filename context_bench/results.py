@@ -55,6 +55,12 @@ def config_label(r: dict) -> str:
             + (" h1" if r["level"] == "L7" and r.get("failed_call_cost") is None else ""))
 
 
+def _repo_intact(rs: list[dict]) -> str:
+    """Passing runs whose patch also kept the repo's own tests green, e.g. "12/13" ("–": not checked)."""
+    ok = [r for r in rs if r["label"] == "ok" and r.get("repo_tests_total") is not None]
+    return f"{sum(r['repo_tests_passed'] == r['repo_tests_total'] for r in ok)}/{len(ok)}" if ok else "–"
+
+
 def _ran_out(r: dict) -> bool:
     return (r.get("error") or "").startswith("output hit max_output_tokens")
 
@@ -191,6 +197,7 @@ def report(path: Path, grades_path: Path | None = None) -> str:
                                  for s in ("bad_format", "no_code", "tool_request")),
                         sum(1 for r in rs if r.get("lenient_total") and r["lenient_passed"] == r["lenient_total"]),
                         f"{sum(bool(r['reuse_passed']) for r in ru)}/{len(ru)}" if ru else "–",
+                        _repo_intact(rs),
                         sum(r["tokens_in"] for r in rs) // len(rs), _cache_share(rs),
                         sum(r["tokens_out"] for r in rs) // len(rs),
                         f"{peak} ({100 * peak / rs[0]['context_window']:.1f}%)",
@@ -199,7 +206,7 @@ def report(path: Path, grades_path: Path | None = None) -> str:
                         f"{100 * sum(r.get('legacy_ctx_share') or 0 for r in rs) / len(rs):.0f}%",
                         sum(bool(r.get("legacy_used")) for r in rs)])
     out += _table(["Config", "runs", "ok", "broken", "no_fit", "tool_error", "ran out",
-                   "fmt/no code/asked", "lenient ok", "reuse ok",
+                   "fmt/no code/asked", "lenient ok", "reuse ok", "repo tests kept (ok runs)",
                    "mean in", "cacheable in", "mean out", "max peak", "mean latency", "mean tools",
                    "dead ctx", "dead used"], summary)
 

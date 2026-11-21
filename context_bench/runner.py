@@ -35,7 +35,7 @@ import httpx
 from . import bundle, results
 from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_files,
                     parse_files_lenient, unified_patch)
-from .evaluate.hidden_tests import run_hidden_tests
+from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
 from .levels.l7_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
 from .llm import ChatResult, OpenAICompatClient, env_value
@@ -255,6 +255,10 @@ class Experiment:
             except UnsafePath as e:
                 error = f"unsafe path: {e}"
             passed, total, reuse, tests_out = run_hidden_tests(sandbox, task.hidden_tests, self.shared_dir)
+            if files:
+                r_passed, r_total, r_out = run_repo_tests(sandbox, self.shared_dir)
+                perf.update(repo_tests_passed=r_passed, repo_tests_total=r_total)
+                tests_out += "\n--- repo's own tests ---\n" + r_out
         perf.update(self._protocol(task, rc.repo_size, chat.content, files))
         if chat.tool_calls and not files:       # the server parsed pretend tool calls out of the text
             perf["format_status"] = "tool_request"
@@ -308,7 +312,8 @@ class Experiment:
 
     def rescore(self) -> int:
         """Recompute the output-protocol fields of recorded runs from their saved responses, and the
-        helper visibility fields from their saved prompts and tool outputs (no model calls): after
+        helper visibility fields from their saved prompts and tool outputs (no model calls), and fill in
+        the repo's-own-tests check for runs recorded before it existed: after
         the parser, classifier or visibility rules change, or for runs recorded before they existed.
         Skips runs whose repo has changed since (repo_hash). Rewrites results.jsonl; returns the count."""
         rows, n = results.load(self.results_path), 0
@@ -331,9 +336,25 @@ class Experiment:
                 patch_file = self.runs_dir / r["run_id"] / "patch.diff"
                 r.update(self._seen_metrics(task, seen, ws,
                                             patch_file.read_text() if patch_file.is_file() else None))
+            if "repo_tests_total" not in r:
+                r.update(self._repo_tests(r["repo_size"], files))
             n += 1
         results.rewrite(self.results_path, rows)
         return n
+
+    def _repo_tests(self, repo_size: str, files: dict[str, str]) -> dict:
+        """repo_tests_passed/total for a saved reply: apply its <file> blocks to a fresh sandbox and run
+        the repo's own tests (None/None without file blocks)."""
+        if not files:
+            return {"repo_tests_passed": None, "repo_tests_total": None}
+        with tempfile.TemporaryDirectory(prefix="cbench-repotests-") as tmp:
+            box = make_sandbox(self._path(self.config["repos"][repo_size]), Path(tmp) / "repo")
+            try:
+                apply_files(box, files)
+            except UnsafePath:
+                return {"repo_tests_passed": None, "repo_tests_total": None}
+            passed, total, _ = run_repo_tests(box, self.shared_dir)
+        return {"repo_tests_passed": passed, "repo_tests_total": total}
 
     def backfill_cacheable(self, model_key: str) -> int:
         """tokens_cacheable (and the true per-turn peak) for L7 runs recorded before they existed or

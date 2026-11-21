@@ -1,14 +1,14 @@
 """Every task honours its contract (CLAUDE.md, "Fixtures and tasks"), on each repo it runs on:
 the unmodified repo fails, the reference solution passes (and reuses, for reuse/trap tasks), a
 context-blind solution fails (reuse tasks: fails test_reuse.py), and a trap's trusting solution
-fails its tests. Slow-ish (real hidden-test runs), so one test per task and repo."""
+fails its tests. The reference also keeps the repo's own tests passing. Slow-ish (real hidden-test runs), so one test per task and repo."""
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from context_bench.apply import make_sandbox
-from context_bench.evaluate.hidden_tests import run_hidden_tests
+from context_bench.evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from context_bench.tasks import load_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +23,9 @@ def _run(task, size, tmp_path, solution=None):
         diff = (ROOT / "tasks" / task.id / "solutions" / f"{solution}.diff").read_text()
         subprocess.run(["patch", "-p1", "-s", "--no-backup-if-mismatch"], cwd=box, input=diff, text=True, check=True)
     passed, total, reuse, _ = run_hidden_tests(box, task.hidden_tests, SHARED)
+    if solution == "reference":         # a correct change keeps the repo's own tests passing
+        r_passed, r_total, out = run_repo_tests(box, SHARED)
+        assert r_total > 0 and r_passed == r_total, f"reference breaks the repo's own tests:\n{out[-2000:]}"
     return passed, total, reuse
 
 
@@ -48,3 +51,12 @@ def test_task_contract(task_id, size, tmp_path):
     if "trusting" in solutions:
         passed, total, reuse = _run(task, size, tmp_path, "trusting")
         assert passed < total and reuse is True, "trusting solution should reuse and fail"
+
+
+def test_repo_tests_catch_a_destructive_patch(tmp_path):
+    box = make_sandbox(ROOT / "fixtures" / "repo_M", tmp_path / "box")
+    passed, total, _ = run_repo_tests(box, SHARED)
+    assert total > 0 and passed == total
+    (box / "shopkit" / "money.py").write_text("# lines 1-40\n")      # e.g. a reply that elided a file
+    passed, total, _ = run_repo_tests(box, SHARED)
+    assert passed < total

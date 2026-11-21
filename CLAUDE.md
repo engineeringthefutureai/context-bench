@@ -91,6 +91,9 @@ L1/L2/L3/L5/L7, to separate the effect of the model from the effect of context b
 
 ## Labels and reuse
 Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `ok`.
+Regression check, also separate: `repo_tests_passed/total` = the repo's own `tests/` after the patch
+(catches patches that pass the hidden tests while breaking or deleting code elsewhere; `cbench rescore`
+backfills it from saved replies). Every task's reference solution keeps them green.
 Reuse is a separate field, `reuse_passed` (reuse tasks only): each reuse task has
 `hidden_tests/test_reuse.py`, which spies on the needed helper (`tasks/_shared/reuse_spy.py`) and checks
 the new code really calls it. It is reported apart from the correctness tests, so "correct but
