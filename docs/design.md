@@ -81,3 +81,11 @@ ones are invisible on M: `normalize_sku` ranks 89th and `format_money` 271st of 
 chunks for reuse-001 ("product codes ... cleaned up", "invoices" share no token with either name or
 body). On S (29 chunks) they still scrape in at 6 and 15. No stemming (`codes` != `code`), on
 purpose for now. This is the gap B (model_queries) and the embed variants are meant to close.
+
+**L8 thinking off vs on (27B FP8, prompt v3, S+M, 2026-11-20).** Both 11/13. trap-001: both reuse
+`format_weight` *and* fix its lb branch (4/4) - the first thinking-off run to fix the drift; every
+single-shot level with thinking off trusted it. Reuse tasks 5/5 with reuse in both arms. No patch
+touched dead code; 3 runs read a dead file once and moved on. Cost: thinking off spends the whole
+budget (15 calls every run, ~40k tokens in, ~0.9k out, ~100 s); thinking on uses ~11 calls, ~20k in,
+~6.3k out, ~250 s. A real tool loop makes up for thinking off on this set; it pays in input tokens
+instead of output tokens.
