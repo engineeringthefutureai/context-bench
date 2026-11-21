@@ -65,9 +65,14 @@ class Experiment:
         self._backend: dict[tuple[str, str], str] = {}
         self._repo_hash: dict[str, str] = {}
         self._embedder = None
+        self._client_lock = threading.Lock()
 
     def embedder(self):
         """The configured [embedder], with an on-disk cache under [paths].cache/embeddings."""
+        with self._client_lock:
+            return self._make_embedder()
+
+    def _make_embedder(self):
         if self._embedder is None:
             cfg = self.config["embedder"]
             self._embedder = CachedEmbedder(OpenAICompatEmbedder(cfg["base_url"], cfg["model"]),
@@ -101,13 +106,14 @@ class Experiment:
 
     def _client(self, model_key: str, url: str | None = None):
         url = url or self.base_urls(model_key)[0]
-        if (model_key, url) not in self._clients:
-            self._clients[model_key, url] = self._client_factory(self.config["models"][model_key], url)
-            client = self._clients[model_key, url]
-            if model_key not in self._sampling:
-                self._sampling[model_key] = client.server_sampling()
-            self._backend[model_key, url] = client.backend() if hasattr(client, "backend") else "unknown"
-        return self._clients[model_key, url]
+        with self._client_lock:     # sweep workers may share a URL: publish the client last
+            if (model_key, url) not in self._clients:
+                client = self._client_factory(self.config["models"][model_key], url)
+                if model_key not in self._sampling:
+                    self._sampling[model_key] = client.server_sampling()
+                self._backend[model_key, url] = client.backend() if hasattr(client, "backend") else "unknown"
+                self._clients[model_key, url] = client
+            return self._clients[model_key, url]
 
     def run_one(self, rc: RunConfig, base_url: str | None = None, concurrency: int = 1) -> RunResult:
         """One run; base_url picks one of the model's servers (default: the first); concurrency is

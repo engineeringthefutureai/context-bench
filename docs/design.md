@@ -89,3 +89,12 @@ touched dead code; 3 runs read a dead file once and moved on. Cost: thinking off
 budget (15 calls every run, ~40k tokens in, ~0.9k out, ~100 s); thinking on uses ~11 calls, ~20k in,
 ~6.3k out, ~250 s. A real tool loop makes up for thinking off on this set; it pays in input tokens
 instead of output tokens.
+
+**Embeddings and L8 hybrid (thinking off, prompt v3, S+M, 2026-11-20).** L5 bm25 7/13, L5 embed 6/13,
+L8 grep 11/13, L8 hybrid 13/13. The query is what matters, not the retriever: with the task text,
+both retrievers miss the opaque helpers on M (validate-retrieval); with the model's own query
+("clean product code SKU normalization") the same embedder ranks `normalize_sku` first, with the
+decoys `cleanSKU` (dead) and `sku_code` (dead) right behind it, and the agent picked the live one.
+Search surfaces candidates; judging them is the model's job (decoys in results are not a retrieval
+failure). Hybrid used semantic_search once per reuse/trap task and was cheaper than grep on average
+(32k vs 40k input tokens), finishing early when the first query hit.
