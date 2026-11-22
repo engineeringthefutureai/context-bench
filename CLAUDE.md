@@ -110,11 +110,12 @@ recomputes these from saved responses without calling the model. Kept simple on 
 ## Grading (blind, comparison-based)
 Tests give the labels and reuse; grading adds a judged view of code quality and never changes
 them. Every run saves its patch and logs in `results/runs/<run_id>/` (`context_bench/bundle.py`).
-`cbench grade` (`context_bench/grade.py`) shows one Claude Code judge, per task, all candidate patches
+`cbench grade` (`context_bench/grade.py`) shows one judge, per task, all candidate patches
 side by side, numbered, with the original repo and `grading/rubric.md`, in a directory outside this
 project. The judge never learns how any candidate was produced (level, model, prompt, context, tools);
-`[grading].judge_command` confines it to read-only tools inside that directory, with no settings or
-CLAUDE.md loaded.
+`[grading].judge_command` confines it to read-only tools inside that directory. Judge: agy (plan mode,
+sandbox, a session-only read-only command allow-list) since 2026-11-22, the Claude Code judge before
+(cheaper; calibrated on 3 tasks). Each grade records its `judge`; never compare ranks across judges.
 
 ## Retrieval
 Everything goes through the `Retriever` protocol (`context_bench/retrieval/base.py`). Reference

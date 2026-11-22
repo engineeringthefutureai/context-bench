@@ -100,7 +100,8 @@ def parse_verdict(text: str, numbers: list[int]) -> dict:
 
 
 def run_judge(judge_dir: Path, judge_command: list[str], numbers: list[int], timeout: int = 1800) -> dict:
-    """Run the judge in judge_dir. stdout is the CLI's JSON envelope: take its `result` string,
+    """Run the judge in judge_dir. stdout is the CLI's JSON envelope: take its `result` (Claude Code)
+    or `response` (agy) string,
     strip a surrounding ```json fence if present, parse it, and check every candidate is ranked and
     scored exactly once. Retry once on invalid output; then raise."""
     error = None
@@ -109,7 +110,9 @@ def run_judge(judge_dir: Path, judge_command: list[str], numbers: list[int], tim
                               timeout=timeout)
         try:
             envelope = json.loads(proc.stdout)
-            return parse_verdict(envelope["result"] if isinstance(envelope, dict) else proc.stdout, numbers)
+            text = (envelope.get("result", envelope.get("response")) if isinstance(envelope, dict)
+                    else proc.stdout)                   # Claude Code: "result"; agy: "response"
+            return parse_verdict(text, numbers)
         except (ValueError, KeyError, TypeError) as e:
             error = f"{type(e).__name__}: {e} (exit {proc.returncode}; stderr: {proc.stderr[-300:]})"
     raise RuntimeError(f"judge gave no valid verdict twice: {error}")
@@ -139,6 +142,7 @@ def grade_task(task, size: str, rows: list[dict], *, repo: Path, runs_dir: Path,
     numbers = [c.number for c in candidates]
     verdict = (run_judge(dst, grading["judge_command"], numbers) if len(candidates) > 1 else
                {"ranking": [[1]], "candidates": {"1": {d: None for d in DIMENSIONS} | {"note": "only candidate"}}})
+    judge = grading.get("judge") or Path(grading["judge_command"][0]).name
     pct = _rank_pct(verdict["ranking"])
     rank_of = {int(n): i + 1 for i, g in enumerate(verdict["ranking"]) for n in g}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -149,7 +153,7 @@ def grade_task(task, size: str, rows: list[dict], *, repo: Path, runs_dir: Path,
             lines.append({"run_id": run_id, "task_id": task.id, "repo_size": size, "candidate": c.number,
                           "n_candidates": len(candidates), "rank": rank_of[c.number], "rank_pct": pct[c.number],
                           **{d: scores.get(d) for d in DIMENSIONS}, "note": scores.get("note", ""),
-                          "rubric_version": rubric_version, "graded_at": now})
+                          "rubric_version": rubric_version, "judge": judge, "graded_at": now})
     grades_path.parent.mkdir(parents=True, exist_ok=True)
     with grades_path.open("a") as f:
         f.writelines(json.dumps(line) + "\n" for line in lines)
@@ -169,15 +173,24 @@ def load_grades(grades_path: Path) -> dict[str, dict]:
 
 
 def report(rows: list[dict], grades_path: Path) -> list[str]:
-    """Markdown lines: per configuration, graded runs, mean rank percentile and mean scores."""
+    """Markdown lines: which judge(s) graded these runs (grades from before 2026-11-22 have no `judge`
+    field: claude), then per configuration, graded runs, mean rank percentile and mean scores."""
     from .results import _table, config_label
     grades = load_grades(grades_path)
     groups: dict[str, list[dict]] = {}
     for r in rows:
         if (g := grades.get(r["run_id"])) and g["n_candidates"] > 1:
             groups.setdefault(config_label(r), []).append(g)
+    judges: dict[str, int] = {}
+    for gs in groups.values():
+        for g in gs:
+            judges[g.get("judge", "claude")] = judges.get(g.get("judge", "claude"), 0) + 1
     table = []
     for label, gs in sorted(groups.items(), key=lambda kv: sum(g["rank_pct"] for g in kv[1]) / len(kv[1])):
         mean = lambda key: sum(g[key] for g in gs if g[key] is not None) / max(1, sum(g[key] is not None for g in gs))
         table.append([label, len(gs), f"{mean('rank_pct'):.2f}"] + [f"{mean(d):.1f}" for d in DIMENSIONS])
-    return _table(["Config", "graded runs", "rank pct (0 = best)", *DIMENSIONS], table) if table else []
+    if not table:
+        return []
+    note = ["Judge: " + ", ".join(f"{j} ({n} runs)" for j, n in sorted(judges.items()))
+            + (". Ranks from different judges are not comparable; regrade to one judge." if len(judges) > 1 else "."), ""]
+    return note + _table(["Config", "graded runs", "rank pct (0 = best)", *DIMENSIONS], table)
