@@ -31,7 +31,10 @@ tokens and time.
 Each level lives in its own self-contained module under `context_bench/levels/`, so every strategy can
 be read on its own.
 
-**Status:** skeleton. Interfaces and specs are in place; implementations land level by level.
+**Status:** all eight levels are implemented and a full development round has run (thinking off,
+20 tasks, 386 runs + an L7 rerun, blind-graded). Findings so far: [docs/findings.md](docs/findings.md)
+and the illustrated [docs/report.html](docs/report.html). Next: the final round with thinking on, one
+run at a time on a freshly restarted server, and 20 more tasks.
 
 ```bash
 pip install -e '.[dev]'

@@ -17,9 +17,10 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 
 ## How work happens in this repo
 
-- **This is a skeleton.** Every function body is `raise NotImplementedError` with a docstring that is the
-  spec. Implementations are added **one piece at a time, on request**. Implement only what you're asked
-  to; don't fill in neighbouring stubs along the way.
+- **Started as a skeleton; most of it is implemented now.** What remains is stubs that `raise
+  NotImplementedError` with a docstring that is the spec (L5 `task_vs_summary` / `draft_then_search`,
+  `build_summaries`, the deprioritized symbol graph). Implementations are added **one piece at a time,
+  on request**. Implement only what you're asked to; don't fill in neighbouring stubs along the way.
 - **Each level lives in its own module (`context_bench/levels/lN_*.py`) and is self-contained.**
   Duplication between level modules is intentional, so each strategy can be read and studied on its own.
   Don't extract shared helpers across level modules or make one level import another.
@@ -167,7 +168,7 @@ variant only (level + retriever + query mode + agent variant), not its siblings.
   reference passes `test_reuse.py`, the context-blind solution fails it.
 - `helpers/registry.toml` — every planted helper and its naming style, plus decoys (for analysis and retrieval recall).
 
-## Commands (once implemented)
+## Commands
 ```
 pip install -e '.[dev]' && pytest
 cbench validate-retrieval --retrievers bm25,embed
@@ -175,8 +176,10 @@ cbench one --task reuse-001 --level L1
 cbench run                       # resumable; --level L1 --level L3 to limit, --dry-run to list what is left
 cbench run --clean --thinking    # final round: serial, model server restarted before every run (cold cache;
                                  # CBENCH_RESTART_CMD in .env), --rerun to redo recorded configs
-cbench rescore                   # protocol fields from saved responses, no model calls
+cbench rescore                   # protocol, visibility, repo-tests fields from saved runs, no model calls
+cbench grade                     # blind judge per task (uses the Claude account; --task to limit)
 cbench report
 ```
-Model under test: Qwen 3.8 27B, `Qwen3.8-27B-UD-Q6_K_XL.gguf` (KV cache q8_0), 128k context (`config/experiment.toml`);
-the endpoint is a local placeholder.
+Model under test: Qwen 3.8 27B. Results so far come from the FP8 build on vLLM (`[models."qwen3.8-27b-fp8"]`,
+2x B60, TP=2, 4 concurrent requests): pass `--model qwen3.8-27b-fp8`, since the default entry is the
+llama.cpp GGUF (`Qwen3.8-27B-UD-Q6_K_XL.gguf`, KV cache q8_0). Embedder: Ollama on the iGPU, port 21434.

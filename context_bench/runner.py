@@ -511,14 +511,16 @@ class Experiment:
     def grade(self, task_ids: list[str] | None = None, dry_run: bool = False,
               repo_sizes: list[str] | None = None) -> int:
         """cbench grade: one blind judge per task and repo over the patches of the current prompt version
-        on the fixture as it is now (grade.py). Returns the number of runs graded."""
+        on the fixture as it is now (grade.py), leaving out L7 runs of the original tool harness.
+        Returns the number of runs graded."""
         from . import grade
         grading = self.config["grading"]
         rubric = self._path(grading["rubric"])
         version = (re.search(r"rubric_version:\s*(\S+)", rubric.read_text()) or [None, "?"])[1]
         rows = [r for r in results.load(self.results_path)
                 if r.get("prompt_version", 1) == PROMPT_VERSION and r["task_id"] in self.tasks
-                and (not task_ids or r["task_id"] in task_ids)]
+                and (not task_ids or r["task_id"] in task_ids)
+                and not (r["level"] == "L7" and r.get("failed_call_cost") is None)]   # superseded harness
         graded = 0
         for task_id in sorted({r["task_id"] for r in rows}):
             for size in sorted({r["repo_size"] for r in rows if r["task_id"] == task_id
