@@ -135,6 +135,9 @@ and `hybrid`; other L5 modes raise NotImplementedError, and the sweep skips that
 variant only (level + retriever + query mode + agent variant), not its siblings.
 
 ## Fixtures and tasks
+**Fixtures are frozen since 2026-11-22 (final round).** Don't change any file under `fixtures/`: a
+changed repo_hash makes every recorded run on that repo stale and the sweep reruns them all (~20-30 h
+with thinking on). New tasks must use repo M as it is (25 planted helpers; ~11 used so far).
 - `fixtures/repo_S/` — seed test repo (`shopkit`, ~2k tokens) with the first three planted helpers.
 - `fixtures/repo_M/` — the grown `shopkit` (~40.6k tokens at L3 incl. dead code and its tests, ~110 files, stdlib only, its own passing
   `tests/`). A strict superset of S: every S file is byte-identical, so every task runs on both
