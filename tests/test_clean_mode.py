@@ -74,3 +74,45 @@ def test_queries_bypass_the_embedding_cache(tmp_path):
     r.search("same query", 1); r.search("same query", 1)
     assert cached.stats.snapshot()["embed_texts"] == 2          # both queries went to the server
     assert len(list(cached.dir.glob("*.npy"))) == 1             # only the document is cached
+
+
+class ResetClient(ReadyClient):
+    def __init__(self, *a, works=True, **k):
+        super().__init__(*a, **k)
+        self.resets, self.works = 0, works
+
+    def reset_prefix_cache(self):
+        self.resets += 1
+        return self.works
+
+
+def _hybrid(tmp_path, monkeypatch, works=True, every="3", free_mb=50_000):
+    marker = tmp_path / "restarts.log"
+    exp, _, _ = _clean_exp(tmp_path, monkeypatch, f"echo restart >> {marker}")
+    client = ResetClient(REPLY, works=works)
+    exp._client_factory = lambda m, url: client
+    monkeypatch.setenv("CBENCH_RESTART_EVERY", every)
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: free_mb)
+    return exp, client, marker
+
+
+def test_clean_resets_the_cache_between_restarts(tmp_path, monkeypatch):
+    exp, client, marker = _hybrid(tmp_path, monkeypatch)
+    exp.sweep(["L0", "L1"], clean=True, task_ids=["control-001", "control-002", "control-003"])
+    rows = results.load(exp.results_path)
+    methods = [r["cold_method"] for r in rows]
+    assert all(r["cold_start"] for r in rows) and len(rows) >= 4
+    assert methods == ["restart" if i % 3 == 0 else "reset" for i in range(len(rows))]
+    restarts = methods.count("restart")
+    assert marker.read_text().count("restart") == restarts and client.resets == len(rows) - restarts
+
+
+def test_clean_restarts_when_reset_is_missing_or_memory_is_low(tmp_path, monkeypatch):
+    exp, client, marker = _hybrid(tmp_path, monkeypatch, works=False)
+    exp.sweep(["L0"], clean=True)
+    assert [r["cold_method"] for r in results.load(exp.results_path)] == ["restart", "restart"]
+    (tmp_path / "low").mkdir()
+    exp2, client2, marker2 = _hybrid(tmp_path / "low", monkeypatch, free_mb=100)
+    exp2.sweep(["L0"], clean=True)
+    assert [r["cold_method"] for r in results.load(exp2.results_path)] == ["restart", "restart"]
+    assert client2.resets == 0

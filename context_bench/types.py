@@ -144,7 +144,9 @@ class RunResult:
                                         #   defined) somewhere in the context; None: task needs none
     legacy_ctx_share: float | None = None  # share of the context (chars) from dead code ([legacy] paths)
     legacy_used: bool | None = None     # the patch imports or references dead code; None: no patch
-    cold_start: bool = False            # clean mode: the model server was restarted right before this run
+    cold_start: bool = False            # clean mode: the prefix cache was cold when this run started
+    cold_method: str | None = None      # clean mode: "restart" (server restarted) or "reset" (prefix cache
+                                        #   dropped via /reset_prefix_cache, server kept running)
     # embedder work in this run (added 2026-11-21; absent in older rows / runs without embeddings)
     embed_texts: int = 0                # texts sent to the embedding server (cache misses + queries)
     embed_tokens: int = 0               # tokens the embedding server reported for them

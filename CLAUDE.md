@@ -83,8 +83,11 @@ harness-only. A `legacy_hint` prompt arm, if ever wanted, is an opt-in ablation 
 **Current scope: one model (Qwen 3.8 27B), one shot per config (seed 1), server-default temperature.**
 During development thinking is off (`[generation].thinking = false`, labelled "nothink"); the final
 round reruns everything with thinking on, in clean mode (`cbench run --clean --thinking`): one run at a
-time, the model server restarted before each, so no prefix cache carries over between tasks that all
-share the same repo and system prompt. Both arms keep separate run ids. Crude on purpose;
+time, with the prefix cache made cold before each, so nothing cached carries over between tasks that
+all share the same repo and system prompt. Between runs the cache is dropped (`/reset_prefix_cache`,
+vLLM with `VLLM_SERVER_DEV_MODE=1`, 75 ms); the server is fully restarted on the first run, every
+`CBENCH_RESTART_EVERY` runs (25) and when host memory drops below `CBENCH_RESTART_MIN_FREE_MB` (6000),
+since the reset frees no memory and the vLLM workers grow in host RAM. Each run records `cold_method`. Both arms keep separate run ids. Crude on purpose;
 more seeds, a second size and the model axis come later.
 
 Optional model axis (later): an older and a current model of the same family and size, same quantization, on
@@ -175,8 +178,8 @@ pip install -e '.[dev]' && pytest
 cbench validate-retrieval --retrievers bm25,embed
 cbench one --task reuse-001 --level L1
 cbench run                       # resumable; --level L1 --level L3 to limit, --dry-run to list what is left
-cbench run --clean --thinking    # final round: serial, model server restarted before every run (cold cache;
-                                 # CBENCH_RESTART_CMD in .env), --rerun to redo recorded configs
+cbench run --clean --thinking    # final round: serial, cold prefix cache before every run (cache reset,
+                                 # periodic restarts; CBENCH_RESTART_* in .env), --rerun to redo recorded configs
 cbench rescore                   # protocol, visibility, repo-tests fields from saved runs, no model calls
 cbench grade                     # blind judge per task (uses the Claude account; --task to limit)
 cbench report

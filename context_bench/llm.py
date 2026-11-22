@@ -111,6 +111,14 @@ class OpenAICompatClient:
                 pass
         return False
 
+    def reset_prefix_cache(self) -> bool:
+        """Drop the server's prefix cache (vLLM: POST /reset_prefix_cache, needs VLLM_SERVER_DEV_MODE=1).
+        Frees no memory, only forgets cached prefixes. False if the server doesn't offer it."""
+        try:
+            return self._http.post("/reset_prefix_cache", timeout=30).status_code == 200
+        except httpx.HTTPError:
+            return False
+
     def backend(self) -> str:
         """Which server this is, from endpoints only it has: llama.cpp (/props), Ollama
         (/api/version), vLLM (/version); else "unknown"."""

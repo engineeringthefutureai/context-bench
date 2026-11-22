@@ -74,6 +74,7 @@ class Experiment:
         self._repo_hash: dict[str, str] = {}
         self._embedder = None
         self._client_lock = threading.Lock()
+        self._since_restart: dict[tuple[str, str], int] = {}   # clean mode: runs since the last restart
 
     def embedder(self):
         """The configured [embedder], with an on-disk cache under [paths].cache/embeddings."""
@@ -145,26 +146,47 @@ class Experiment:
         client.chat([{"role": "user", "content": "Reply with OK."}], temperature=None, seed=1,
                     max_tokens=8, thinking=False)
 
+    def make_cold(self, model_key: str, url: str) -> str:
+        """Clean mode, before a run's first model call: make the prefix cache cold. Restarts the server
+        (restart_server) on the sweep's first run, every CBENCH_RESTART_EVERY runs (default 25; 1 =
+        always), when the host's free memory is below CBENCH_RESTART_MIN_FREE_MB (default 6000; the
+        vLLM workers grow in host RAM and only a restart gives it back; read from this machine's
+        /proc/meminfo, so it assumes the server runs here), or when the server has no prefix-cache
+        reset. Otherwise drops the prefix cache (/reset_prefix_cache), which takes milliseconds.
+        Returns "restart" or "reset"."""
+        key = (model_key, url)
+        every = int(env_value("CBENCH_RESTART_EVERY") or 25)
+        min_free = int(env_value("CBENCH_RESTART_MIN_FREE_MB") or 6000)
+        since = self._since_restart.get(key)
+        if since is not None and since + 1 < every and _free_mb() >= min_free:
+            reset = getattr(self._client(model_key, url), "reset_prefix_cache", None)
+            if reset is not None and reset():
+                self._since_restart[key] = since + 1
+                return "reset"
+        self.restart_server(model_key, url)
+        self._since_restart[key] = 0
+        return "restart"
+
     def run_one(self, rc: RunConfig, base_url: str | None = None, concurrency: int = 1,
                 cold_start: bool = False) -> RunResult:
         """One run; base_url picks one of the model's servers (default: the first); concurrency is
         how many runs share that server (recorded, so latency can be read in context).
-        cold_start=True restarts the server (restart_server) right before the run's first model call,
-        so no prefix cache survives from earlier runs; context building happens first, so a run whose
-        level isn't implemented never costs a restart."""
+        cold_start=True makes the prefix cache cold (make_cold: a restart or a cache reset) right before
+        the run's first model call, so nothing cached survives from earlier runs; context building
+        happens first, so a run whose level isn't implemented never costs a restart."""
         task = self.tasks[rc.task_id]
         model_cfg = self.config["models"][rc.model]
         gen = self.config["generation"]
         max_out, window = gen["max_output_tokens"], model_cfg["context_window"]
         client = self._client(rc.model, base_url)
         url = base_url or self.base_urls(rc.model)[0]
-        restarted = False
+        restarted, cold_method = False, None
 
         def model_client():
-            """The client for model calls; in clean mode the first call restarts the server."""
-            nonlocal client, restarted
+            """The client for model calls; in clean mode the first call makes the cache cold."""
+            nonlocal client, restarted, cold_method
             if cold_start and not restarted:
-                self.restart_server(rc.model, url)
+                cold_method = self.make_cold(rc.model, url)
                 client, restarted = self._client(rc.model, url), True
             return client
         perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version, repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
@@ -227,7 +249,7 @@ class Experiment:
                 chat = model_client().chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                            **({} if rc.thinking else {"thinking": False}))
             perf.update(finished_at=_now(), prefill_s=_round(chat.prefill_s), decode_s=_round(chat.decode_s),
-                        cold_start=restarted)
+                        cold_start=restarted, cold_method=cold_method)
             if uses_embedder:
                 perf.update(self.embedder().stats.snapshot())
             if not agent:
@@ -432,9 +454,9 @@ class Experiment:
         collapse to the same run_id (e.g. a thinking arm under --no-thinking) run once.
         A level or variant that isn't implemented yet is skipped (reported once); a server error (timeout,
         connection, HTTP status) skips that run, so the next `cbench run` retries it.
-        clean=True: serial (one run at a time, each model's first server only) and the server is
-        restarted before every run (restart_server), so every run starts from a cold prefix cache. A
-        failed restart stops the sweep."""
+        clean=True: serial (one run at a time, each model's first server only) and the prefix cache is
+        made cold before every run (make_cold: a cache reset, with a full restart on the first run,
+        every CBENCH_RESTART_EVERY runs and when host memory runs low). A failed restart stops the sweep."""
         recorded = {r["run_id"]: r.get("repo_hash") for r in results.load(self.results_path)}
         unique = list({rc.run_id: rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)}.values())
         todo = [rc for rc in unique
@@ -586,6 +608,17 @@ def _seen_text(run_dir: Path) -> str | None:
             if m.get("role") == "tool":
                 parts.append(m.get("content") or "")
     return "\n\n".join(parts)
+
+
+def _free_mb() -> int:
+    """MemAvailable of this machine in MB (a large number where /proc/meminfo doesn't exist)."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 1 << 30
 
 
 def _had_tool_calls(transcript: Path, level: str) -> bool:
