@@ -1,0 +1,269 @@
+"""Build the data files for the GitHub Pages site (docs/raw/) from results/ and tasks/.
+
+    python scripts/build_site.py            # writes docs/raw/{index,tasks}.json and docs/raw/runs/<id>.json
+
+Which rows: the final round (thinking on, clean mode) and the thinking-off development round at the
+same prompt version (latest row per configuration; old-harness L7 rows are left out). Every text field
+goes through `scrub()`, which replaces local absolute paths, and the script ends with a leak scan.
+"""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "docs" / "raw"
+REUSE_HINT = "Prefer reusing existing project helpers over writing new ones."
+
+# ---- privacy -------------------------------------------------------------------------------------
+_SCRUB = [
+    (re.compile(r"/tmp/cbench-[^/\s]+/repo/"), ""),                 # sandbox copies of the fixture repo
+    (re.compile(re.escape(str(ROOT)) + "/"), ""),                  # this checkout
+    (re.compile(r"/tmp/cbench-judge[^\s'\"]*"), "<judge-dir>"),
+    (re.compile(r"/home/[^/\s]+/"), "~/"),                          # anything else under a home directory
+]
+_LEAKS = re.compile(r"/home/|/tmp/cbench|localhost:\d+|127\.0\.0\.1|athome|engineeringthefuture|Bearer ")
+
+
+def scrub(text: str | None) -> str | None:
+    if not text:
+        return text
+    for pat, rep in _SCRUB:
+        text = pat.sub(rep, text)
+    return text
+
+
+# ---- which runs ----------------------------------------------------------------------------------
+def config_key(r: dict) -> tuple:
+    return (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
+            r["repo_size"], bool(r.get("map_docs")))
+
+
+def level_label(r: dict) -> str:
+    s = r["level"] + ("+docs" if r.get("map_docs") else "")
+    if r["level"] in ("L4", "L5"):
+        s += " " + r["retriever"]
+    if r["level"] == "L5":
+        s += " " + r["query_mode"]
+    if r["level"] == "L7":
+        s += " " + r["agent_variant"]
+    if r["prompt_arm"] != "base":
+        s += " +hint"
+    return s
+
+
+def select_rows() -> list[dict]:
+    rows = [json.loads(line) for line in open(ROOT / "results" / "results.jsonl")]
+    rows = [r for r in rows if r.get("backend") == "vllm" and r.get("model") == "Qwen/Qwen3.8-27B"]
+    final = {config_key(r): r for r in rows if r.get("thinking") and r.get("cold_start")}
+    pv = max((r.get("prompt_version", 1) for r in final.values()), default=3)
+    nothink: dict[tuple, dict] = {}
+    for r in rows:
+        if r.get("thinking") or r.get("prompt_version", 1) != pv:
+            continue
+        if r["level"] == "L7" and r.get("failed_call_cost") is None:
+            continue                                                 # original harness (" h1")
+        nothink[config_key(r)] = r                                   # latest row per configuration
+    out = [dict(r, round="final") for r in final.values()] + [dict(r, round="nothink") for r in nothink.values()]
+    return [r for r in out if (ROOT / "results" / "runs" / r["run_id"]).is_dir()]
+
+
+# ---- prompt segmentation -------------------------------------------------------------------------
+# Kinds (the viewer colours them): system, hint, task, target, file, retrieved, map, tools, closing.
+_SECTIONS = [
+    ("Retrieved files", "retrieved"),
+    ("Retrieved code from other files", "retrieved"),
+    ("Repository map", "map"),
+    ("You can explore the repository", "tools"),
+]
+
+
+def segment_system(text: str) -> list[dict]:
+    if text.endswith("\n" + REUSE_HINT):
+        return [seg("system", "Agent identity and rules", text[: -len(REUSE_HINT) - 1]),
+                seg("hint", "Reuse hint (ablation arm)", REUSE_HINT)]
+    return [seg("system", "Agent identity and rules", text)]
+
+
+def seg(kind: str, label: str, text: str) -> dict:
+    return {"kind": kind, "label": label, "text": text}
+
+
+def segment_context(ctx: str, target: str) -> list[dict]:
+    """Split the <context> block into file blocks and section headers/bodies."""
+    if ctx.strip() == "(none)":
+        return [seg("closing", "No context", ctx.strip())]
+    segs: list[dict] = []
+    section = "file"
+    cur: list[str] = []
+    cur_kind, cur_label = None, None
+    in_fence = False
+
+    def flush():
+        nonlocal cur
+        text = "\n".join(cur).strip("\n")
+        if text:
+            segs.append(seg(cur_kind or "file", cur_label or "Context", text))
+        cur = []
+
+    for line in ctx.split("\n"):
+        if line.startswith("```"):
+            in_fence = not in_fence
+        if not in_fence:
+            hit = next(((p, k) for p, k in _SECTIONS if line.startswith(p)), None)
+            if hit:
+                flush()
+                section = hit[1]
+                cur_kind = section
+                cur_label = {"retrieved": "Retrieval results", "map": "Repository map",
+                             "tools": "Tool instructions"}[section]
+                cur = [line]
+                continue
+            if line.startswith("File: ") and not line.startswith("```"):
+                path = line[6:].strip()
+                flush()
+                if path == target:
+                    cur_kind, cur_label = "target", f"Target file · {path}"
+                elif section == "retrieved":
+                    cur_kind, cur_label = "retrieved", f"Retrieved · {path}"
+                else:
+                    cur_kind, cur_label = "file", f"Repo file · {path}"
+                cur = [line]
+                continue
+        cur.append(line)
+    flush()
+    return segs
+
+
+def segment_user(text: str, target: str) -> list[dict]:
+    m = re.match(r"<context>\n(.*)\n</context>\n\n<task>\n(.*)\n</task>\n\n(Target file: [^\n]*)(.*)$", text, re.S)
+    if not m:
+        return [seg("closing", "User message", text)]
+    ctx, task, tline, rest = m.groups()
+    segs = segment_context(ctx, target)
+    segs.append(seg("task", "Task (change request)", task))
+    closing = (tline + rest).strip()
+    segs.append(seg("closing", "Target and output reminder", closing))
+    return segs
+
+
+# ---- per-run payload -----------------------------------------------------------------------------
+INDEX_FIELDS = ["run_id", "round", "task_id", "category", "tier", "level", "retriever", "query_mode",
+                "agent_variant", "prompt_arm", "repo_size", "map_docs", "thinking", "label", "format_status",
+                "reuse_passed", "tests_passed", "tests_total", "repo_tests_passed", "repo_tests_total",
+                "tokens_in", "tokens_out", "tokens_cached", "latency_s", "tool_calls", "tool_errors",
+                "helper_in_context", "helper_body_in_context", "legacy_used", "ctx_fits", "cold_method",
+                "concurrency", "started_at", "drops", "drop_calls", "rereads_after_drop",
+                "helper_body_at_answer", "dropped_tokens", "drop_saved_tokens"]
+
+
+def read(p: Path) -> str | None:
+    return p.read_text(errors="replace") if p.exists() else None
+
+
+def run_payload(r: dict) -> dict:
+    d = ROOT / "results" / "runs" / r["run_id"]
+    target = r.get("target_file")
+    prompt = json.loads(read(d / "prompt.json") or "[]")
+    system = next((m["content"] for m in prompt if m["role"] == "system"), "")
+    user = next((m["content"] for m in prompt if m["role"] == "user"), "")
+    if not target:
+        m = re.search(r"^Target file: (.+)$", user, re.M)
+        target = m.group(1).strip() if m else ""
+    transcript = []
+    if (d / "transcript.jsonl").exists():
+        for line in open(d / "transcript.jsonl"):
+            t = json.loads(line)
+            if "message" in t and "role" not in t:                  # a wrapped final message
+                t = dict(t["message"], finish_reason=t.get("finish_reason"))
+            if "role" not in t:                                      # an L5 model_queries planning step
+                transcript.append({"role": "step", "step": t.get("step"),
+                                   "instruction": scrub(t.get("instruction")), "reply": scrub(t.get("reply")),
+                                   "queries": t.get("queries"), "hits": t.get("hits")})
+                continue
+            item = {"role": t["role"], "content": scrub(t.get("content") or "")}
+            if t.get("tool_calls"):
+                item["tool_calls"] = [{"id": c.get("id"), "name": c["function"]["name"],
+                                       "arguments": scrub(c["function"].get("arguments", ""))}
+                                      for c in t["tool_calls"]]
+            if t.get("tool_call_id"):
+                item["tool_call_id"] = t["tool_call_id"]
+            if t.get("result_id"):                                   # selective: [#n] result IDs
+                item["result_id"] = t["result_id"]
+            if t.get("drop"):                                        # selective: what a drop call stubbed
+                item["drop"] = [{"id": d["id"], "stub": scrub(d["stub"])} for d in t["drop"]]
+            transcript.append(item)
+    meta = {k: r.get(k) for k in INDEX_FIELDS}
+    meta.update(level_label=level_label(r), model=r.get("model"), quant=r.get("quant"),
+                embedder=r.get("embedder"), prompt_version=r.get("prompt_version"),
+                max_output_tokens=r.get("max_output_tokens"), context_window=r.get("context_window"),
+                peak_ctx_tokens=r.get("peak_ctx_tokens"), target_file=target)
+    return {
+        "meta": meta,
+        "system": [dict(s, text=scrub(s["text"])) for s in segment_system(system)],
+        "user": [dict(s, text=scrub(s["text"])) for s in segment_user(user, target)],
+        "transcript": transcript,
+        "reasoning": scrub(read(d / "reasoning.txt")),
+        "response": scrub(read(d / "response.txt")),
+        "patch": scrub(read(d / "patch.diff")),
+        "tests": scrub(read(d / "tests.txt")),
+    }
+
+
+# ---- tasks ---------------------------------------------------------------------------------------
+def tasks_payload() -> list[dict]:
+    reg = tomllib.loads((ROOT / "helpers" / "registry.toml").read_text())
+    naming = {h["qualname"]: h.get("naming") for h in reg.get("helper", [])}
+    decoys = reg.get("decoy", [])
+    out = []
+    for td in sorted((ROOT / "tasks").iterdir()):
+        if not (td / "task.toml").exists():
+            continue
+        t = tomllib.loads((td / "task.toml").read_text())
+        helpers = t.get("needed_helpers", [])
+        out.append({
+            "id": t["id"], "category": t["category"], "tier": t.get("tier"), "target_file": t["target_file"],
+            "repo_sizes": t.get("repo_sizes", ["S", "M"]), "prompt": t["prompt"].strip(),
+            "helpers": [{"qualname": h, "naming": naming.get(h)} for h in helpers],
+            "decoys": [d for d in decoys if d.get("looks_like") in helpers],
+            "hidden_tests": {p.name: scrub(p.read_text()) for p in sorted((td / "hidden_tests").glob("*.py"))},
+            "solutions": {p.stem: scrub(p.read_text()) for p in sorted((td / "solutions").glob("*.diff"))},
+        })
+    return out
+
+
+# ---- main ----------------------------------------------------------------------------------------
+def main() -> int:
+    rows = select_rows()
+    if (OUT / "runs").exists():
+        shutil.rmtree(OUT / "runs")
+    (OUT / "runs").mkdir(parents=True)
+    index = []
+    for r in rows:
+        p = run_payload(r)
+        (OUT / "runs" / f"{r['run_id']}.json").write_text(json.dumps(p, separators=(",", ":")))
+        index.append(p["meta"])
+    index.sort(key=lambda m: (m["task_id"], m["level_label"], m["repo_size"], m["round"]))
+    (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
+    (OUT / "tasks.json").write_text(json.dumps(tasks_payload(), separators=(",", ":")))
+
+    leaks = []
+    for f in OUT.rglob("*.json"):
+        for m in _LEAKS.finditer(f.read_text()):
+            leaks.append((f.name, m.group(0)))
+    size = sum(f.stat().st_size for f in OUT.rglob("*.json"))
+    rounds = {k: sum(m["round"] == k for m in index) for k in ("final", "nothink")}
+    print(f"{len(index)} runs ({rounds}), {size / 1e6:.1f} MB in {OUT.relative_to(ROOT)}")
+    if leaks:
+        print(f"possible leaks: {len(leaks)}; first: {leaks[:5]}")
+        return 1
+    print("leak scan clean")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
