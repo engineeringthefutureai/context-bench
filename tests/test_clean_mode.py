@@ -116,3 +116,17 @@ def test_clean_restarts_when_reset_is_missing_or_memory_is_low(tmp_path, monkeyp
     exp2.sweep(["L0"], clean=True)
     assert [r["cold_method"] for r in results.load(exp2.results_path)] == ["restart", "restart"]
     assert client2.resets == 0
+
+
+def test_l7_restarts_on_its_own_interval(tmp_path, monkeypatch):
+    exp, client, marker = _hybrid(tmp_path, monkeypatch)
+    monkeypatch.setenv("CBENCH_RESTART_EVERY", "100")
+    monkeypatch.setenv("CBENCH_RESTART_EVERY_L7", "2")
+    monkeypatch.setattr(exp, "restart_server", lambda *a: None)
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: 10**6)
+    key = ("m", "u")
+    exp._since_restart[key] = 0
+    monkeypatch.setattr(exp, "_client", lambda *a: type("C", (), {"reset_prefix_cache": lambda self: True})())
+    assert [exp.make_cold("m", "u", "L1") for _ in range(3)] == ["reset"] * 3     # 25-style interval (100)
+    assert exp.make_cold("m", "u", "L7") == "restart"                              # 3 + 1 >= 2: restart
+    assert [exp.make_cold("m", "u", "L7") for _ in range(2)] == ["reset", "restart"]

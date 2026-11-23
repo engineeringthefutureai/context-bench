@@ -149,16 +149,18 @@ class Experiment:
         client.chat([{"role": "user", "content": "Reply with OK."}], temperature=None, seed=1,
                     max_tokens=8, thinking=False)
 
-    def make_cold(self, model_key: str, url: str) -> str:
+    def make_cold(self, model_key: str, url: str, level: str | None = None) -> str:
         """Clean mode, before a run's first model call: make the prefix cache cold. Restarts the server
         (restart_server) on the sweep's first run, every CBENCH_RESTART_EVERY runs (default 25; 1 =
-        always), when the host's free memory is below CBENCH_RESTART_MIN_FREE_MB (default 6000; the
+        always; L7 runs use CBENCH_RESTART_EVERY_L7, default 12: multi-turn runs grow the vLLM workers
+        faster, and restarting the single-shot levels as often would only cost time), when the host's free memory is below CBENCH_RESTART_MIN_FREE_MB (default 6000; the
         vLLM workers grow in host RAM and only a restart gives it back; read from this machine's
         /proc/meminfo, so it assumes the server runs here), or when the server has no prefix-cache
         reset. Otherwise drops the prefix cache (/reset_prefix_cache), which takes milliseconds.
         Returns "restart" or "reset"."""
         key = (model_key, url)
-        every = int(env_value("CBENCH_RESTART_EVERY") or 25)
+        every = int((env_value("CBENCH_RESTART_EVERY_L7") or 12) if level == "L7"
+                    else (env_value("CBENCH_RESTART_EVERY") or 25))
         min_free = int(env_value("CBENCH_RESTART_MIN_FREE_MB") or 6000)
         since = self._since_restart.get(key)
         if since is not None and since + 1 < every and _free_mb() >= min_free:
@@ -189,7 +191,7 @@ class Experiment:
             """The client for model calls; in clean mode the first call makes the cache cold."""
             nonlocal client, restarted, cold_method
             if cold_start and not restarted:
-                cold_method = self.make_cold(rc.model, url)
+                cold_method = self.make_cold(rc.model, url, rc.level)
                 client, restarted = self._client(rc.model, url), True
             return client
         perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version, repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
