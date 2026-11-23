@@ -257,6 +257,7 @@ class Experiment:
                     perf.update(drops=agent.drops, drop_calls=agent.drop_calls,
                                 rereads_after_drop=agent.rereads_after_drop, hit_turn_cap=agent.hit_turn_cap,
                                 dropped_tokens=agent.dropped_tokens, drop_saved_tokens=agent.drop_saved_tokens,
+                                drop_refunds=agent.drop_refunds, drop_refund_clawbacks=agent.drop_refund_clawbacks,
                                 helper_body_at_answer=_helper_body_visible(task, at_answer, ws),
                                 legacy_share_at_answer=legacy_ctx_share(at_answer.text, self.legacy))
             else:

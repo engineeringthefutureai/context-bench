@@ -77,9 +77,15 @@ def write_judge_dir(task_prompt: str, repo: Path, candidates: list[Candidate], r
     shutil.copyfile(rubric, dst / "RUBRIC.md")
     cand = dst / "candidates"
     cand.mkdir()
+    combined = []
     for c in candidates:
         (cand / f"{c.number}.diff").write_text(c.patch)
         (cand / f"{c.number}.tests.txt").write_text(f"{c.tests_passed}/{c.tests_total} hidden tests passed\n")
+        combined.append(f"## Candidate {c.number} ({c.tests_passed}/{c.tests_total} hidden tests passed)\n\n"
+                        f"```diff\n{c.patch.rstrip()}\n```\n")
+    # every candidate in one file: one read instead of a loop over files, which the read-only command
+    # allow-list doesn't permit (agy denied loops on the larger panels, 2026-11-22)
+    (cand / "ALL.md").write_text("\n".join(combined))
     return dst
 
 

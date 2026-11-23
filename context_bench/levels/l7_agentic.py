@@ -47,6 +47,11 @@ READ_CAP = 200          # rich/selective: lines per read_file call
 SEARCH_BODY_LINES = 40  # rich/selective: source lines per semantic_search hit
 MAX_SYMBOLS = 8         # rich/selective: names per read_symbol call (total output also capped at READ_CAP)
 MAX_TURNS = 40          # backstop: drop calls are free, so turns aren't bounded by the budget alone
+# selective, prompt v4: a drop that removes a sizeable result gives back part of a call, taken back again
+# if the dropped code is read again; capped per run (agreed 2026-11-23)
+DROP_REFUND = 0.25
+DROP_REFUND_MIN_TOKENS = 300
+DROP_REFUND_CAP = 2.0
 _SKIP = {"__pycache__", ".git", ".pytest_cache"}
 
 # Mechanics only (what the model has), never strategy (how to search). Goes inside <context>, after
@@ -54,6 +59,19 @@ _SKIP = {"__pycache__", ".git", ".pytest_cache"}
 TOOLS_NOTE = """You can explore the repository with these tools: {tools}.
 You may make at most {max_calls} tool calls. When you are done, reply with the <file> blocks as
 described; that reply ends the task."""
+
+# prompt v4 (all variants): mechanics of the budget, nothing about how to search or what to look for.
+TOOLS_NOTE_V4 = """The repository's files are listed above. You can explore the code with these tools: {tools}.
+You have a budget of {max_calls} tool calls. A call that fails (wrong arguments, unknown tool) costs half a
+call, and its error says what was wrong. You can make several calls in one turn. When you are done, reply
+with the <file> blocks of your change; that reply ends the task."""
+
+# selective, prompt v4: why and how to drop (mechanics; nothing about dead code, decoys or reuse)
+SELECTIVE_NOTE_V4 = """Every tool result stays in the conversation and is re-read with every later turn, so results you
+don't need make each turn longer and add noise. Each result has an ID like [#3]. With drop you can remove
+results of your latest calls; each is replaced by a one-line stub, and you can read it again later. drop
+doesn't count toward the budget, and a drop that removes at least {min_tokens} tokens gives back a quarter
+of a call (at most {cap:g} calls per task); reading the dropped code again takes that quarter back."""
 
 # selective only: the working-set line (generic engineering habit; says nothing about dead code,
 # decoys or reuse).
@@ -132,6 +150,66 @@ _TOOLS_RICH = {
                       "description": "result IDs, the n in [#n]"}},
              ["ids"]),
 }
+# prompt v4: each tool's behaviour, parameters and output in its description (equally detailed for every
+# variant's tools). Facts only: what a tool returns and costs, never which tool to prefer.
+_TOOLS_V4 = {
+    "grep": ("Search file contents with a Python regular expression. Returns up to 50 matching lines as "
+             "\"path:line: text\" (\"(+N more)\" if there are more).",
+             {"pattern": {"type": "string", "description": "Python regular expression, e.g. \"def \\w*refund\""},
+              "path_glob": {"type": "string", "description": "which files to search, e.g. \"shopkit/**/*.py\"; "
+                            "default \"**/*.py\""}},
+             ["pattern"]),
+    "read_file": ("Read a whole file. Returns \"File: path\" and the file's content.",
+                  {"path": {"type": "string", "description": "relative to the repository root, e.g. "
+                            "\"shopkit/money.py\""}},
+                  ["path"]),
+    "find_references": ("Find where a name is defined, imported and used (parsed from the code, not text search). "
+                        "Returns up to 50 lines \"path:line: source line\" grouped as definitions, imports, uses.",
+                        {"symbol": {"type": "string", "description": "a name like \"format_money\" or a dotted path "
+                                    "like \"shopkit.money.format_money\" (only the last part is matched)"}},
+                        ["symbol"]),
+    "semantic_search": ("Search the code by meaning. Returns the best matching functions and classes as "
+                        "\"path:start-end  qualified.name\", each with its signature and first docstring line.",
+                        {"query": {"type": "string", "description": "what you are looking for, in words"},
+                         "k": {"type": "integer", "description": "number of results, default 5"}},
+                        ["query"]),
+}
+_TOOLS_RICH_V4 = {
+    "grep": ("Search file contents with a Python regular expression. Returns up to 50 matching lines as "
+             "\"path:line in name (lines a-b): text\", where name is the enclosing function, method or class "
+             "(\"module level\" outside them) and a-b its lines.",
+             _TOOLS_V4["grep"][1], ["pattern"]),
+    "read_symbol": ("Read the full source of functions, methods or classes by name, up to 8 in one call (one call "
+                    "of the budget). Returns each as \"path:start-end  qualified.name\" and its source (a method with "
+                    "its class's first line), plus the file's imports the first time code from that file is shown. "
+                    "A bare name matching several definitions returns the list of matches.",
+                    {"symbols": {"type": "array", "items": {"type": "string"},
+                                 "description": "qualified names like \"shopkit.money.format_money\" or "
+                                                "\"shopkit.orders.models.Order.total\", or bare names like \"format_money\""}},
+                    ["symbols"]),
+    "read_file": ("Read a file, or a range of its lines (1-based, inclusive), at most 200 lines per call. Returns "
+                  "\"File: path (lines a-b of n)\" and those lines as they are in the file.",
+                  {"path": {"type": "string", "description": "relative to the repository root"},
+                   "start": {"type": "integer", "description": "first line, default 1"},
+                   "end": {"type": "integer", "description": "last line, default the end of the file"}},
+                  ["path"]),
+    "find_references": ("Find where a name is defined, imported and used (parsed from the code, not text search). "
+                        "Returns up to 50 lines \"path:line in name (lines a-b): source line\" grouped as "
+                        "definitions, imports, uses; name is the enclosing function, method or class.",
+                        _TOOLS_V4["find_references"][1], ["symbol"]),
+    "semantic_search": ("Search the code by meaning. Returns up to 5 functions or classes, each as "
+                        "\"path:start-end  qualified.name\" with its source (at most 40 lines; longer ones end with "
+                        "\"... (N more lines)\").",
+                        {"query": {"type": "string", "description": "what you are looking for, in words"},
+                         "k": {"type": "integer", "description": "number of results, 1-5, default 5"}},
+                        ["query"]),
+    "drop": ("Remove results of your latest tool calls from the conversation; each is replaced by a one-line stub "
+             "and can be read again. Doesn't count toward the budget; a drop that removes at least 300 tokens gives "
+             "back a quarter of a call (taken back if you read the dropped code again).",
+             {"ids": {"type": "array", "items": {"type": "integer"}, "description": "result IDs, the n in [#n]"}},
+             ["ids"]),
+}
+
 _VARIANTS = {"grep": ["grep", "list_files", "read_file", "find_references"],
              "hybrid": ["grep", "list_files", "read_file", "find_references", "semantic_search"],
              "rich": ["grep", "list_files", "read_symbol", "read_file", "find_references", "semantic_search"],
@@ -141,8 +219,13 @@ RICH_VARIANTS = {"rich", "selective"}
 SEMANTIC_VARIANTS = {"hybrid", "rich", "selective"}     # need the embedding retriever
 
 
-def _spec(name: str, agent_variant: str) -> tuple:
-    if agent_variant in RICH_VARIANTS and name in _TOOLS_RICH:
+def _spec(name: str, agent_variant: str, prompt_version: int = 3) -> tuple:
+    rich = agent_variant in RICH_VARIANTS
+    if prompt_version >= 4:
+        table = _TOOLS_RICH_V4 if rich else _TOOLS_V4
+        if name in table:
+            return table[name]
+    if rich and name in _TOOLS_RICH:
         return _TOOLS_RICH[name]
     return _TOOLS[name]
 
@@ -151,7 +234,7 @@ def _usage(name: str, agent_variant: str, prompt_version: int = 3) -> str:
     """What a failed call should have looked like: the tool's arguments, or the tools that exist."""
     if name not in _variant_tools(agent_variant, prompt_version):
         return "Available tools: " + ", ".join(_variant_tools(agent_variant, prompt_version)) + "."
-    _, props, required = _spec(name, agent_variant)
+    _, props, required = _spec(name, agent_variant, prompt_version)
     args = [f"{k} ({v['type']}, {'required' if k in required else 'optional'})" for k, v in props.items()]
     return f"{name} takes: " + (", ".join(args) if args else "no arguments") + "."
 
@@ -172,9 +255,9 @@ def build_context(task: Task, ws: Workspace, agent_variant: str = "grep", prompt
     listing directories)."""
     names = _variant_tools(agent_variant, prompt_version)
     if prompt_version >= 4:
-        note = TOOLS_NOTE.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS)
+        note = TOOLS_NOTE_V4.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS)
         if agent_variant == "selective":
-            note += "\n" + SELECTIVE_NOTE
+            note += "\n" + SELECTIVE_NOTE_V4.format(min_tokens=DROP_REFUND_MIN_TOKENS, cap=DROP_REFUND_CAP)
         tree = RepoTools(ws.repo).list_files(".")
         return ContextBlock(text=f"Repository files:\n{tree}\n\n{note}", included=[])
     path = task.target_file
@@ -192,7 +275,7 @@ def tool_schemas(agent_variant: str, prompt_version: int = 3) -> list[dict]:
     """OpenAI-style function tool definitions for the variant."""
     out = []
     for name in _variant_tools(agent_variant, prompt_version):
-        desc, props, required = _spec(name, agent_variant)
+        desc, props, required = _spec(name, agent_variant, prompt_version)
         out.append({"type": "function", "function": {
             "name": name, "description": desc,
             "parameters": {"type": "object", "properties": props, "required": required}}})
@@ -612,6 +695,8 @@ class AgentResult:
     rereads_after_drop: int | None = None   # later read_file/read_symbol/semantic_search results overlapping a dropped one
     dropped: list[dict] | None = None  # {"id", "tool", "desc", "turn"} per dropped result
     dropped_tokens: int | None = None  # size of the dropped content minus its stubs (counted once)
+    drop_refunds: int | None = None    # v4: drops that earned DROP_REFUND
+    drop_refund_clawbacks: int | None = None   # v4: refunds taken back because the dropped code was read again
     drop_saved_tokens: int | None = None   # input tokens avoided: that difference, summed over every
                                        #   request sent after each drop (tokens_in + this = without drops)
     hit_turn_cap: bool = False         # MAX_TURNS reached (drop calls are free)
@@ -722,6 +807,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     changed_from: int | None = None      # first msgs index rewritten since the last request
     drops = drop_calls = rereads = turns = 0
     saving_now = dropped_tokens = drop_saved = 0   # tokens the current prompt is smaller by, thanks to drops
+    refunds_earned = clawbacks = 0
+    refund_total = 0.0                   # gross refunds granted (the cap applies to these)
+    refunding = selective and prompt_version >= 4
     dropped: list[dict] = []
     capped = False
 
@@ -742,6 +830,8 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                            drop_calls=drop_calls if sel else None,
                            rereads_after_drop=rereads if sel else None, dropped=dropped if sel else None,
                            dropped_tokens=dropped_tokens if sel else None,
+                           drop_refunds=refunds_earned if refunding else None,
+                           drop_refund_clawbacks=clawbacks if refunding else None,
                            drop_saved_tokens=drop_saved if sel else None, hit_turn_cap=capped,
                            answer_tool_text="\n\n".join(m["content"] for m in msgs if m.get("role") == "tool"))
 
@@ -833,19 +923,31 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                             dropped.append({"id": j, "tool": "imports", "desc": segs[j]["label"],
                                             "turn": turns, "auto": True})
                     records = []
+                    removed = 0
                     for idx in sorted(touched):
                         before = client.count_tokens(msgs[idx]["content"])
                         msgs[idx] = {**msgs[idx], "content": render(idx)}
                         delta = before - client.count_tokens(msgs[idx]["content"])
                         saving_now += delta
                         dropped_tokens += delta
+                        removed += delta
                         records.append({"index": idx, "content": msgs[idx]["content"]})
                         changed_from = idx if changed_from is None else min(changed_from, idx)
                     drops += len(dict.fromkeys(ids))
                     drop_calls += 1
+                    refund_note = ""
+                    if refunding and removed >= DROP_REFUND_MIN_TOKENS and refund_total < DROP_REFUND_CAP:
+                        amount = min(DROP_REFUND, DROP_REFUND_CAP - refund_total)
+                        refund_total += amount
+                        spent = max(spent - amount, 0.0)
+                        refunds_earned += 1
+                        rec = {"amount": amount, "clawed": False}
+                        for i in dict.fromkeys(ids):
+                            segs[i]["refund"] = rec
+                        refund_note = f" ({amount:g} of a call back)"
                     text = "dropped " + ", ".join(f"#{i}" for i in dict.fromkeys(ids)) + (
                         f" (and #{', #'.join(map(str, auto))}: imports no longer needed)" if auto else "") + (
-                        f"; {refusal}" if bad else "")
+                        f"; {refusal}" if bad else "") + refund_note
                     add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": text},
                         {"drop": records, "dropped_ids": list(dict.fromkeys(ids)) + auto})
                 except Exception as e:
@@ -885,8 +987,15 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
             for part in parts:
                 i = len(segs) + 1
                 ranges = _ranges(part["text"]) if part["kind"] == "code" else []
-                if ranges and any(x["dropped"] and _overlaps(ranges, x["ranges"]) for x in segs.values()):
+                overlapping = [x for x in segs.values() if x["dropped"] and ranges and _overlaps(ranges, x["ranges"])]
+                if overlapping:
                     rereads += 1
+                    for x in overlapping:                    # v4: reading dropped code again returns its refund
+                        rec = x.get("refund")
+                        if rec and not rec["clawed"]:
+                            rec["clawed"] = True
+                            spent += rec["amount"]
+                            clawbacks += 1
                 segs[i] = {**part, "msg": index, "dropped": False, "ranges": ranges}
                 if part["kind"] == "imports" or part.get("provides_imports"):
                     live_imports[part["file"]] = i

@@ -396,7 +396,7 @@ def test_prompt_v4_has_no_target_and_l7_starts_with_the_file_tree():
     v4 = LEVELS["L7"](task, ws, agent_variant="hybrid", prompt_version=4)
     assert v4.text.startswith("Repository files:\nshopkit/__init__.py") and v4.included == []
     assert "shopkit/orders/export.py  (16 lines" in v4.text and "File: shopkit/orders/export.py" not in v4.text
-    assert "semantic_search" in v4.text.splitlines()[-3]
+    assert "these tools: grep, read_file, find_references, semantic_search." in v4.text
     v3 = LEVELS["L7"](task, ws, agent_variant="hybrid")
     assert v3.text.startswith("File: shopkit/orders/export.py")                  # v3 unchanged
     msgs = render(task, v4, "base", 4)
@@ -422,3 +422,50 @@ def test_v4_drops_list_files_from_the_tools():
                     agent_variant="grep", temperature=None, seed=1, max_tokens=100, context_window=100_000,
                     failed_call_cost=0.5, prompt_version=4)
     assert res.tool_errors == 1 and "Available tools: grep, read_file, find_references" in client.seen[1][0][-1]["content"]
+
+
+def test_v4_notes_and_descriptions_are_mechanics_only():
+    ws = load_workspace(M)
+    for variant in ("grep", "hybrid", "rich", "selective"):
+        ctx = LEVELS["L7"](TASKS["reuse-001"], ws, agent_variant=variant, prompt_version=4)
+        note = ctx.text.split("\n\nThe repository's files are listed above.")[1].lower()
+        descs = " ".join(t["function"]["description"].lower() for t in tool_schemas(variant, 4))
+        import re
+        for word in ("dead", "legacy", "unused", "reuse", "helper", "decoy", "tests?", "prefer", "should"):
+            assert not re.search(rf"\b{word}\b", note) and not re.search(rf"\b{word}\b", descs), (variant, word)
+    flat = " ".join(note.split())
+    assert "costs half a call" in flat and "gives back a quarter of a call" in flat
+
+
+def _sel4(script):
+    from context_bench.retrieval.bm25 import BM25Retriever
+    client = FakeClient(script)
+    res = run_agent(client, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+                    RepoTools(M, make_retriever=BM25Retriever, rich=True), agent_variant="selective",
+                    temperature=None, seed=1, max_tokens=100, context_window=100_000, failed_call_cost=0.5,
+                    prompt_version=4)
+    return client, res
+
+
+def test_v4_drop_refund_only_for_sizeable_drops_and_taken_back_on_reread():
+    big = ("read_file", {"path": "shopkit/orders/fulfillment.py"})          # well over 300 tokens? use count
+    small = ("grep", {"pattern": "def format_money"})
+    client, res = _sel4([[big, small], [("drop", {"ids": [1, 2]})], "final"])
+    # FakeClient counts tokens as chars // 4: the fulfillment file is large enough, so one refund
+    assert res.drop_refunds == 1 and res.budget_used == 2 - 0.25
+    assert "0.25 of a call back" in client.seen[2][0][-1]["content"]
+    client, res = _sel4([[small], [("drop", {"ids": [1]})], "final"])
+    assert res.drop_refunds == 0 and res.budget_used == 1                  # too small: no refund
+    client, res = _sel4([[big], [("drop", {"ids": [1]})], [big], "final"])
+    assert res.drop_refunds == 1 and res.drop_refund_clawbacks == 1 and res.budget_used == 2
+
+
+def test_v4_refunds_are_capped():
+    big_files = [p.relative_to(M).as_posix() for p in sorted((M / "shopkit").rglob("*.py")) if len(p.read_text()) > 1600][:10]
+    assert len(big_files) == 10
+    script = []
+    for i, path in enumerate(big_files):
+        script += [[("read_file", {"path": path})], [("drop", {"ids": [i + 1]})]]
+    script.append("final")
+    _, res = _sel4(script)
+    assert res.drop_refunds == 8 and res.budget_used == 10 - 2.0

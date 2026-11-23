@@ -158,7 +158,8 @@ INDEX_FIELDS = ["run_id", "round", "task_id", "category", "tier", "level", "retr
                 "tokens_in", "tokens_out", "tokens_cached", "latency_s", "tool_calls", "tool_errors",
                 "helper_in_context", "helper_body_in_context", "legacy_used", "ctx_fits", "cold_method",
                 "concurrency", "started_at", "drops", "drop_calls", "rereads_after_drop",
-                "helper_body_at_answer", "dropped_tokens", "drop_saved_tokens",
+                "helper_body_at_answer", "dropped_tokens", "drop_saved_tokens", "drop_refunds",
+                "drop_refund_clawbacks",
                 "patch_stmts", "patch_coverage", "tests_added"]
 
 

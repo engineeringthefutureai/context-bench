@@ -181,6 +181,8 @@ class RunResult:
     drop_calls: int | None = None
     rereads_after_drop: int | None = None   # later reads/searches overlapping a dropped result
     dropped_tokens: int | None = None   # size of the dropped content minus its stubs (once)
+    drop_refunds: int | None = None     # prompt v4: drops that gave back a quarter of a call
+    drop_refund_clawbacks: int | None = None    # ...taken back because the dropped code was read again
     drop_saved_tokens: int | None = None    # input tokens avoided over all later requests;
                                         #   tokens_in + drop_saved_tokens = the same run without drops
     hit_turn_cap: bool | None = None    # MAX_TURNS backstop reached

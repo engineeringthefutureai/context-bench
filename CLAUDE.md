@@ -72,7 +72,11 @@ prompt no longer mentions a target file (no "Target file:" line, no "and the tar
 prompt). L1-L6 still show the target (their context starts with its `File:` block). L7 gets no target: it
 finds the file from the task, and its starting context is the repository's whole file tree (each file's
 line count, importers for .py), so `list_files` (now recursive) is not offered: 97% of L7 runs opened
-with list_files, about 3 calls per run. v4 means new run ids for every config (full rerun).
+with list_files, about 3 calls per run. v4 means new run ids for every config (full rerun). Also from v4: L7's tool note explains the budget mechanics (failed calls
+cost half, several calls per turn) and, for selective, why dropping helps; every tool's schema describes
+its parameters and output (equally detailed for all variants; facts, never which tool to prefer); a
+selective drop that removes at least 300 tokens gives back 0.25 of a call, taken back if the dropped code
+is read again, at most 2.0 per run (`drop_refunds`, `drop_refund_clawbacks`).
 
 L7 failed tool calls (bad arguments, unknown tool, a tool call written as text the server couldn't
 parse) get generic feedback (the tool's valid arguments / "couldn't parse, use the tool-calling
