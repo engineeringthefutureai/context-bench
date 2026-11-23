@@ -1,7 +1,7 @@
 # Repo L: design (draft for review)
 
 Status: built 2026-11-22 (milestones 1-5, commits fb1324c..). Not in `config/experiment.toml` yet. Measured:
-~180k tokens at L3, L6 map ~26k, L6+docs ~33k (map share 15%: bodies dominate, so the map is far from
+169k tokens at L3 (model tokenizer), L6 map 26k, L6+docs 32k (map share 15%: bodies dominate, so the map is far from
 the edge), 278 files, 243 own tests. The bloated functions came out at 200-270 lines, not 400-600.
 Repos S and M stay frozen.
 

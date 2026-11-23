@@ -180,8 +180,8 @@ with thinking on). New tasks must use repo M as it is (25 planted helpers; ~11 u
   New tasks: no helper in the target file of the task that needs it; for L2, half the reuse tasks
   import the helper's module directly and half don't. Changing an S file changes both repos.
   M deliberately has no `tests/test_<stem>.py` for existing task targets, so L2 shows them nothing extra.
-- `fixtures/repo_L/` — shopkit about a year after M (2026-11-22, `docs/repo-L-design.md`): ~180k tokens at L3
-  (NO FIT; L6 map ~26k, L6+docs ~33k), ~280 files incl. SQL migrations (`migrations/`) and HTML templates
+- `fixtures/repo_L/` — shopkit about a year after M (2026-11-22, `docs/repo-L-design.md`): 169k tokens at L3
+  (NO FIT, model tokenizer; L6 map 26k, L6+docs 32k), ~280 files incl. SQL migrations (`migrations/`) and HTML templates
   (`templates/`), its own passing tests (243). Not a byte-identical superset: M's files mostly unchanged,
   some grown. Old code keeps old names and is never labelled (`shopkit/core/`: partly live order engine,
   reporting, ERP, pricing); dead: `shopkit/domain/`, `shopkit/utils/helpers.py`, `common/`, `utils/strings.py`.
