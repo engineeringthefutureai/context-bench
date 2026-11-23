@@ -507,3 +507,133 @@ def test_double_star_matches_zero_directories():
     t = RepoTools(M)
     assert "shopkit/money.py:4:" in t.grep("def format_money", "shopkit/**/*.py")
     assert "shopkit/money.py:4:" in t.grep("def format_money", "**/*.py")
+
+
+# ---- L8: the "edit" variant ------------------------------------------------------------------------------
+
+def test_l8_starts_from_the_symbol_list_and_reads_only_through_read_symbol():
+    ws = load_workspace(M)
+    ctx = LEVELS["L8"](TASKS["reuse-001"], ws, agent_variant="edit", prompt_version=4)
+    assert ctx.text.startswith("Repository files and names:\n")
+    line = next(l for l in ctx.text.splitlines() if l.startswith("shopkit/shipping/packaging.py"))
+    assert "(49 lines, imported by 2 modules, 1 of them tests): VOLUMETRIC_DIVISOR, Box, Box.volume_cm3" in line
+    import re
+    assert not re.search(r"^\s*def |\(self", ctx.text, re.M) and "reply without tool calls" in ctx.text
+    assert ctx.text.count("read_file") == 1                                 # only in "there is no read_file"
+    names = [t["function"]["name"] for t in tool_schemas("edit", 4)]
+    assert names == ["grep", "read_symbol", "find_references", "semantic_search", "drop", "edit", "create_file"]
+    sel = LEVELS["L7"](TASKS["reuse-001"], ws, agent_variant="selective", prompt_version=4)
+    assert sel.text.startswith("Repository files:\n")                      # selective unchanged
+    assert "read_file" in [t["function"]["name"] for t in tool_schemas("selective", 4)]
+
+
+def test_l8_read_symbol_takes_constants_and_ranges_but_not_bare_paths():
+    t = RepoTools(M, rich=True, whole_files=True)
+    out = t.call("read_symbol", {"symbols": ["VOLUMETRIC_DIVISOR", "shopkit/shipping/packaging.py:1-8",
+                                             "shopkit/money.py", "no_such_thing"]})
+    assert "shopkit/shipping/packaging.py:4-4  shopkit.shipping.packaging.VOLUMETRIC_DIVISOR" in out
+    assert "File: shopkit/shipping/packaging.py (lines 1-8 of 49)" in out
+    assert "Outline of shopkit/money.py (" in out and "format_money (4-9)" in out
+    assert "(no function, method or class named no_such_thing)" in out
+    assert all(x["label"].startswith(("read_symbol", "imports")) for x in t.last_segments)
+    plain = RepoTools(M, rich=True)                                        # rich/selective: definitions only
+    assert "(no function, method or class named VOLUMETRIC_DIVISOR)" in plain.call("read_symbol", {"symbols": ["VOLUMETRIC_DIVISOR"]})
+
+
+def _l8(script, root=M):
+    from context_bench.retrieval.bm25 import BM25Retriever
+    client = FakeClient(script)
+    res = run_agent(client, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+                    RepoTools(root, make_retriever=BM25Retriever, rich=True, whole_files=True), agent_variant="edit",
+                    temperature=None, seed=1, max_tokens=100, context_window=100_000, failed_call_cost=0.5,
+                    prompt_version=4)
+    return client, res
+
+
+def _copy_m(tmp_path):
+    import shutil
+    dst = tmp_path / "repo"
+    shutil.copytree(M, dst)
+    return dst
+
+
+OLD_LINE = "VOLUMETRIC_DIVISOR = 5000          # cm^3 per kg, the common courier convention"
+
+
+def test_l8_edit_tools_change_the_copy_are_free_and_failures_cost_half(tmp_path):
+    repo = _copy_m(tmp_path)
+    client, res = _l8([[("read_symbol", {"symbols": ["VOLUMETRIC_DIVISOR"]})],
+                       [("edit", {"path": "shopkit/shipping/packaging.py", "old": OLD_LINE.replace("5000", "5001"),
+                                  "new": "x"})],
+                       [("edit", {"path": "shopkit/shipping/packaging.py", "old": OLD_LINE,
+                                  "new": "VOLUMETRIC_DIVISOR = 6000"}),
+                        ("create_file", {"path": "shopkit/new.py", "content": "x = 1\n"})],
+                       [("read_symbol", {"symbols": ["VOLUMETRIC_DIVISOR"]})], "done"], root=repo)
+    text = (repo / "shopkit/shipping/packaging.py").read_text()
+    assert "VOLUMETRIC_DIVISOR = 6000\n" in text and (repo / "shopkit/new.py").read_text() == "x = 1\n"
+    assert res.budget_used == 1 + 0.5 + 1                              # 2 reads + 1 failed edit; edits free
+    results = [m["content"] for m in res.transcript if m["role"] == "tool"]
+    assert any("doesn't match" in r for r in results) and any("Edited shopkit/shipping/packaging.py: lines 4-4" in r for r in results)
+    assert "VOLUMETRIC_DIVISOR = 6000" in results[-1]                  # rereads see the edited code
+    assert (M / "shopkit/shipping/packaging.py").read_text().count(OLD_LINE) == 1   # fixture untouched
+
+
+def test_l8_edits_stay_available_after_the_reading_budget(tmp_path):
+    repo = _copy_m(tmp_path)
+    reads = [[("grep", {"pattern": "def format_money"})]] * 15
+    edit = [("edit", {"path": "shopkit/shipping/packaging.py", "old": OLD_LINE, "new": "VOLUMETRIC_DIVISOR = 7000"})]
+    client, res = _l8(reads + [[("grep", {"pattern": "x"})] + edit, "done"], root=repo)
+    names = [t["function"]["name"] for t in client.seen[15][1]]
+    assert names == ["edit", "create_file"]                             # reading tools gone, edits stay
+    assert "edit and create_file still work" in client.seen[15][0][-1]["content"]
+    assert "VOLUMETRIC_DIVISOR = 7000" in (repo / "shopkit/shipping/packaging.py").read_text()
+    assert "no points left" in [m["content"] for m in res.transcript if m["role"] == "tool"][-2]
+
+
+def test_l8_explains_missing_tools(tmp_path):
+    client, res = _l8([[("read_file", {"path": "shopkit/money.py"}), ("write_file", {"path": "x"})], "done"],
+                      root=_copy_m(tmp_path))
+    errs = [m["content"] for m in client.seen[1][0] if m["role"] == "tool"]
+    assert "There is no read_file tool in this harness" in errs[0] and "path:start-end" in errs[0]
+    assert "change existing files with edit" in errs[1]
+    ws = load_workspace(M)
+    note = LEVELS["L8"](TASKS["reuse-001"], ws, agent_variant="edit", prompt_version=4).text
+    assert "there is no read_file, list_files, open or edit tool" not in note
+    assert "- edit: replaces text" in note and "reply without tool calls" in note
+
+
+def test_final_turn_tool_call_gets_one_retry():
+    from context_bench.levels.l7_agentic import FINAL_RETRY
+    client, res = _run_fc([[("grep", {"pattern": "x"})]] * 15 + ["", "<file path=\"a.py\">x</file>"])
+    assert FINAL_RETRY in [m["content"] for m in client.seen[-1][0] if m["role"] == "user"]
+    assert res.content.startswith("<file")
+    client, res = _run_fc([[("grep", {"pattern": "x"})]] * 15 + ["", ""])   # only once
+    assert res.content == ""
+
+
+def test_l8_shows_points_left_once_per_turn(tmp_path):
+    client, res = _l8([[("grep", {"pattern": "def format_money"}), ("grep", {"pattern": "def x"})],
+                       [("bogus", {})], "done"], root=_copy_m(tmp_path))
+    turn1 = [m["content"] for m in client.seen[1][0] if m["role"] == "tool"]
+    assert not turn1[0].endswith("points left]") and turn1[1].endswith("[13 of 15 points left]")
+    assert client.seen[2][0][-1]["content"].endswith("[12.5 of 15 points left]")    # a failed call costs 0.5
+    assert [m["content"] for m in res.transcript if m["role"] == "tool"][-1].endswith("[12.5 of 15 points left]")
+    note = LEVELS["L8"](TASKS["reuse-001"], load_workspace(M), agent_variant="edit", prompt_version=4).text
+    assert "You have 15 points." in note and "of a call" not in note and "0.25 points" in note
+
+
+def test_l8_outline_for_paths_and_module_names():
+    t = RepoTools(M, rich=True, whole_files=True)
+    out = t.call("read_symbol", {"symbols": ["shopkit/shipping/labels.py", "test_labels"]})
+    assert "Outline of shopkit/shipping/labels.py (15 lines): imports (2-4), label_code (7-9), label_text (12-15)" in out
+    assert "Outline of tests/test_labels.py (14 lines)" in out
+    assert all(x["kind"] == "note" for x in t.last_segments)                 # notes, not code
+
+
+def test_v4_agents_see_the_path_of_a_file_the_change_creates():
+    ws = load_workspace(M)
+    for level, variant in (("L7", "grep"), ("L7", "selective"), ("L8", "edit")):
+        new = LEVELS[level](TASKS["control-001"], ws, agent_variant=variant, prompt_version=4).text
+        assert new.startswith("File: shopkit/utils/units.py\n(This file does not exist yet.)\n\n")
+        old = LEVELS[level](TASKS["reuse-001"], ws, agent_variant=variant, prompt_version=4).text
+        assert not old.startswith("File:")                                    # existing targets stay unnamed

@@ -148,3 +148,19 @@ def test_concurrent_sweep_continues_when_the_restart_fails(tmp_path, monkeypatch
     monkeypatch.setattr("context_bench.runner._free_mb", lambda: 100)    # always low
     exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"])
     assert len(results.load(exp.results_path)) >= 4
+
+
+def test_concurrent_sweep_restarts_before_each_agentic_run(tmp_path, monkeypatch):
+    marker = tmp_path / "restarts.log"
+    exp, client, urls = _clean_exp(tmp_path, monkeypatch, f"echo restart >> {marker}")
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: 10**6)          # plenty: no memory restarts
+    monkeypatch.setenv("CBENCH_RESTART_EVERY_L7", "1")
+    seen = []
+    real = exp.run_one
+    def run_one(rc, url=None, **kw):
+        seen.append(rc.level)
+        return real(rc, url, **kw)
+    monkeypatch.setattr(exp, "run_one", run_one)
+    exp.sweep(["L1", "L7"], task_ids=["control-001", "control-002"])
+    n_l7 = seen.count("L7")
+    assert n_l7 >= 1 and marker.read_text().count("restart") == n_l7      # one restart per agentic run, none for L1 (EVERY_L7=1)

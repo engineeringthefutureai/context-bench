@@ -113,3 +113,47 @@ def unified_patch(before: dict[str, str | None], files: dict[str, str]) -> str:
             (old or "").splitlines(keepends=True), new.splitlines(keepends=True),
             fromfile="/dev/null" if old is None else f"a/{rel}", tofile=f"b/{rel}"))
     return "".join(parts)
+
+
+# ---- L8 edit tool (prompt arm "edit_tools") ---------------------------------------------------------
+
+def _find(content: str, old: str) -> list[tuple[int, int]]:
+    """Spans of `old` in `content`: exact matches, else matches line by line ignoring trailing whitespace."""
+    if old.strip() == "":
+        return []
+    spans, i = [], content.find(old)
+    while i != -1:
+        spans.append((i, i + len(old)))
+        i = content.find(old, i + 1)
+    if spans:
+        return spans
+    lines, want = content.splitlines(keepends=True), [l.rstrip() for l in old.splitlines()]
+    offs = [0]
+    for l in lines:
+        offs.append(offs[-1] + len(l))
+    for s in range(len(lines) - len(want) + 1):
+        if all(lines[s + k].rstrip() == want[k] for k in range(len(want))):
+            end = offs[s + len(want)]
+            if content[offs[s]:end].endswith("\n") and not old.endswith("\n"):
+                end -= 1
+            spans.append((offs[s], end))
+    return spans
+
+
+def changed_files(original: Path, sandbox: Path) -> tuple[dict[str, str | None], dict[str, str]]:
+    """L8: what the agent's edits changed, as (before, files) like apply_files/unified_patch use: every text
+    file in the sandbox that is new or differs from the original repo."""
+    before, files = {}, {}
+    for p in sorted(sandbox.rglob("*")):
+        if not p.is_file() or {"__pycache__", ".pytest_cache"} & set(p.parts):
+            continue
+        rel = p.relative_to(sandbox).as_posix()
+        try:
+            now = p.read_text()
+        except UnicodeDecodeError:
+            continue
+        orig = original / rel
+        then = orig.read_text() if orig.is_file() else None
+        if now != then:
+            before[rel], files[rel] = then, now
+    return before, files

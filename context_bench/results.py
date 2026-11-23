@@ -47,7 +47,8 @@ def config_label(r: dict) -> str:
     '@M' etc. for any repo other than S, ' p1' etc. for rows made with an older system prompt, and
     ' h1' for L7 rows from the original tool harness (no failed-call feedback, RunConfig.failed_call_cost)."""
     parts = [r["level"]] + [r[k] for k in ("retriever", "query_mode", "agent_variant") if r[k] != "none"]
-    return (" ".join(parts) + ("+hint" if r["prompt_arm"] != "base" else "")
+    arm = {"base": "", "reuse_hint": "+hint", "edit_tools": "+edits"}.get(r["prompt_arm"], "+" + r["prompt_arm"])
+    return (" ".join(parts) + arm
             + ("+docs" if r.get("map_docs") else "")
             + (" nothink" if r.get("thinking") is False else "")
             + (f" @{r['repo_size']}" if r["repo_size"] != "S" else "")

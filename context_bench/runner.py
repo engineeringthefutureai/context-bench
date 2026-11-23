@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import subprocess
@@ -33,7 +34,7 @@ from pathlib import Path
 import httpx
 
 from . import bundle, results
-from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_files,
+from .apply import (UnsafePath, apply_files, changed_files, format_status, make_sandbox, parse_files,
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
@@ -153,15 +154,14 @@ class Experiment:
     def make_cold(self, model_key: str, url: str, level: str | None = None) -> str:
         """Clean mode, before a run's first model call: make the prefix cache cold. Restarts the server
         (restart_server) on the sweep's first run, every CBENCH_RESTART_EVERY runs (default 25; 1 =
-        always; L7 runs use CBENCH_RESTART_EVERY_L7, default 12: multi-turn runs grow the vLLM workers
-        faster, and restarting the single-shot levels as often would only cost time), when the host's free memory is below CBENCH_RESTART_MIN_FREE_MB (default 6000; the
+        always; the agentic levels L7 and L8 use CBENCH_RESTART_EVERY_L7, default 12: multi-turn runs grow the vLLM workers fast, above all on repo L, so every agentic run
+        starts on a fresh server), when the host's free memory is below CBENCH_RESTART_MIN_FREE_MB (default 6000; the
         vLLM workers grow in host RAM and only a restart gives it back; read from this machine's
         /proc/meminfo, so it assumes the server runs here), or when the server has no prefix-cache
         reset. Otherwise drops the prefix cache (/reset_prefix_cache), which takes milliseconds.
         Returns "restart" or "reset"."""
         key = (model_key, url)
-        every = int((env_value("CBENCH_RESTART_EVERY_L7") or 12) if level == "L7"
-                    else (env_value("CBENCH_RESTART_EVERY") or 25))
+        every = _restart_every(level)
         min_free = int(env_value("CBENCH_RESTART_MIN_FREE_MB") or 6000)
         since = self._since_restart.get(key)
         if since is not None and since + 1 < every and _free_mb() >= min_free:
@@ -235,10 +235,11 @@ class Experiment:
                 return result
 
             agent = None
-            if rc.level == "L7":
+            if rc.level in ("L7", "L8"):
                 tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
                                                            if rc.agent_variant in SEMANTIC_VARIANTS else None),
-                                  rich=rc.agent_variant in RICH_VARIANTS)
+                                  rich=rc.agent_variant in RICH_VARIANTS,
+                                  whole_files=rc.agent_variant == "edit")
                 agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking,
@@ -282,13 +283,17 @@ class Experiment:
                 return result
 
             files, error = parse_files(chat.content), None
+            edit_tools = rc.prompt_arm == "edit_tools"    # L8: the agent already changed the sandbox
+            if edit_tools:
+                before, files = changed_files(self._path(self.config["repos"][rc.repo_size]), sandbox)
             if chat.finish_reason == "length":
                 error = f"output hit max_output_tokens ({max_out})"
             elif not files:
-                error = "no <file> blocks in the response"
+                error = "no changes made with the edit tools" if edit_tools else "no <file> blocks in the response"
             patch = None
             try:
-                before = apply_files(sandbox, files)
+                if not edit_tools:
+                    before = apply_files(sandbox, files)
                 patch = unified_patch(before, files) or None
             except UnsafePath as e:
                 error = f"unsafe path: {e}"
@@ -303,6 +308,8 @@ class Experiment:
         if agent:
             perf.update(tool_output_breakdown(agent.transcript, relevant_files(files, list(ws.files))))
         perf.update(self._protocol(task, rc.repo_size, chat.content, files))
+        if rc.prompt_arm == "edit_tools":            # no reply format to check: the edits are the answer
+            perf["format_status"] = "ok" if files else "no_code"
         if chat.tool_calls and not files:       # the server parsed pretend tool calls out of the text
             perf["format_status"] = "tool_request"
 
@@ -325,7 +332,8 @@ class Experiment:
             transcript.append({"finish_reason": chat.finish_reason, "message": chat.message})
         bundle.write_bundle(run_dir, patch=patch, messages=messages, response=chat.content,
                             reasoning=chat.reasoning, transcript=transcript or None,
-                            tests_output=tests_out, result=asdict(result))
+                            tests_output=tests_out, result=asdict(result),
+                            files=files if rc.prompt_arm == "edit_tools" else None)
         _log(result)
         return result
 
@@ -369,6 +377,9 @@ class Experiment:
                 continue
             text = response.read_text()
             files = parse_files(text)
+            if r.get("prompt_arm") == "edit_tools":     # L8: the changed files were saved with the run
+                saved = self.runs_dir / r["run_id"] / "files.json"
+                files = json.loads(saved.read_text()) if saved.is_file() else {}
             r.update(self._protocol(task, r["repo_size"], text, files))
             if not files and _had_tool_calls(self.runs_dir / r["run_id"] / "transcript.jsonl", r["level"]):
                 r["format_status"] = "tool_request"     # as run_one decided from the raw message
@@ -525,27 +536,58 @@ class Experiment:
         failed: list[str] = []
         lock = threading.Lock()
         counter = iter(range(1, len(todo) + 1))
+        # results/sweep_status.json: what this sweep still has queued and what is running now, for the
+        # in-progress page (scripts/build_report.py). Rewritten on every change, removed at the end.
+        status_path = self.results_path.parent / "sweep_status.json"
+        status = {"pid": os.getpid(), "started_at": _now(),
+                  "runs": {rc.run_id: {**{k: v for k, v in asdict(rc).items()
+                                          if k in ("task_id", "level", "retriever", "query_mode", "agent_variant",
+                                                   "map_docs", "prompt_arm", "repo_size", "thinking",
+                                                   "failed_call_cost", "prompt_version")},
+                                       "state": "queued"} for rc in todo}}
+
+        def set_state(run_id: str, state: str | None) -> None:
+            """Under `lock`: mark a run running, or drop it (None) once recorded or given up."""
+            if state is None:
+                status["runs"].pop(run_id, None)
+            elif run_id in status["runs"]:
+                status["runs"][run_id]["state"] = state
+            status["updated_at"] = _now()
+            tmp = status_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(status))
+            tmp.replace(status_path)
+
+        with lock:
+            set_state("", None)
         # concurrent sweeps: drain and restart the server when host memory runs low
         cond = threading.Condition()
-        gate_state = {"active": 0, "restarting": False, "enabled": not clean and bool(env_value("CBENCH_RESTART_CMD"))}
+        gate_state = {"active": 0, "restarting": False, "enabled": not clean and bool(env_value("CBENCH_RESTART_CMD")),
+                      "agentic_since": None}   # agentic runs started since the last restart (None: none yet)
         min_free = int(env_value("CBENCH_RESTART_MIN_FREE_MB") or 6000)
 
-        def gate(model: str, url: str) -> None:
-            """Wait for a restart in progress; start one (after the runs in flight) when memory is low."""
+        def gate(model: str, url: str, level: str) -> None:
+            """Wait for a restart in progress; start one (after the runs in flight) when memory is low, or
+            before an agentic run (L7/L8) every CBENCH_RESTART_EVERY_L7 agentic runs (default 1: each)."""
             if not gate_state["enabled"]:
                 return
+            agentic = level in AGENTIC_LEVELS
             with cond:
                 while gate_state["restarting"]:
                     cond.wait()
-                if _free_mb() >= min_free:
+                since = gate_state["agentic_since"]
+                due = agentic and (since is None or since >= _restart_every(level))
+                if _free_mb() >= min_free and not due:
                     gate_state["active"] += 1
+                    if agentic:
+                        gate_state["agentic_since"] = since + 1
                     return
                 gate_state["restarting"] = True
                 while gate_state["active"] > 0:
                     cond.wait()
             try:
-                print(f"low memory ({_free_mb()} MB free < {min_free}): restarting the model server",
-                      file=sys.stderr)
+                reason = (f"low memory ({_free_mb()} MB free < {min_free})" if _free_mb() < min_free
+                          else f"before an agentic run ({level})")
+                print(f"{reason}: restarting the model server", file=sys.stderr)
                 self.restart_server(model, url)
             except Exception as e:                   # keep going on the old server, don't try again
                 print(f"server restart failed, continuing without restarts: {e}", file=sys.stderr)
@@ -554,6 +596,7 @@ class Experiment:
                 with cond:
                     gate_state["restarting"] = False
                     gate_state["active"] += 1
+                    gate_state["agentic_since"] = 1 if agentic else 0
                     cond.notify_all()
 
         def release() -> None:
@@ -570,10 +613,12 @@ class Experiment:
                         return
                     rc = queue.pop(0)
                     if _variant(rc) in unimplemented:
+                        set_state(rc.run_id, None)
                         continue
                     i = next(counter)
+                    set_state(rc.run_id, "running")
                 tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
-                gate(rc.model, url)
+                gate(rc.model, url, rc.level)
                 try:
                     result = self.run_one(rc, url, concurrency=workers_per_url[rc.model, url], cold_start=clean)
                 except NotImplementedError as e:
@@ -603,6 +648,8 @@ class Experiment:
                     continue
                 finally:
                     release()
+                    with lock:
+                        set_state(rc.run_id, None)
                 with lock:
                     results.append(self.results_path, result)
                     print(f"  ({i}/{len(todo)} done, {url})", file=sys.stderr)
@@ -619,6 +666,7 @@ class Experiment:
             t.start()
         for t in threads:
             t.join()
+        status_path.unlink(missing_ok=True)
         if failed:
             print(f"{len(failed)} runs failed with an unexpected error (not recorded; rerun to retry): "
                   + ", ".join(failed), file=sys.stderr)
@@ -740,6 +788,17 @@ def _seen_text(run_dir: Path) -> str | None:
     return "\n\n".join(parts)
 
 
+AGENTIC_LEVELS = ("L7", "L8")
+
+
+def _restart_every(level: str | None) -> int:
+    """Runs per server restart: CBENCH_RESTART_EVERY_L7 (default 12; the memory guard restarts sooner when
+    host memory runs low) for L7/L8, else CBENCH_RESTART_EVERY (default 25)."""
+    if level in AGENTIC_LEVELS:
+        return max(int(env_value("CBENCH_RESTART_EVERY_L7") or 12), 1)
+    return max(int(env_value("CBENCH_RESTART_EVERY") or 25), 1)
+
+
 def _free_mb() -> int:
     """MemAvailable of this machine in MB (a large number where /proc/meminfo doesn't exist)."""
     try:
@@ -786,7 +845,7 @@ def _level_options(rc: RunConfig) -> dict:
         return {"retriever": rc.retriever, "query_mode": rc.query_mode}
     if rc.level == "L6":
         return {"docs": rc.map_docs}
-    if rc.level == "L7":
+    if rc.level in ("L7", "L8"):
         return {"agent_variant": rc.agent_variant, "prompt_version": rc.prompt_version}
     return {}
 

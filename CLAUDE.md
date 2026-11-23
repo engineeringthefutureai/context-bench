@@ -53,6 +53,19 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class (`map_docs = true`: + first docstring line, "L6+docs") |
 | L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search`; `rich` and `selective` (below). Prompt v4: no target, the repo's file tree instead, no `list_files` |
 
+L8 (experimental, 2026-11-23, repo M only for now): `l7_agentic`'s `edit` variant, registered as its own
+level so it never mixes into L7. Starts from the symbol list (per file: path, lines, importers, names of
+functions/classes/methods/module constants, no signatures); `read_symbol` is the only reader (names, and
+"path:start-end"; a bare path or module name returns the file's outline); `grep`, `find_references`,
+`semantic_search`, `drop`; changes are made with `edit(path, old, new)` and `create_file` tools on the
+run's repo copy (free on the budget, failed calls cost 0.5), and a reply without tool calls ends the run;
+the patch is the copy's diff (`apply.changed_files`, files saved in the bundle for rescore). Budget in
+"points" with a per-turn "[n of 15 points left]" line. Prompt arm `edit_tools` replaces only the output
+format section: a documented exception to hard rule 1, L8 only. Unknown tools that other harnesses have
+(read_file, write_file, ...) get a specific "there is no X tool" error. All L7 variants and L8 under v4
+see `File: path / (This file does not exist yet.)` when the change creates a new file (as L1-L6 do).
+A final reply that is a tool call after the tools were gone gets one retry (`FINAL_RETRY`).
+
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),
 `model_queries` (a planning call where the model writes up to 5 search queries from the task and
@@ -118,7 +131,7 @@ round reruns everything with thinking on, in clean mode (`cbench run --clean --t
 time, with the prefix cache made cold before each, so nothing cached carries over between tasks that
 all share the same repo and system prompt. Between runs the cache is dropped (`/reset_prefix_cache`,
 vLLM with `VLLM_SERVER_DEV_MODE=1`, 75 ms); the server is fully restarted on the first run, every
-`CBENCH_RESTART_EVERY` runs (25; L7: `CBENCH_RESTART_EVERY_L7`, 12) and when host memory drops below `CBENCH_RESTART_MIN_FREE_MB` (6000),
+`CBENCH_RESTART_EVERY` runs (25; L7 and L8: `CBENCH_RESTART_EVERY_L7`, 12, also in concurrent sweeps) and when host memory drops below `CBENCH_RESTART_MIN_FREE_MB` (6000),
 since the reset frees no memory and the vLLM workers grow in host RAM. Each run records `cold_method`. Concurrent (not clean) sweeps also restart the server when host memory drops below
 `CBENCH_RESTART_MIN_FREE_MB`: no new run starts, the runs in flight finish, one restart, then the sweep goes on. Both arms keep separate run ids. Crude on purpose;
 more seeds, a second size and the model axis come later.

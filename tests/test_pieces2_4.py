@@ -113,3 +113,17 @@ def test_prompt_versions_keep_old_ids_and_label_old_rows():
            "prompt_arm": "base", "repo_size": "S"}
     assert config_label(row) == "L1 p1" and config_label({**row, "prompt_version": 3}) == "L1 p3"
     assert config_label({**row, "prompt_version": 4}) == "L1"
+
+
+def test_edit_tools_arm_changes_only_the_output_format():
+    from pathlib import Path
+    from context_bench.prompt import render
+    from context_bench.tasks import load_tasks
+    from context_bench.types import ContextBlock
+    task = load_tasks(Path(__file__).resolve().parents[1] / "tasks")["reuse-001"]
+    base = render(task, ContextBlock(text="ctx"), "base", 4)
+    edit = render(task, ContextBlock(text="ctx"), "edit_tools", 4)
+    head = base[0]["content"].split("Output format (strict)")[0]
+    assert edit[0]["content"].startswith(head) and "edit and create_file tools" in edit[0]["content"]
+    assert "Always the whole file" not in edit[0]["content"]
+    assert edit[1]["content"].startswith(base[1]["content"].split("Reply with")[0])

@@ -87,6 +87,46 @@ _TEXT_CALL = re.compile(r"<tool_call>|<function[=_\s>]|<invoke\b")
 
 # Sent once the budget is spent (mechanics: the tools are gone, the answer is due).
 BUDGET_SPENT = "No tool calls left. Reply with the <file> blocks of your change."
+# Sent once when the reply to BUDGET_SPENT is empty or a tool call written as text (vLLM's parser strips a
+# tool call even when no tools were offered, which leaves an empty reply). Mechanics only.
+FINAL_RETRY = ("Tools are no longer available, so tool calls can't run. Reply with the <file> blocks of "
+               "your change.")
+
+# L8 ("edit" variant, experimental, 2026-11-23): selective's dropping, the symbol list as the starting
+# context, read_symbol as the only reading tool (names and line ranges), and answers as edit blocks
+# (prompt arm edit_blocks), so no whole file ever has to be read. Mechanics only.
+TOOLS_NOTE_EDIT = """The repository's files and the names defined in them are listed above.
+These are the only tools in this harness ({tools}); there is no read_file, list_files or open tool:
+- read_symbol: reads code. Give names from the list above (functions, classes, Class.method, module-level
+  constants), qualified like "shopkit.money.format_money" or bare when only one definition has that name,
+  up to 8 per call. For lines of any file, give "path:start-end".
+- grep: searches file contents with a regular expression; each hit names its enclosing function or class.
+- find_references: lists where a name is defined, imported and used.
+- semantic_search: searches the code by meaning and returns up to 5 definitions with their source.
+- drop: removes results of your latest calls from the conversation (below).
+- edit: replaces text in a file (old must match exactly and occur once); the change is made at once.
+- create_file: creates a new file.
+You have {max_calls} points. read_symbol, grep, find_references and semantic_search cost 1 point per call;
+edit, create_file and drop are free, and edit and create_file keep working when the points are spent. A
+call that fails (wrong arguments, unknown tool, an edit whose old text doesn't match) costs 0.5 points, and
+its error says what was wrong. After each turn's tool results you see how many points are left. You can
+make several calls in one turn. When the change is complete, reply without tool calls; that reply ends
+the task."""
+
+# L8: the dropping note in points (selective's SELECTIVE_NOTE_V4 says "calls").
+SELECTIVE_NOTE_EDIT = """Every tool result stays in the conversation and is re-read with every later turn, so results you
+don't need make each turn longer and add noise. Each result has an ID like [#3]. With drop you can remove
+results of your latest calls; each is replaced by a one-line stub, and you can read it again later. A drop
+that removes at least {min_tokens} tokens gives back 0.25 points (at most {cap:g} points per task); reading the
+dropped code again takes them back."""
+
+# L8: an unknown tool that other harnesses have gets a specific answer (mechanics: it doesn't exist here).
+_MISSING_EDIT_TOOLS = {"read_file", "list_files", "open", "open_file", "view", "cat", "read", "ls", "glob",
+                       "search_files", "find_files"}
+_CHANGE_TOOLS = {"edit_file", "write", "write_file", "str_replace", "apply_patch", "replace", "insert",
+                 "str_replace_editor", "multi_edit"}
+BUDGET_SPENT_EDIT = ("No points left for reading or search. edit and create_file still work; when the change "
+                     "is complete, reply without tool calls.")
 
 _TOOLS = {
     "grep": ("Search file contents with a Python regular expression. Returns matching lines as "
@@ -210,17 +250,56 @@ _TOOLS_RICH_V4 = {
              ["ids"]),
 }
 
+# L8 ("edit"): read_symbol is the only reading tool: names (incl. module-level constants) and line ranges.
+_TOOLS_EDIT = {
+    "read_symbol": ("Read code by name, up to 8 in one call (one call of the budget), at most 200 lines per call. "
+                    "A name can be a function, method, class or module-level constant: returns \"path:start-end  "
+                    "qualified.name\" and its source (a method with its class's first line). \"path:start-end\" "
+                    "returns those lines of any file as they are, with \"File: path (lines a-b of n)\". The file's "
+                    "imports come with the first code shown from it. A bare name matching several definitions "
+                    "returns the list of matches.",
+                    {"symbols": {"type": "array", "items": {"type": "string"},
+                                 "description": "qualified names like \"shopkit.money.format_money\", "
+                                                "\"shopkit.orders.models.Order.total\" or "
+                                                "\"shopkit.shipping.packaging.VOLUMETRIC_DIVISOR\"; bare names like "
+                                                "\"format_money\"; or line ranges like \"shopkit/money.py:10-40\""}},
+                    ["symbols"]),
+    "drop": ("Remove results of your latest tool calls from the conversation; each is replaced by a one-line stub "
+             "and can be read again. Free; a drop that removes at least 300 tokens gives back 0.25 points (taken "
+             "back if you read the dropped code again).",
+             {"ids": {"type": "array", "items": {"type": "integer"}, "description": "result IDs, the n in [#n]"}},
+             ["ids"]),
+    "edit": ("Replace text in a file of the repository: old must match the file exactly (indentation included) "
+             "and occur once in it. The change is made at once; later reads show the new code. Returns the lines "
+             "the new text now occupies. Free; a failed edit costs 0.5 points.",
+             {"path": {"type": "string", "description": "relative to the repository root"},
+              "old": {"type": "string", "description": "the exact text to replace; include enough lines to be unique"},
+              "new": {"type": "string", "description": "the replacement text (empty to delete)"}},
+             ["path", "old", "new"]),
+    "create_file": ("Create a new file with the given contents (fails if the file exists: change existing files "
+                    "with edit). Free; a failed call costs 0.5 points.",
+                    {"path": {"type": "string", "description": "relative to the repository root"},
+                     "content": {"type": "string", "description": "the whole file"}},
+                    ["path", "content"]),
+}
+
 _VARIANTS = {"grep": ["grep", "list_files", "read_file", "find_references"],
              "hybrid": ["grep", "list_files", "read_file", "find_references", "semantic_search"],
              "rich": ["grep", "list_files", "read_symbol", "read_file", "find_references", "semantic_search"],
+             "edit": ["grep", "read_symbol", "find_references", "semantic_search", "drop", "edit",
+                      "create_file"],                                                            # L8
              "selective": ["grep", "list_files", "read_symbol", "read_file", "find_references", "semantic_search",
                            "drop"]}
-RICH_VARIANTS = {"rich", "selective"}
-SEMANTIC_VARIANTS = {"hybrid", "rich", "selective"}     # need the embedding retriever
+RICH_VARIANTS = {"rich", "selective", "edit"}
+SEMANTIC_VARIANTS = {"hybrid", "rich", "selective", "edit"}     # need the embedding retriever
+DROP_VARIANTS = {"selective", "edit"}                     # result IDs, drop, refunds
+EDIT_TOOLS = {"edit", "create_file"}                      # L8: change the repo copy; free on the budget
 
 
 def _spec(name: str, agent_variant: str, prompt_version: int = 3) -> tuple:
     rich = agent_variant in RICH_VARIANTS
+    if agent_variant == "edit" and name in _TOOLS_EDIT:
+        return _TOOLS_EDIT[name]
     if prompt_version >= 4:
         table = _TOOLS_RICH_V4 if rich else _TOOLS_V4
         if name in table:
@@ -233,7 +312,14 @@ def _spec(name: str, agent_variant: str, prompt_version: int = 3) -> tuple:
 def _usage(name: str, agent_variant: str, prompt_version: int = 3) -> str:
     """What a failed call should have looked like: the tool's arguments, or the tools that exist."""
     if name not in _variant_tools(agent_variant, prompt_version):
-        return "Available tools: " + ", ".join(_variant_tools(agent_variant, prompt_version)) + "."
+        tools = ", ".join(_variant_tools(agent_variant, prompt_version))
+        if agent_variant == "edit" and name in _MISSING_EDIT_TOOLS:
+            return (f"There is no {name} tool in this harness. Read code with read_symbol: names from the list, "
+                    f"or \"path:start-end\" for lines of a file. Available tools: {tools}.")
+        if agent_variant == "edit" and name in _CHANGE_TOOLS:
+            return (f"There is no {name} tool in this harness: change existing files with edit and add new ones "
+                    f"with create_file. Available tools: {tools}.")
+        return "Available tools: " + tools + "."
     _, props, required = _spec(name, agent_variant, prompt_version)
     args = [f"{k} ({v['type']}, {'required' if k in required else 'optional'})" for k, v in props.items()]
     return f"{name} takes: " + (", ".join(args) if args else "no arguments") + "."
@@ -245,6 +331,8 @@ def _variant_tools(agent_variant: str, prompt_version: int = 3) -> list[str]:
     if agent_variant not in _VARIANTS:
         raise ValueError(f"unknown agent_variant {agent_variant!r}")
     names = _VARIANTS[agent_variant]
+    if agent_variant == "edit":
+        return names
     return [n for n in names if n != "list_files"] if prompt_version >= 4 else names
 
 
@@ -252,14 +340,24 @@ def build_context(task: Task, ws: Workspace, agent_variant: str = "grep", prompt
     """Initial context only, then TOOLS_NOTE listing the variant's tools; the rest arrives through tools.
     prompt_version <= 3: the target file. 4: no target (the agent finds the file from the task), the
     repository's file tree instead (list_files of the root: saves the opening turn almost every run spent
-    listing directories)."""
+    listing directories). selective v4: the symbol list instead of the tree (symbol_list)."""
     names = _variant_tools(agent_variant, prompt_version)
+    # v4: no target, except when the change creates a file that doesn't exist yet: its path can't be found
+    # in the repo, and L1-L6 see it as "File: path / (This file does not exist yet.)", so L7/L8 get the same
+    # two lines (2026-11-23; before, a new-file task's module name had to be guessed).
+    new_file = (f"File: {task.target_file}\n(This file does not exist yet.)\n\n"
+                if prompt_version >= 4 and task.target_file and task.target_file not in ws.files else "")
+    if agent_variant == "edit":
+        note = (TOOLS_NOTE_EDIT.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS) + "\n"
+                + SELECTIVE_NOTE_EDIT.format(min_tokens=DROP_REFUND_MIN_TOKENS, cap=DROP_REFUND_CAP))
+        symbols = RepoTools(ws.repo).symbol_list()
+        return ContextBlock(text=f"{new_file}Repository files and names:\n{symbols}\n\n{note}", included=[])
     if prompt_version >= 4:
         note = TOOLS_NOTE_V4.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS)
         if agent_variant == "selective":
             note += "\n" + SELECTIVE_NOTE_V4.format(min_tokens=DROP_REFUND_MIN_TOKENS, cap=DROP_REFUND_CAP)
         tree = RepoTools(ws.repo).list_files(".")
-        return ContextBlock(text=f"Repository files:\n{tree}\n\n{note}", included=[])
+        return ContextBlock(text=f"{new_file}Repository files:\n{tree}\n\n{note}", included=[])
     path = task.target_file
     if path in ws.files:
         target = f"File: {path}\n```{_lang(path)}\n{ws.files[path].rstrip()}\n```"
@@ -322,6 +420,8 @@ class RepoTools:
     imports_shown: set[str] = field(default_factory=set)  # rich: files whose imports are in the conversation
     last_segments: list[dict] = field(default_factory=list)  # rich: the last call's output in parts
                                                              # (imports / code / note), for selective IDs
+    whole_files: bool = False      # L8: read_symbol also takes module-level constants and "path:a-b" ranges
+    bare_paths: bool = False       # ...and a bare file path for the whole file (off for L8)
 
     def _files(self) -> list[str]:
         return sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*")
@@ -424,6 +524,46 @@ class RepoTools:
                 out.append(f"{rel}  ({lines} lines)")
         if len(out) > MAX_LIST_LINES:
             out = out[:MAX_LIST_LINES] + [f"(+{len(out) - MAX_LIST_LINES} more)"]
+        return "\n".join(out) or "(empty)"
+
+    def _constants(self) -> dict[str, tuple[str, int, int]]:
+        """qualified name -> (path, first line, last line) of every module-level assignment to a name."""
+        if not hasattr(self, "_const_cache"):
+            out = {}
+            for rel, tree in self._trees().items():
+                for node in tree.body:
+                    targets = (node.targets if isinstance(node, ast.Assign) else
+                               [node.target] if isinstance(node, ast.AnnAssign) else [])
+                    for t in targets:
+                        if isinstance(t, ast.Name):
+                            out[f"{_module(rel)}.{t.id}"] = (rel, node.lineno, node.end_lineno or node.lineno)
+            self._const_cache = out
+        return self._const_cache
+
+    def symbol_list(self) -> str:
+        """selective v4 starting context: every file, one line each. .py: "path  (N lines, imported by M
+        modules): name, name, ..." with top-level functions, classes, Class.method and module-level
+        constants, in file order; other files: "path  (N lines)". Names only, no signatures."""
+        importers = self._importers()
+        consts = self._constants()
+        by_file: dict[str, list[tuple[int, str]]] = {}
+        for c in self._chunk_map().values():
+            by_file.setdefault(c.path, []).append((c.start_line, c.qualname.removeprefix(_module(c.path) + ".")))
+        for q, (rel, line, _) in consts.items():
+            by_file.setdefault(rel, []).append((line, q.removeprefix(_module(rel) + ".")))
+        out = []
+        for rel in self._files():
+            try:
+                n_lines = len((self.root / rel).read_text().splitlines())
+            except UnicodeDecodeError:
+                continue
+            if rel.endswith(".py"):
+                n, tests = importers.get(_module(rel), (0, 0))
+                names = ", ".join(q for _, q in sorted(by_file.get(rel, [])))
+                out.append(f"{rel}  ({n_lines} lines, imported by {n} modules"
+                           + (f", {tests} of them tests" if tests else "") + ")" + (f": {names}" if names else ""))
+            else:
+                out.append(f"{rel}  ({n_lines} lines)")
         return "\n".join(out) or "(empty)"
 
     def read_file(self, path: str) -> str:
@@ -621,6 +761,17 @@ class RepoTools:
         for i, raw in enumerate(symbols[:MAX_SYMBOLS]):
             name = raw.strip()
             c = chunks.get(name)
+            extra = self._read_extra(name) if self.whole_files and c is None else None
+            if extra is not None:                    # selective v4: a file, a line range or a constant
+                fresh = {x["file"] for x in extra if x["kind"] == "imports"}
+                n = sum(x["text"].count("\n") + 1 for x in extra)
+                if used + n > READ_CAP and segs:
+                    self.imports_shown -= fresh
+                    note(f"(output capped at {READ_CAP} lines; not read: {', '.join(symbols[i:MAX_SYMBOLS])})")
+                    break
+                segs += extra
+                used += n
+                continue
             if c is None:
                 matches = [q for q in chunks if q.endswith("." + name)]
                 if len(matches) == 1:
@@ -647,6 +798,93 @@ class RepoTools:
         if len(symbols) > MAX_SYMBOLS:
             note(f"(at most {MAX_SYMBOLS} names per call; not read: {', '.join(symbols[MAX_SYMBOLS:])})")
         return self._emit(segs)
+
+    def _outline(self, rel: str) -> dict:
+        """L8: what read_symbol accepts for a file asked for as a whole (by path or module name): its names
+        with line ranges, or for a non-Python file its length. A note, not code."""
+        n = len((self.root / rel).read_text().splitlines())
+        if not rel.endswith(".py"):
+            text = f"{rel} has {n} lines; read them as \"{rel}:start-end\""
+        else:
+            mod = _module(rel)
+            items = sorted([(c.start_line, f"{c.qualname.removeprefix(mod + '.')} ({c.start_line}-{c.end_line})")
+                            for c in self._chunk_map().values() if c.path == rel]
+                           + [(a, f"{q.removeprefix(mod + '.')} ({a}-{b})") for q, (r, a, b) in self._constants().items()
+                              if r == rel])
+            imp = self._import_lines(rel)
+            parts = ([f"imports ({imp[0]}-{imp[1]})"] if imp else []) + [x for _, x in items]
+            text = (f"Outline of {rel} ({n} lines): " + (", ".join(parts) or "no definitions")
+                    + f". Read names, or lines as \"{rel}:start-end\".")
+        return {"kind": "note", "file": None, "label": f"read_symbol outline {rel}", "text": text}
+
+    def _read_extra(self, name: str) -> list[dict] | None:
+        """selective v4 read_symbol forms beyond definitions: "path" (whole file, capped like read_file),
+        "path:a-b" (lines), or a module-level constant (qualified or unambiguous bare name). Segments, or
+        None when the name is none of these (then the definition lookup reports it)."""
+        m = re.fullmatch(r"(.+?):(\d+)-(\d+)", name)
+        path, start, end = (m.group(1), int(m.group(2)), int(m.group(3))) if m else (name, None, None)
+        try:
+            is_file = self._resolve(path).is_file()
+        except ValueError:
+            is_file = False
+        if is_file and not m and not self.bare_paths:
+            return [self._outline(self._resolve(path).relative_to(self.root.resolve()).as_posix())]
+        if is_file:
+            out = self.read_file_rich(path, start, end)
+            if not self.last_segments:
+                return [{"kind": "note", "file": None, "label": "read_symbol note", "text": out}]
+            return [dict(x, label=x["label"].replace("read_file ", "read_symbol ", 1)) for x in self.last_segments]
+        consts = self._constants()
+        key = name if name in consts else next(iter(q for q in consts if q.endswith("." + name)
+                                                    and sum(x.endswith("." + name) for x in consts) == 1), None)
+        if key is None:
+            mods = [rel for rel in self._trees() if _module(rel) == name or _module(rel).endswith("." + name)]
+            return [self._outline(mods[0])] if len(mods) == 1 else None      # a module name: its outline
+        
+        rel, a, b = consts[key]
+        src = (self.root / rel).read_text().splitlines()[a - 1:b]
+        return self._imports_seg(rel) + [{"kind": "code", "file": rel, "label": f"read_symbol {key}",
+                                          "text": f"{rel}:{a}-{b}  {key}\n" + "\n".join(src)}]
+
+    def _changed(self) -> None:
+        """L8: the repo copy changed; parsed trees, chunks and constants are read again on the next call."""
+        for cache in ("_tree_cache", "_chunks", "_const_cache"):
+            if hasattr(self, cache):
+                delattr(self, cache)
+
+    def edit(self, path: str, old: str, new: str) -> str:
+        """L8: replace `old` (exact, else line by line ignoring trailing whitespace; must occur once) with `new`
+        in the repo copy. Returns the new text's line range."""
+        from ..apply import _find
+        p = self._resolve(path)
+        if not p.is_file():
+            raise ValueError(f"no such file: {path} (create new files with create_file)")
+        rel, content = p.relative_to(self.root.resolve()).as_posix(), p.read_text()
+        if not isinstance(old, str) or not old.strip():
+            raise ValueError("old is empty: give the exact text to replace")
+        spans = _find(content, old)
+        if not spans:
+            raise ValueError(f"old doesn't match {rel} (copy the text exactly, indentation included)")
+        if len(spans) > 1:
+            raise ValueError(f"old matches {len(spans)} places in {rel}; include more lines to make it unique")
+        a, b = spans[0]
+        updated = content[:a] + (new or "") + content[b:]
+        p.write_text(updated if updated.endswith("\n") else updated + "\n")
+        self._changed()
+        first = content[:a].count("\n") + 1
+        n = max((new or "").count("\n") + (0 if (new or "").endswith("\n") else 1), 0) if new else 0
+        where = f"lines {first}-{first + n - 1}" if n else f"removed at line {first}"
+        return f"Edited {rel}: {where} ({len(updated.splitlines())} lines in the file now)"
+
+    def create_file(self, path: str, content: str) -> str:
+        """L8: a new file in the repo copy (an existing file is an error: use edit)."""
+        p = self._resolve(path)
+        if p.exists():
+            raise ValueError(f"{path} already exists; change it with edit")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content if content.endswith("\n") else content + "\n")
+        self._changed()
+        return f"Created {p.relative_to(self.root.resolve()).as_posix()} ({len(content.splitlines())} lines)"
 
     def find_references_rich(self, symbol: str) -> str:
         """find_references, with each hit's enclosing function and its line range, so the right lines
@@ -729,6 +967,11 @@ def cacheable_prefix(prev_in: int, prev_offer: bool | None, cur_in: int, cur_off
     return min(prev_in, cur_in) if prev_offer is not None and prev_offer == cur_offer else 0
 
 
+def _closing(content: str) -> bool:
+    """A harness message after which the reading tools are no longer offered (L8 keeps edit/create_file)."""
+    return content in (BUDGET_SPENT, FINAL_RETRY, BUDGET_SPENT_EDIT)
+
+
 def turn_prompts(messages: list[dict], transcript: list[dict]) -> list[tuple[list[dict], bool]]:
     """Rebuild each turn's request from a saved run: (messages sent, tools offered) per assistant
     reply. Tools were offered unless the turn followed the BUDGET_SPENT message.
@@ -737,7 +980,7 @@ def turn_prompts(messages: list[dict], transcript: list[dict]) -> list[tuple[lis
     msgs, out = list(messages), []
     for m in transcript:
         if m.get("role") == "assistant":
-            out.append((list(msgs), msgs[-1].get("content") != BUDGET_SPENT))
+            out.append((list(msgs), not _closing(msgs[-1].get("content") or "")))
         for d in m.get("drop") or []:
             msgs[d["index"]] = {**msgs[d["index"]], "content": d["content"]}
         msgs.append({k: v for k, v in m.items() if k not in ("drop", "dropped_ids", "result_ids", "reasoning")})
@@ -807,7 +1050,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     schema_tokens = client.count_tokens(json.dumps(schemas))
     msgs = list(messages)
     log = list(messages)                 # the transcript: msgs, but original results + drop records
-    selective = agent_variant == "selective"
+    selective = agent_variant in DROP_VARIANTS
     feedback = failed_call_cost is not None
     cost = failed_call_cost if feedback else 1.0
     spent = 0.0                          # budget used: successful calls + failed calls x cost
@@ -832,6 +1075,10 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     refunding = selective and prompt_version >= 4
     dropped: list[dict] = []
     capped = False
+    retried = False                       # FINAL_RETRY sent (at most once per run)
+    edit = agent_variant == "edit"        # L8: edits through tools; a reply without tool calls ends the run
+    budget_noted = False                  # L8: BUDGET_SPENT_EDIT sent
+    closed = False
 
     def render(index: int) -> str:
         return "\n\n".join(f"[#{i} dropped: {segs[i]['label']}]" if segs[i]["dropped"]
@@ -856,18 +1103,23 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                            answer_tool_text="\n\n".join(m["content"] for m in msgs if m.get("role") == "tool"))
 
     while True:
-        offer = spent < MAX_TOOL_CALLS
+        offer = (spent < MAX_TOOL_CALLS or edit) and not closed
         if selective and turns >= MAX_TURNS and offer:
             offer, capped = False, True
-        if not offer and msgs[-1].get("content") != BUDGET_SPENT:
+        if edit and spent >= MAX_TOOL_CALLS and not budget_noted:
+            add({"role": "user", "content": BUDGET_SPENT_EDIT})          # reading tools gone, edits stay
+            budget_noted = True
+        if not offer and not _closing(msgs[-1].get("content") or ""):
             add({"role": "user", "content": BUDGET_SPENT})
         prompt = client.count_prompt_tokens(msgs) + (schema_tokens if offer else 0)
         drop_saved += saving_now
         peak = max(peak, prompt)
         if prompt + max_tokens > context_window:
             return finish("", True)
+        offered = ([x for x in schemas if x["function"]["name"] in EDIT_TOOLS]
+                   if edit and spent >= MAX_TOOL_CALLS else schemas)
         chat = client.chat(msgs, temperature=temperature, seed=seed, max_tokens=max_tokens,
-                           tools=schemas if offer else None,
+                           tools=offered if offer else None,
                            **({} if thinking else {"thinking": False}))
         turns += 1
         tokens_in += chat.tokens_in
@@ -890,6 +1142,11 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 and _TEXT_CALL.search(chat.content)):
             add({"role": "user", "content": UNPARSED_CALL})
             calls, errors, spent = calls + 1, errors + 1, spent + cost
+            continue
+        if (feedback and not offer and not retried and "<file" not in chat.content and "<edit" not in chat.content
+                and (chat.tool_calls or _TEXT_CALL.search(chat.content) or (not chat.content.strip() and chat.tokens_out))):
+            add({"role": "user", "content": FINAL_RETRY})     # once: a tool call after the tools were gone
+            retried = True
             continue
         if not chat.tool_calls or not offer:
             break
@@ -966,7 +1223,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                         rec = {"amount": amount, "clawed": False}
                         for i in dict.fromkeys(ids):
                             segs[i]["refund"] = rec
-                        refund_note = f" ({amount:g} of a call back)"
+                        refund_note = f" ({amount:g} points back)" if edit else f" ({amount:g} of a call back)"
                     text = "dropped " + ", ".join(f"#{i}" for i in dict.fromkeys(ids)) + (
                         f" (and #{', #'.join(map(str, auto))}: imports no longer needed)" if auto else "") + (
                         f"; {refusal}" if bad else "") + refund_note
@@ -980,8 +1237,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                     add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
                 continue
             args = {}
-            if spent >= MAX_TOOL_CALLS:
-                out = "error: tool call budget spent; not executed"
+            if spent >= MAX_TOOL_CALLS and not (edit and name in EDIT_TOOLS):
+                out = ("error: no points left; not executed" if edit
+                       else "error: tool call budget spent; not executed")
                 errors += 1
             else:
                 calls += 1
@@ -990,7 +1248,8 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                     if name not in _variant_tools(agent_variant, prompt_version) or not isinstance(args, dict):
                         raise ValueError(f"unknown tool {name!r}")
                     out = tools.call(name, args)
-                    spent += 1
+                    if not (edit and name in EDIT_TOOLS):      # L8: edits are free; failures still cost
+                        spent += 1
                 except Exception as e:          # the model sees the error and can retry
                     out = f"error: {type(e).__name__}: {e}"
                     if feedback:
@@ -1027,6 +1286,10 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
             add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": render(index)},
                 {"result_ids": ids_here})
         tail = batch
+        if edit and msgs[-1].get("role") == "tool":     # L8: points left, once per turn, after the last result
+            line = f"\n\n[{max(MAX_TOOL_CALLS - spent, 0):g} of {MAX_TOOL_CALLS} points left]"
+            msgs[-1] = {**msgs[-1], "content": msgs[-1]["content"] + line}
+            log[-1] = {**log[-1], "content": log[-1]["content"] + line}
     return finish(chat.content, False, chat.finish_reason)
 
 

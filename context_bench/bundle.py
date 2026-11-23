@@ -18,7 +18,8 @@ from pathlib import Path
 
 def write_bundle(run_dir: Path, *, patch: str | None, messages: list[dict], response: str,
                  reasoning: str | None,
-                 transcript: list[dict] | None, tests_output: str, result: dict) -> None:
+                 transcript: list[dict] | None, tests_output: str, result: dict,
+                 files: dict[str, str] | None = None) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     for stale in run_dir.iterdir():          # overwrite: nothing from an earlier attempt survives
         stale.unlink()
@@ -26,6 +27,8 @@ def write_bundle(run_dir: Path, *, patch: str | None, messages: list[dict], resp
         (run_dir / "patch.diff").write_text(patch)
     (run_dir / "prompt.json").write_text(json.dumps(messages, indent=2, ensure_ascii=False))
     (run_dir / "response.txt").write_text(response)
+    if files is not None:                    # L8: the files its edit tools changed (no file blocks to re-read)
+        (run_dir / "files.json").write_text(json.dumps(files, indent=1, ensure_ascii=False))
     if reasoning:
         (run_dir / "reasoning.txt").write_text(reasoning)
     if transcript is not None:

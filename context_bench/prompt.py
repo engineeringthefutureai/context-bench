@@ -148,6 +148,19 @@ SYSTEM_PROMPT = SYSTEM_PROMPTS[PROMPT_VERSION]
 # Ablation arm only (L1 and L5). Never part of the base arm.
 REUSE_HINT = "Prefer reusing existing project helpers over writing new ones."
 
+# Experimental arm "edit_tools" (L8 only, 2026-11-23): an exception to "only the <context> block varies".
+# Files are changed with the edit and create_file tools as the agent goes, so an agent that reads code by
+# name never has to see a whole file to change it. Everything before "Output format (strict)" is unchanged.
+EDIT_OUTPUT_FORMAT = """Output format (strict)
+You change the repository with the edit and create_file tools; each change is made as you call them.
+When the change is complete, reply without tool calls. Code written in your reply is not applied."""
+
+
+def _edit_arm(system: str) -> str:
+    head, sep, _ = system.partition("Output format (strict)")
+    assert sep, "the system prompt has no output format section"
+    return head + EDIT_OUTPUT_FORMAT
+
 USER_TEMPLATE = """<context>
 {context}
 </context>
@@ -167,11 +180,16 @@ def render(task: Task, context: ContextBlock, prompt_arm: str = "base",
            prompt_version: int = PROMPT_VERSION) -> list[dict]:
     """Return [system, user] chat messages. Empty context renders as "(none)".
 
-    The reuse_hint arm appends REUSE_HINT to the system prompt; nothing else differs between arms.
+    The reuse_hint arm appends REUSE_HINT to the system prompt; edit_tools (L8, experimental) replaces the
+    output format section with EDIT_OUTPUT_FORMAT; nothing else differs between arms.
     prompt_version picks the system prompt and user template (SYSTEM_PROMPTS, USER_TEMPLATES)."""
-    if prompt_arm not in ("base", "reuse_hint"):
+    if prompt_arm not in ("base", "reuse_hint", "edit_tools"):
         raise ValueError(f"unknown prompt_arm {prompt_arm!r}")
     system = SYSTEM_PROMPTS[prompt_version] + ("\n" + REUSE_HINT if prompt_arm == "reuse_hint" else "")
     user = USER_TEMPLATES[prompt_version].format(context=context.text.strip() or "(none)", task=task.prompt.strip(),
                                 target_file=task.target_file)
+    if prompt_arm == "edit_tools":
+        system = _edit_arm(system)
+        user = user.replace("Reply with the <file> blocks of your change.",
+                            "Make the change with the edit and create_file tools, then reply without tool calls.")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
