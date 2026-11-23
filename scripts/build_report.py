@@ -10,6 +10,7 @@ from __future__ import annotations
 import collections
 import html
 import json
+import os
 import re
 import statistics as st
 import sys
@@ -81,8 +82,10 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
     the tier-1 tasks, L1-L2 each task once on its smallest repo) are drawn as "not run", so a bar's
     length is comparable across levels."""
     not_run = max(scale - n, 0)
-    parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{k}: {counts.get(k, 0)}"></span>'
-                    for k in ("pass", "fail", "invalid", "oot") if counts.get(k))
+    names = {"pass": "PASS", "fail": "FAIL", "invalid": "INVALID", "oot": "OUT OF TOKENS", "nofit": "NO FIT",
+             "running": "in progress", "queued": "queued"}
+    parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{names[k]}: {counts.get(k, 0)}"></span>'
+                    for k in ("pass", "fail", "invalid", "oot", "nofit", "running", "queued") if counts.get(k))
     if not_run:
         parts += f'<span class="o-na" style="flex:{not_run}" title="not run at this level: {not_run}"></span>'
     note = f' <span class="small">({not_run} n/a)</span>' if not_run else ""
@@ -91,8 +94,52 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
             f'<span class="v">{counts.get("pass", 0)}/{n}{note}</span></div>')
 
 
+def sweep_status() -> dict | None:
+    """results/sweep_status.json (written by cbench run), only while its sweep process is alive."""
+    path = RESULTS / "sweep_status.json"
+    try:
+        st_ = json.loads(path.read_text())
+        os.kill(int(st_["pid"]), 0)
+        return st_
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def build_progress(final: dict, off: dict) -> str:
-    """While a round is in progress (no final-round runs yet): outcomes so far per round and repo."""
+    """While a round is in progress (no final-round runs yet): per configuration, a bar of the outcomes
+    recorded so far plus what the running sweep has in progress and queued; then outcomes per repo."""
+    status = sweep_status()
+    pending = collections.defaultdict(collections.Counter)      # (round, label) -> running / queued
+    for r in (status or {}).get("runs", {}).values():
+        rnd = "final" if r.get("thinking") else "off"
+        pending[rnd, level_label(r)][r["state"]] += 1
+
+    def bars(rows, rnd, title):
+        by = collections.defaultdict(list)
+        for r in rows:
+            by[level_label(r)].append(r)
+        labels = set(by) | {lab for (x, lab) in pending if x == rnd}
+        if not labels:
+            return f"<h3>{e(title)}</h3><p class=small>Nothing recorded or queued yet.</p>"
+        order = [l for l in LEVEL_ORDER if l in labels] + sorted(labels - set(LEVEL_ORDER))
+        totals = {lab: len(by[lab]) + sum(pending[rnd, lab].values()) for lab in order}
+        scale = max(totals.values())
+        out = []
+        for i, lab in enumerate(order):
+            oc = collections.Counter(outcome(r) for r in by[lab])
+            pend = pending[rnd, lab]
+            counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"],
+                      "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"]}
+            group = lab.split()[0].replace("+docs", "")
+            prev = order[i - 1].split()[0].replace("+docs", "") if i else group
+            bar = obar(lab, counts, totals[lab], "group-start" if group != prev else "", scale=scale)
+            extra = " · ".join(x for x in (f"{pend['running']} running" if pend["running"] else "",
+                                            f"{pend['queued']} queued" if pend["queued"] else "") if x)
+            if extra:
+                bar = bar.replace('</span></div>', f' <span class="small">{extra}</span></span></div>', 1)
+            out.append(bar)
+        return f"<h3>{e(title)}</h3><div class=obars>{''.join(out)}</div>"
+
     def table(rows, title):
         by = collections.defaultdict(collections.Counter)
         for r in rows:
@@ -103,6 +150,18 @@ def build_progress(final: dict, off: dict) -> str:
         return (f"<h3>{e(title)}</h3><div class=table-wrap><table><thead><tr><th>Repo</th>"
                 + "".join(f"<th class=r>{k}</th>" for k in cols) + "<th class=r>Runs</th></tr></thead>"
                 f"<tbody>{body or '<tr><td colspan=7>none yet</td></tr>'}</tbody></table></div>")
+
+    legend = ('<div class="olegend small">' + "".join(
+        f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("fail", "FAIL"), ("invalid", "INVALID"),
+                                                          ("oot", "OUT OF TOKENS"), ("nofit", "NO FIT"),
+                                                          ("running", "in progress"), ("queued", "queued"))) + "</div>")
+    if status:
+        runs = status.get("runs", {}).values()
+        live = (f'<p class="small">Sweep running since {e(status.get("started_at", "")[:16].replace("T", " "))} UTC: '
+                f'{sum(r["state"] == "running" for r in runs)} in progress, {sum(r["state"] == "queued" for r in runs)} '
+                f'queued (last update {e(status.get("updated_at", "")[11:16])} UTC).</p>')
+    else:
+        live = '<p class="small">No sweep running right now.</p>'
     return HEAD + f"""
 <main>
   <header style="display:grid;gap:12px">
@@ -112,9 +171,18 @@ def build_progress(final: dict, off: dict) -> str:
     full write-up comes when the clean thinking-on round is done. Browse the runs in the raw-data viewer.</p>
   </header>
   <section>
-    {table(list(off.values()), "Thinking off (4 at a time)")}
+    <h2>Per configuration</h2>
+    {live}
+    {legend}
+    {bars(list(off.values()), "off", "Thinking off")}
+    {bars(list(final.values()), "final", "Final round (thinking on, cold cache)")}
+    <p class="small">Each bar is one configuration, on a common scale; its length is the runs recorded plus the
+    ones the running sweep still has. The number is PASS out of that total. Outcomes as defined on the Method page.</p>
+  </section>
+  <section>
+    <h2>Per repo</h2>
+    {table(list(off.values()), "Thinking off")}
     {table(list(final.values()), "Final round (thinking on, cold cache)")}
-    <p class="small">Outcomes as defined on the Method page. Configurations still to run aren't shown.</p>
   </section>
 """ + FOOT
 

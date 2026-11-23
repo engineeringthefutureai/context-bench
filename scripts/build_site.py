@@ -59,7 +59,7 @@ def level_label(r: dict) -> str:
         s += " " + r["query_mode"]
     if r["level"] == "L7":
         s += " " + r["agent_variant"]
-    if r["prompt_arm"] != "base":
+    if r["prompt_arm"] == "reuse_hint":
         s += " +hint"
     return s
 
@@ -77,6 +77,7 @@ def load_grades() -> dict[str, dict]:
 
 
 GRADES: dict[str, dict] = {}
+TARGETS: dict[str, str] = {}      # task id -> target file, from tasks/ (v4 prompts don't name it)
 PENALTIES: dict[str, dict] = {}
 
 
@@ -111,11 +112,15 @@ def select_rows() -> list[dict]:
 
 # ---- prompt segmentation -------------------------------------------------------------------------
 # Kinds (the viewer colours them): system, hint, task, target, file, retrieved, map, tools, closing.
+# (line prefix, kind, label): where a section of the <context> block starts
 _SECTIONS = [
-    ("Retrieved files", "retrieved"),
-    ("Retrieved code from other files", "retrieved"),
-    ("Repository map", "map"),
-    ("You can explore the repository", "tools"),
+    ("Retrieved files", "retrieved", "Retrieval results"),
+    ("Retrieved code from other files", "retrieved", "Retrieval results"),
+    ("Repository map", "map", "Repository map"),
+    ("Repository files and names:", "map", "Repository files and names (L8)"),
+    ("Repository files:", "map", "Repository files (L7, prompt v4)"),
+    ("You can explore the repository", "tools", "Tool instructions"),
+    ("The repository's files", "tools", "Tool instructions"),
 ]
 
 
@@ -151,13 +156,11 @@ def segment_context(ctx: str, target: str) -> list[dict]:
         if line.startswith("```"):
             in_fence = not in_fence
         if not in_fence:
-            hit = next(((p, k) for p, k in _SECTIONS if line.startswith(p)), None)
-            if hit:
+            hit = next(((p, k, lab) for p, k, lab in _SECTIONS if line.startswith(p)), None)
+            if hit and not (hit[1] == section == "tools"):            # one block for the whole tool note
                 flush()
                 section = hit[1]
-                cur_kind = section
-                cur_label = {"retrieved": "Retrieval results", "map": "Repository map",
-                             "tools": "Tool instructions"}[section]
+                cur_kind, cur_label = section, hit[2]
                 cur = [line]
                 continue
             if line.startswith("File: ") and not line.startswith("```"):
@@ -177,14 +180,17 @@ def segment_context(ctx: str, target: str) -> list[dict]:
 
 
 def segment_user(text: str, target: str) -> list[dict]:
-    m = re.match(r"<context>\n(.*)\n</context>\n\n<task>\n(.*)\n</task>\n\n(Target file: [^\n]*)(.*)$", text, re.S)
+    """<context>, <task>, then the closing lines: "Target file: ..." (prompt v1-v3) and the output
+    reminder (v3 and later; v4 has no target line)."""
+    m = re.match(r"<context>\n(.*)\n</context>\n\n<task>\n(.*)\n</task>(.*)$", text, re.S)
     if not m:
         return [seg("closing", "User message", text)]
-    ctx, task, tline, rest = m.groups()
+    ctx, task, rest = m.groups()
     segs = segment_context(ctx, target)
     segs.append(seg("task", "Task (change request)", task))
-    closing = (tline + rest).strip()
-    segs.append(seg("closing", "Target and output reminder", closing))
+    if rest.strip():
+        label = "Target and output reminder" if "Target file:" in rest else "Output reminder"
+        segs.append(seg("closing", label, rest.strip()))
     return segs
 
 
@@ -225,7 +231,7 @@ def run_payload(r: dict) -> dict:
     user = next((m["content"] for m in prompt if m["role"] == "user"), "")
     if not target:
         m = re.search(r"^Target file: (.+)$", user, re.M)
-        target = m.group(1).strip() if m else ""
+        target = m.group(1).strip() if m else TARGETS.get(r["task_id"], "")   # v4 prompts name no target
     transcript = []
     if (d / "transcript.jsonl").exists():
         for line in open(d / "transcript.jsonl"):
@@ -302,6 +308,9 @@ def tasks_payload() -> list[dict]:
 # ---- main ----------------------------------------------------------------------------------------
 def main() -> int:
     GRADES.update(load_grades())
+    for td in sorted((ROOT / "tasks").iterdir()):
+        if (td / "task.toml").is_file():
+            TARGETS[td.name] = tomllib.loads((td / "task.toml").read_text()).get("target_file", "")
     PENALTIES.update(load_penalties())
     rows = select_rows()
     if (OUT / "runs").exists():

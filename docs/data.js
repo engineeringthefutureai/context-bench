@@ -112,38 +112,91 @@
     return `<pre class="block diff">${lines.join("\n")}</pre>`;
   }
 
+  // A tool result in parts: selective/L8 segments start with "[#n] label"; rich read_symbol and
+  // semantic_search output starts each part with "path:a-b  name", "File: path (lines ...", "Imports of
+  // path:" or a "(...)" note after a blank line. One part = the whole result.
+  function splitResult(content, tool) {
+    const lines = content.split("\n");
+    const idRe = /^\[#(\d+)\]/;
+    const headRe = /^(\S+:\d+-\d+  \S|File: \S+ \(lines|Imports of \S+:|\((no |read lines|output capped|at most))/;
+    const byId = lines.some((l) => idRe.test(l));
+    if (!byId && !["read_symbol", "semantic_search"].includes(tool)) return [{head: "", text: content, id: null}];
+    const parts = [];
+    lines.forEach((l, i) => {
+      const starts = byId ? idRe.test(l) : headRe.test(l) && (i === 0 || lines[i - 1].trim() === "");
+      if (starts || !parts.length) parts.push({lines: [l]});
+      else parts[parts.length - 1].lines.push(l);
+    });
+    return parts.map((p) => {
+      const text = p.lines.join("\n").replace(/\n+$/, "");
+      const m = text.match(idRe);
+      const head = text.split("\n")[0].replace(/^\[#\d+\]\s*/, (s) => s).slice(0, 140);
+      return {head, text, id: m ? Number(m[1]) : null};
+    });
+  }
+
   function transcriptHTML(run) {
     const t = run.transcript || [];
     if (!t.length) return run.response ? `<pre class="block">${esc(run.response)}</pre>` : `<p class="empty">No answer saved.</p>`;
     const names = {}, droppedIds = new Set();
     t.forEach((m) => (m.tool_calls || []).forEach((c) => (names[c.id] = c.name)));
     t.forEach((m) => (m.drop || []).forEach((id) => droppedIds.add(id)));
-    return `<div class="segs">` + t.map((m) => {
+    // One block per model turn, then one "Harness" block for everything the harness sends back (tool
+    // results, harness messages) until the next model turn, so the two sides never blur together.
+    const out = [];
+    let harness = [], turnNo = 0;
+    const flushHarness = () => {
+      if (!harness.length) return;
+      const n = harness.filter((h) => h.tool).length;
+      const head = n ? `Harness → model · ${n} tool result${n > 1 ? "s" : ""}` : "Harness → model";
+      out.push(`<div class="harness"><div class="who">${head}</div>${harness.map((h) => h.html).join("")}</div>`);
+      harness = [];
+    };
+    for (const m of t) {
       if (m.role === "step") {
-        return `<div class="turn"><div class="who">Planning call (${esc(m.step)})</div>
+        flushHarness();
+        out.push(`<div class="turn"><div class="who">Planning call (${esc(m.step)})</div>
           <details class="seg k-tools"><summary><span class="lab">Instruction</span></summary><pre>${esc(m.instruction)}</pre></details>
           <details class="seg k-tools" open><summary><span class="lab">Model's queries</span></summary><pre>${esc(m.reply)}</pre></details>
-          <details class="seg k-retrieved"><summary><span class="lab">Hits per query</span></summary><pre>${esc(m.hits)}</pre></details></div>`;
+          <details class="seg k-retrieved"><summary><span class="lab">Hits per query</span></summary><pre>${esc(m.hits)}</pre></details></div>`);
+        continue;
       }
       if (m.role === "tool" && m.drop) {
-        return `<div class="call"><b>drop</b> ${esc(m.content)}</div>`;
-      }
-      const gone = (m.result_ids || []).filter((id) => droppedIds.has(id));
-      if (m.role === "tool" && gone.length) {
-        const all = gone.length === m.result_ids.length;
-        return `<details class="seg ${all ? "k-closing" : "k-tools"}"><summary><span class="lab">${esc(names[m.tool_call_id] || "tool")} · ${all ? "dropped later" : "partly dropped later"} (${gone.map((i) => "#" + i).join(", ")}; stubs sent from then on)</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`;
+        harness.push({tool: true, html: `<div class="call"><b>drop</b> ${esc(m.content)}</div>`});
+        continue;
       }
       if (m.role === "tool") {
-        return `<details class="seg k-tools"><summary><span class="lab">Result · ${esc(names[m.tool_call_id] || "tool")}</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`;
+        const tool = names[m.tool_call_id] || "tool";
+        const parts = splitResult(m.content || "", tool);
+        const gone = (m.result_ids || []).filter((id) => droppedIds.has(id));
+        const all = gone.length && gone.length === m.result_ids.length;
+        if (parts.length > 1) {                    // one item per definition / range / imports / note
+          const items = parts.map((p) => {
+            const dropped = p.id != null && droppedIds.has(p.id);
+            return `<details class="seg ${dropped ? "k-closing" : "k-tools"}"><summary><span class="lab">${esc(p.head)}${dropped ? " · dropped later" : ""}</span><span class="sz">≈${fmt(tok(p.text.length))} tok</span></summary><pre>${esc(p.text)}</pre></details>`;
+          }).join("");
+          harness.push({tool: true, html: `<div class="result-group"><div class="lab">Result · ${esc(tool)} · ${parts.length} parts</div>${items}</div>`});
+          continue;
+        }
+        const note = gone.length ? ` · ${all ? "dropped later" : "partly dropped later"} (${gone.map((i) => "#" + i).join(", ")}; stubs sent from then on)` : "";
+        harness.push({tool: true, html: `<details class="seg ${all ? "k-closing" : "k-tools"}"><summary><span class="lab">Result · ${esc(tool)}${note}</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`});
+        continue;
       }
       if (m.role === "user") {
-        return `<details class="seg k-closing" open><summary><span class="lab">Harness message</span></summary><pre>${esc(m.content)}</pre></details>`;
+        harness.push({tool: false, html: `<details class="seg k-closing" open><summary><span class="lab">Harness message</span></summary><pre>${esc(m.content)}</pre></details>`});
+        continue;
       }
+      flushHarness();
+      turnNo += 1;
       const calls = (m.tool_calls || []).map((c) => `<div class="call"><b>${esc(c.name)}</b> ${esc(c.arguments)}</div>`).join("");
-      const body = (m.content || "").trim() ? `<pre class="block">${esc(m.content.trim())}</pre>` : "";
+      const text = (m.content || "").trim();
+      const body = text ? `<div class="model-text"><div class="lab">${calls ? "Text written with the tool calls" : "Text"}</div><pre class="block">${esc(text)}</pre></div>` : "";
+      const callsHTML = calls ? `<div class="lab">Tool calls</div>${calls}` : (text ? "" : `<p class="empty">Empty reply.</p>`);
       const thought = m.reasoning ? `<details class="seg k-closing"><summary><span class="lab">Thinking</span><span class="sz">≈${fmt(tok(m.reasoning.length))} tok</span></summary><pre>${esc(m.reasoning)}</pre></details>` : "";
-      return `<div class="turn"><div class="who">Model${m.finish_reason ? ` · ${esc(m.finish_reason)}` : ""}</div>${thought}${body}${calls}</div>`;
-    }).join("") + `</div>`;
+      out.push(`<div class="turn model"><div class="who">Model · turn ${turnNo}${m.finish_reason ? ` · ${esc(m.finish_reason)}` : ""}</div>${thought}${body}${callsHTML}</div>`);
+    }
+    flushHarness();
+    return `<div class="segs">` + out.join("") + `</div>`;
   }
 
   function paneHTML(run, side) {
