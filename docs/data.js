@@ -149,7 +149,8 @@
     const m = run.meta;
     const facts = [
       ["round", m.round === "final" ? "final (thinking, cold)" : "thinking off"],
-      ["tests", frac(m.tests_passed, m.tests_total)], ["reuse", yn(m.reuse_passed)],
+      ["tests", frac(m.tests_passed, m.tests_total)],
+      ["reuse", m.reuse_passed == null && m.category === "reuse" ? "n/a (code didn't run)" : yn(m.reuse_passed)],
       ["repo tests", frac(m.repo_tests_passed, m.repo_tests_total)], ["format", m.format_status],
       ["patch run by tests", m.patch_coverage == null ? "–" : `${Math.round(100 * m.patch_coverage)}% of ${m.patch_stmts}`],
       ["tests added", m.tests_added ?? "–"],

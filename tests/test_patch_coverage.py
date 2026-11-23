@@ -54,3 +54,12 @@ def test_tests_added_counts_new_test_functions_only():
     files = {"tests/test_a.py": "def test_old():\n    pass\n\ndef test_new():\n    pass\n",
              "shopkit/test_util_helpers.py": "def test_one():\n    pass\n", "a.py": "x = 2\n"}
     assert count_tests_added(before, files) == {"tests_added": 2, "test_files_changed": 2}
+
+
+def test_reuse_is_not_judged_when_the_code_does_not_import(tmp_path):
+    from context_bench.evaluate.hidden_tests import run_hidden_tests
+    box = make_sandbox(ROOT / "fixtures" / "repo_M", tmp_path / "box")
+    target = box / "shopkit" / "reports" / "customers_report.py"
+    target.write_text(target.read_text() + "\n\ndef by_email(customers:\n    return index_by(customers, key=lambda c: c.email)\n")
+    passed, total, reuse, out = run_hidden_tests(box, TASKS["reuse-010"].hidden_tests, SHARED)
+    assert passed == 0 and reuse is None and "ERROR collecting" in out

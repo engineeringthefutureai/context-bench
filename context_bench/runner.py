@@ -43,6 +43,7 @@ from .llm import ChatResult, OpenAICompatClient, env_value
 from .metrics import (dead_modules, legacy_ctx_share, legacy_used, relevant_files, tool_output_breakdown,
                       usage_visible)
 from .evaluate.patch_coverage import patch_coverage, tests_added
+from .evaluate.hidden_tests import reuse_not_run
 from .prompt import PROMPT_VERSION, render
 from .embedders import CachedEmbedder, OpenAICompatEmbedder
 from .retrieval.bm25 import BM25Retriever
@@ -380,6 +381,11 @@ class Experiment:
                                             patch_file.read_text() if patch_file.is_file() else None))
             if "repo_tests_total" not in r:
                 r.update(self._repo_tests(r["repo_size"], files))
+            tests_file = self.runs_dir / r["run_id"] / "tests.txt"
+            if r.get("reuse_passed") is False and tests_file.is_file():
+                section = tests_file.read_text().partition("--- reuse test ---")[2]
+                if section and reuse_not_run(section.lstrip("\n")):
+                    r["reuse_passed"] = None            # the reuse test couldn't run (code doesn't import)
             if "patch_coverage" not in r:
                 r.update(self._patch_checks(task, r["repo_size"], files))
             transcript_file = self.runs_dir / r["run_id"] / "transcript.jsonl"

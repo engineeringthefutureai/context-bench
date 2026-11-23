@@ -26,9 +26,17 @@ def run_hidden_tests(sandbox: Path, tests_dir: Path, shared_dir: Path,
     reuse_passed = None
     if reuse_file.exists():
         r_passed, r_total, r_out = _pytest(sandbox, shared_dir, timeout, [str(reuse_file)])
-        reuse_passed = r_total > 0 and r_passed == r_total
+        # None when the reuse test couldn't run (the patched code doesn't import): not "not reused"
+        reuse_passed = None if reuse_not_run(r_out) else (r_total > 0 and r_passed == r_total)
         out += "\n--- reuse test ---\n" + r_out
     return passed, total, reuse_passed, out
+
+
+def reuse_not_run(reuse_output: str) -> bool:
+    """The reuse test never got to check anything: a collection error (syntax or import error in the
+    patched code) or a timeout."""
+    return "ERROR collecting" in reuse_output or "error during collection" in reuse_output \
+        or reuse_output.startswith("TIMEOUT")
 
 
 def run_repo_tests(sandbox: Path, shared_dir: Path, timeout: int = 120) -> tuple[int, int, str]:
