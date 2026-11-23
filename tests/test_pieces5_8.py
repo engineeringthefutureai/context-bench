@@ -114,6 +114,7 @@ def _experiment(tmp_path, client):
               .replace('runs = "results/runs"', f'runs = "{tmp_path / "runs"}"')
               .replace('S = "fixtures/repo_S"', f'S = "{FIXTURE}"')
               .replace('M = "fixtures/repo_M"', f'M = "{ROOT / "fixtures" / "repo_M"}"')
+              .replace('L = "fixtures/repo_L"', f'L = "{ROOT / "fixtures" / "repo_L"}"')
               .replace('helpers = "helpers/registry.toml"', f'helpers = "{ROOT / "helpers" / "registry.toml"}"')
               .replace('base_url = "http://localhost:21434"', 'base_url = "http://127.0.0.1:9"'))   # never the real embedder
     (tmp_path / "config").mkdir(exist_ok=True)

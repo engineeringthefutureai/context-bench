@@ -92,7 +92,7 @@ def test_embed_stats_are_per_thread_and_count_cache_hits(tmp_path):
 def test_report_has_embedder_section():
     from context_bench.results import embedder_performance
     row = {"level": "L5", "retriever": "embed", "query_mode": "task_vs_code", "agent_variant": "none",
-           "prompt_arm": "base", "repo_size": "S", "prompt_version": 3, "embedder": "e",
+           "prompt_arm": "base", "repo_size": "S", "prompt_version": 4, "embedder": "e",
            "embed_texts": 10, "embed_cache_hits": 30, "embed_s": 2.0, "embed_tokens": 400}
     out = "\n".join(embedder_performance([row]))
     assert "| e | L5 embed task_vs_code | 1 | 10 | 75% | 2.00s | 200 | 5.0 |" in out

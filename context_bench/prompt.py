@@ -141,7 +141,7 @@ SYSTEM_PROMPT_V4 = SYSTEM_PROMPT_V3.replace(
     "- <task>: the change request from the product team.")
 assert SYSTEM_PROMPT_V4 != SYSTEM_PROMPT_V3
 
-PROMPT_VERSION = 3       # what new runs use (switch to 4 when the v4 rerun starts)
+PROMPT_VERSION = 4       # what new runs use (v4 since 2026-11-23; v3 = the round-v3 tag)
 SYSTEM_PROMPTS = {1: SYSTEM_PROMPT_V1, 2: SYSTEM_PROMPT_V2, 3: SYSTEM_PROMPT_V3, 4: SYSTEM_PROMPT_V4}
 SYSTEM_PROMPT = SYSTEM_PROMPTS[PROMPT_VERSION]
 

@@ -22,7 +22,10 @@ def test_render_only_context_and_arm_differ():
     assert a[0] == b[0] == {"role": "system", "content": SYSTEM_PROMPT}
     assert a[1]["content"].replace("ctx A", "ctx B") == b[1]["content"]
     assert "<context>\nctx A\n</context>" in a[1]["content"]
-    assert a[1]["content"].endswith("Target file: shopkit/orders/export.py\n\nReply with the <file> blocks of your change.")
+    assert a[1]["content"].endswith("</task>\n\nReply with the <file> blocks of your change.")     # v4: no target line
+    assert "Target file" not in a[1]["content"]
+    v3 = render(t, ContextBlock(text="ctx A"), prompt_version=3)
+    assert v3[1]["content"].endswith("Target file: shopkit/orders/export.py\n\nReply with the <file> blocks of your change.")
     assert "reus" not in a[0]["content"].lower() + a[1]["content"].lower()
 
 
@@ -101,11 +104,12 @@ def test_prompt_versions_keep_old_ids_and_label_old_rows():
     from context_bench.prompt import PROMPT_VERSION, SYSTEM_PROMPTS
     from context_bench.results import config_label
     from context_bench.types import RunConfig
-    assert PROMPT_VERSION == 3 and len(set(SYSTEM_PROMPTS.values())) == 4
+    assert PROMPT_VERSION == 4 and len(set(SYSTEM_PROMPTS.values())) == 4
     for text in SYSTEM_PROMPTS.values():                    # neutral: no reuse, search or dead-code talk
         assert not any(w in text.lower() for w in ("reuse", "helper", "legacy", "dead code", "grep"))
     old, new = RunConfig("t", "L1", "m", 1), RunConfig("t", "L1", "m", 1, prompt_version=3)
     assert old.run_id != new.run_id
     row = {"level": "L1", "retriever": "none", "query_mode": "none", "agent_variant": "none",
            "prompt_arm": "base", "repo_size": "S"}
-    assert config_label(row) == "L1 p1" and config_label({**row, "prompt_version": 3}) == "L1"
+    assert config_label(row) == "L1 p1" and config_label({**row, "prompt_version": 3}) == "L1 p3"
+    assert config_label({**row, "prompt_version": 4}) == "L1"
