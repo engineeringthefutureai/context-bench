@@ -153,6 +153,8 @@
       ["repo tests", frac(m.repo_tests_passed, m.repo_tests_total)], ["format", m.format_status],
       ["patch run by tests", m.patch_coverage == null ? "–" : `${Math.round(100 * m.patch_coverage)}% of ${m.patch_stmts}`],
       ["tests added", m.tests_added ?? "–"],
+      ["judge: ranked above it", m.grade_rank_pct == null ? "–" : `${Math.round(100 * m.grade_rank_pct)}% of ${m.grade_candidates - 1} others`],
+      ["judge correctness", m.grade_correctness ?? "–"],
       ["in", fmt(m.tokens_in)], ["cached", fmt(m.tokens_cached)], ["out", fmt(m.tokens_out)],
       ["sec", m.latency_s == null ? "–" : Math.round(m.latency_s)], ["tools", m.tool_calls ?? 0],
       ["helper seen", m.helper_body_in_context ? "body" : m.helper_in_context ? "signature" : "no"],
@@ -165,7 +167,8 @@
       case "thinking": body = run.reasoning ? `<pre class="block">${esc(run.reasoning)}</pre>` : `<p class="empty">No thinking (thinking off, or none returned).</p>`; break;
       case "answer": body = transcriptHTML(run); break;
       case "patch": body = diffHTML(run.patch); break;
-      case "tests": body = run.tests ? `<pre class="block">${esc(run.tests)}</pre>` : `<p class="empty">No test output.</p>`; break;
+      case "tests": body = (run.tests ? `<pre class="block">${esc(run.tests)}</pre>` : `<p class="empty">No test output.</p>`)
+        + (run.judge_note ? `<div class="group-label">Judge's note (blind comparison, rubric v2)</div><pre class="block">${esc(run.judge_note)}</pre>` : ""); break;
     }
     const close = side === "b" ? `<button class="pick" data-close="b">close</button>` : "";
     return `<div class="pane ${side}"><div class="pane-head"><h3>${side.toUpperCase()} · ${esc(m.task_id)} · ${esc(m.level_label)} · ${esc(m.repo_size)} ${badge(m.outcome)} ${close}</h3>

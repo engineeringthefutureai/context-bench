@@ -56,6 +56,21 @@ def level_label(r: dict) -> str:
     return s
 
 
+def load_grades() -> dict[str, dict]:
+    """Latest rubric-v2 grade per run (rank and scores from the blind comparison judge)."""
+    path = ROOT / "results" / "grades.jsonl"
+    out: dict[str, dict] = {}
+    if path.exists():
+        for line in path.open():
+            g = json.loads(line)
+            if str(g.get("rubric_version")) == "2":
+                out[g["run_id"]] = g
+    return out
+
+
+GRADES: dict[str, dict] = {}
+
+
 def select_rows() -> list[dict]:
     rows = [json.loads(line) for line in open(ROOT / "results" / "results.jsonl")]
     rows = [r for r in rows if r.get("backend") == "vllm" and r.get("model") == "Qwen/Qwen3.8-27B"]
@@ -213,6 +228,10 @@ def run_payload(r: dict) -> dict:
                 item["drop"] = t["dropped_ids"]
             transcript.append(item)
     meta = {k: r.get(k) for k in INDEX_FIELDS}
+    g = GRADES.get(r["run_id"], {})
+    meta.update(grade_rank_pct=g.get("rank_pct"), grade_correctness=g.get("correctness"), grade_reuse=g.get("reuse"),
+                grade_conventions=g.get("conventions"), grade_scope=g.get("scope"), grade_readability=g.get("readability"),
+                grade_candidates=g.get("n_candidates"))
     meta.update(level_label=level_label(r), outcome=outcome(r), model=r.get("model"), quant=r.get("quant"),
                 embedder=r.get("embedder"), prompt_version=r.get("prompt_version"),
                 max_output_tokens=r.get("max_output_tokens"), context_window=r.get("context_window"),
@@ -226,6 +245,7 @@ def run_payload(r: dict) -> dict:
         "response": scrub(read(d / "response.txt")),
         "patch": scrub(read(d / "patch.diff")),
         "tests": scrub(read(d / "tests.txt")),
+        "judge_note": scrub(GRADES.get(r["run_id"], {}).get("note")),
     }
 
 
@@ -253,6 +273,7 @@ def tasks_payload() -> list[dict]:
 
 # ---- main ----------------------------------------------------------------------------------------
 def main() -> int:
+    GRADES.update(load_grades())
     rows = select_rows()
     if (OUT / "runs").exists():
         shutil.rmtree(OUT / "runs")
