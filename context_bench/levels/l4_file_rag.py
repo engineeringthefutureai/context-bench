@@ -27,7 +27,7 @@ def _make_retriever(name: str, ws: Workspace) -> Retriever:
 
 
 def _show(path: str, source: str) -> str:
-    return f"File: {path}\n```python\n{source.rstrip()}\n```"
+    return f"File: {path}\n```{_lang(path)}\n{source.rstrip()}\n```"
 
 
 def build_context(task: Task, ws: Workspace, retriever: str = "bm25") -> ContextBlock:
@@ -43,3 +43,8 @@ def build_context(task: Task, ws: Workspace, retriever: str = "bm25") -> Context
     parts = [target] + ([RETRIEVED_HEADER] + [_show(p, ws.files[p]) for p in picked] if picked else [])
     return ContextBlock(text="\n\n".join(parts), included=[path] + picked, retrieved=picked,
                         queries=[task.prompt])
+
+
+def _lang(path: str) -> str:
+    """Code-fence language for a file: python, or sql / html for repo L's migrations and templates."""
+    return {".sql": "sql", ".html": "html"}.get(path[path.rfind("."):], "python")

@@ -7,6 +7,12 @@ from test_pieces5_8 import FakeClient, _experiment
 REPLY = '<file path="shopkit/utils/units.py">\ndef parse_weight(text):\n    return 0\n</file>'
 
 
+def _runnable(exp):
+    """Tasks that can run on the configured repos (repo L tasks need repos.L)."""
+    repos = set(exp.config["repos"])
+    return [t for t, task in exp.tasks.items() if not task.repo_sizes or set(task.repo_sizes) & repos]
+
+
 def _unimplemented_level(exp, monkeypatch):
     """A config for a level that exists but isn't built ("L9"), to exercise the skip path."""
     from context_bench import levels
@@ -21,7 +27,7 @@ def test_configs_expand_and_filter(tmp_path):
     rcs = exp.configs()
     l0 = [rc for rc in rcs if rc.level == "L0"]
     assert [rc.task_id for rc in l0] == sorted(t for t in exp.tasks if exp.tasks[t].tier == 1)   # tiers filter
-    assert sum(rc.level == "L1" and rc.prompt_arm == "base" for rc in rcs) == len(exp.tasks)
+    assert sum(rc.level == "L1" and rc.prompt_arm == "base" for rc in rcs) == len(_runnable(exp))
     assert {rc.level for rc in exp.configs(["L1", "L3"])} == {"L1", "L3"}
     assert len({rc.run_id for rc in rcs}) == len(rcs)            # no duplicate configs
 
@@ -64,7 +70,7 @@ def test_sweep_spreads_runs_over_base_urls(tmp_path):
     exp._client_factory = factory
     exp.sweep(["L1"])
     rows = results.load(exp.results_path)
-    assert len(rows) == 2 * len(exp.tasks) and sorted(used) == ["http://a", "http://b"]
+    assert len(rows) == 2 * len(_runnable(exp)) and sorted(used) == ["http://a", "http://b"]
 
 
 def test_busy_seconds_counts_overlap_once():

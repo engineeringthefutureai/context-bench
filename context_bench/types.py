@@ -9,7 +9,7 @@ from typing import Literal
 
 Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7"]
 Label = Literal["ok", "broken", "tool_error", "no_fit"]
-Category = Literal["reuse", "cross_file", "convention", "control", "trap"]
+Category = Literal["reuse", "cross_file", "convention", "control", "trap", "long"]   # long: a rule buried in a long function (repo L)
 
 
 @dataclass(frozen=True)

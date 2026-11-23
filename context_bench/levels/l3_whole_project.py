@@ -18,4 +18,9 @@ def build_context(task: Task, ws: Workspace) -> ContextBlock:
 
 
 def _show(path: str, source: str) -> str:
-    return f"File: {path}\n```python\n{source.rstrip()}\n```"
+    return f"File: {path}\n```{_lang(path)}\n{source.rstrip()}\n```"
+
+
+def _lang(path: str) -> str:
+    """Code-fence language for a file: python, or sql / html for repo L's migrations and templates."""
+    return {".sql": "sql", ".html": "html"}.get(path[path.rfind("."):], "python")

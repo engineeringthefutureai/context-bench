@@ -9,6 +9,16 @@ from .types import Chunk
 _SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", ".pytest_cache", ".mypy_cache"}
 
 
+SOURCE_EXTS = (".py", ".sql", ".html")      # repo L has SQL migrations and HTML templates
+
+
+def iter_source_files(repo: Path) -> list[Path]:
+    """Sorted source files (.py, .sql, .html), skipping caches and VCS dirs. S and M have only .py."""
+    return sorted(p for p in repo.rglob("*") if p.is_file() and p.suffix in SOURCE_EXTS
+                  and not any(part in _SKIP_DIRS or part.endswith(".egg-info")
+                              for part in p.relative_to(repo).parts[:-1]))
+
+
 def iter_py_files(repo: Path) -> list[Path]:
     """Sorted .py files, skipping caches and VCS dirs."""
     return sorted(p for p in repo.rglob("*.py")

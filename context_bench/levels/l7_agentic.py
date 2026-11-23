@@ -167,7 +167,7 @@ def build_context(task: Task, ws: Workspace, agent_variant: str = "grep") -> Con
     names = _variant_tools(agent_variant)
     path = task.target_file
     if path in ws.files:
-        target = f"File: {path}\n```python\n{ws.files[path].rstrip()}\n```"
+        target = f"File: {path}\n```{_lang(path)}\n{ws.files[path].rstrip()}\n```"
     else:
         target = f"File: {path}\n(This file does not exist yet.)"
     note = TOOLS_NOTE.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS)
@@ -878,3 +878,8 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 {"result_ids": ids_here})
         tail = batch
     return finish(chat.content, False, chat.finish_reason)
+
+
+def _lang(path: str) -> str:
+    """Code-fence language for a file: python, or sql / html for repo L's migrations and templates."""
+    return {".sql": "sql", ".html": "html"}.get(path[path.rfind("."):], "python")

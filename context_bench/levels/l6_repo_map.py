@@ -61,7 +61,12 @@ def _map(ws: Workspace, skip: str, docs: bool) -> str:
 def build_context(task: Task, ws: Workspace, docs: bool = False) -> ContextBlock:
     path = task.target_file
     if path in ws.files:
-        target = f"File: {path}\n```python\n{ws.files[path].rstrip()}\n```"
+        target = f"File: {path}\n```{_lang(path)}\n{ws.files[path].rstrip()}\n```"
     else:
         target = f"File: {path}\n(This file does not exist yet.)"
     return ContextBlock(text=f"{target}\n\n{_map(ws, skip=path, docs=docs)}", included=[path])
+
+
+def _lang(path: str) -> str:
+    """Code-fence language for a file: python, or sql / html for repo L's migrations and templates."""
+    return {".sql": "sql", ".html": "html"}.get(path[path.rfind("."):], "python")

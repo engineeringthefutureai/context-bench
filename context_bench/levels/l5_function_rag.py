@@ -160,7 +160,7 @@ def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
         raise NotImplementedError(f"query_mode {query_mode!r}")
     path = task.target_file
     if path in ws.files:
-        target = f"File: {path}\n```python\n{ws.files[path].rstrip()}\n```"
+        target = f"File: {path}\n```{_lang(path)}\n{ws.files[path].rstrip()}\n```"
     else:
         target = f"File: {path}\n(This file does not exist yet.)"
     chunks = [c for c in ws.chunks if c.path != path]
@@ -190,3 +190,8 @@ def build_context(task: Task, ws: Workspace, retriever: str = "bm25",
     text = target + ("\n\n" + _render(picked, ws) if picked else "")
     return ContextBlock(text=text, included=[path] + [c.qualname for c in picked],
                         retrieved=[c.qualname for c in picked], queries=queries, **extra)
+
+
+def _lang(path: str) -> str:
+    """Code-fence language for a file: python, or sql / html for repo L's migrations and templates."""
+    return {".sql": "sql", ".html": "html"}.get(path[path.rfind("."):], "python")
