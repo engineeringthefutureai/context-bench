@@ -51,7 +51,7 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L4 | `l4_file_rag` | Target + top-3 files by retrieval (`retriever`) |
 | L5 | `l5_function_rag` | Target + top-8 functions with path, import header, signature, docstring, body (`retriever`, `query_mode`) |
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class (`map_docs = true`: + first docstring line, "L6+docs") |
-| L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search` |
+| L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search`; `rich` and `selective` (below) |
 
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),
@@ -72,6 +72,27 @@ parse) get generic feedback (the tool's valid arguments / "couldn't parse, use t
 interface") and the loop goes on; each costs `failed_call_cost` (0.5) of the 15-call budget. Rows from
 the original harness (no feedback, a text tool call ended the run) have no `failed_call_cost` and are
 labelled ` h1` in the report.
+
+L7 `rich` (added 2026-11-22): hybrid's tools, richer, plus `read_symbol`: `semantic_search` returns ≤5 hits
+with source (40 lines max); `grep` and `find_references` name each hit's enclosing function/method/class
+and its lines; `read_symbol` pulls up to 8 definitions by name in one call (verbatim source, methods with
+their class header); `read_file` takes a line range (≤200 lines, verbatim) and its description says
+read_symbol is cheaper for partial reads (tool description, not prompt). Append-only. `selective` = rich + `drop`: every result gets an
+ID (`[#n]`); only the latest batch (the "live tail") can be dropped, which puts a one-line stub in its
+place for later turns, so the cached prefix survives up to the tail. drop is free on the budget; a bad
+drop is a failed call. Its tool note adds one generic working-set line ("keep what helps, drop what
+doesn't"; nothing about dead code or decoys). Transcripts keep the original results plus drop records
+(`turn_prompts` replays the stubs); `tokens_cacheable` ends at the first rewritten message. Results are split into
+segments, each with its own ID: code (one definition, one read range), notes, and a file's imports.
+Imports are a separate segment the harness manages: shown once per file, the model can't drop them,
+they're stubbed automatically when the file's last code in context is dropped, and shown again with
+the file's next code (with a live tail this never rewrites an older message). Recorded:
+`drops`, `drop_calls`, `rereads_after_drop`, `helper_body_at_answer`, `legacy_share_at_answer`,
+`dropped_tokens` (size dropped, once) and `drop_saved_tokens` (input tokens avoided over all later
+requests; tokens_in + this = the run without drops). The report must show the context saved by
+dropping against the cache given up.
+grep/hybrid behaviour is unchanged (pinned by a test). hybrid -> rich measures the tools, rich ->
+selective the dropping.
 
 Active vs legacy code: L7 must be able to tell live code from dead code (repo M: `common/`, `utils/strings.py`).
 It gets the means, not the instruction: `find_references` (where a name is used) and import counts

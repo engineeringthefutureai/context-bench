@@ -162,3 +162,14 @@ class RunResult:
     # regression check (added 2026-11-21; backfilled by cbench rescore). Label unaffected.
     repo_tests_passed: int | None = None  # the repo's own tests/ after the patch; None: no <file> blocks
     repo_tests_total: int | None = None
+    # L7 selective (added 2026-11-22; None for other variants)
+    drops: int | None = None            # tool results dropped (live tail only)
+    drop_calls: int | None = None
+    rereads_after_drop: int | None = None   # later reads/searches overlapping a dropped result
+    dropped_tokens: int | None = None   # size of the dropped content minus its stubs (once)
+    drop_saved_tokens: int | None = None    # input tokens avoided over all later requests;
+                                        #   tokens_in + drop_saved_tokens = the same run without drops
+    hit_turn_cap: bool | None = None    # MAX_TURNS backstop reached
+    helper_body_at_answer: bool | None = None   # helper_body_in_context, counting only what was still in
+                                        #   the conversation at the final turn (stubs, not dropped bodies)
+    legacy_share_at_answer: float | None = None # legacy_ctx_share, same basis

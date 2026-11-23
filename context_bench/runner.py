@@ -37,7 +37,8 @@ from .apply import (UnsafePath, apply_files, format_status, make_sandbox, parse_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
-from .levels.l7_agentic import RepoTools, cacheable_prefix, run_agent, tool_schemas, turn_prompts
+from .levels.l7_agentic import (SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
+                                tool_schemas, turn_prompts)
 from .llm import ChatResult, OpenAICompatClient, env_value
 from .metrics import dead_modules, legacy_ctx_share, legacy_used, usage_visible
 from .prompt import PROMPT_VERSION, render
@@ -197,7 +198,7 @@ class Experiment:
             sandbox = make_sandbox(self._path(self.config["repos"][rc.repo_size]), Path(tmp) / "repo")
             ws = load_workspace(sandbox)
             ws.retrievers = {"embed": self.retrievers()["embed"]}
-            uses_embedder = rc.retriever == "embed" or rc.agent_variant == "hybrid"
+            uses_embedder = rc.retriever == "embed" or rc.agent_variant in SEMANTIC_VARIANTS
             if uses_embedder:
                 self.embedder().stats.reset()
             options = _level_options(rc)
@@ -231,7 +232,8 @@ class Experiment:
             agent = None
             if rc.level == "L7":
                 tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
-                                                           if rc.agent_variant == "hybrid" else None))
+                                                           if rc.agent_variant in SEMANTIC_VARIANTS else None),
+                                  rich=rc.agent_variant in RICH_VARIANTS)
                 agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking,
@@ -240,11 +242,19 @@ class Experiment:
                                   tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
                 # helper_in_context for L7: the definition appeared in any tool output
+                ctx_text_initial = ctx.text
                 ctx.text += "\n\n" + "\n\n".join(tools.transcript)
                 perf.update(tool_calls=agent.tool_calls, tool_errors=agent.tool_errors,
                             failed_call_cost=rc.failed_call_cost, budget_used=agent.budget_used,
                             tokens_cached=agent.tokens_cached,
                             tokens_cacheable=agent.tokens_cacheable)
+                if agent.drops is not None:     # selective
+                    at_answer = ContextBlock(text=ctx_text_initial + "\n\n" + agent.answer_tool_text)
+                    perf.update(drops=agent.drops, drop_calls=agent.drop_calls,
+                                rereads_after_drop=agent.rereads_after_drop, hit_turn_cap=agent.hit_turn_cap,
+                                dropped_tokens=agent.dropped_tokens, drop_saved_tokens=agent.drop_saved_tokens,
+                                helper_body_at_answer=_helper_body_visible(task, at_answer, ws),
+                                legacy_share_at_answer=legacy_ctx_share(at_answer.text, self.legacy))
             else:
                 chat = model_client().chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                            **({} if rc.thinking else {"thinking": False}))
