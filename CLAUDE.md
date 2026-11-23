@@ -51,7 +51,7 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L4 | `l4_file_rag` | Target + top-3 files by retrieval (`retriever`) |
 | L5 | `l5_function_rag` | Target + top-8 functions with path, import header, signature, docstring, body (`retriever`, `query_mode`) |
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class (`map_docs = true`: + first docstring line, "L6+docs") |
-| L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search`; `rich` and `selective` (below) |
+| L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search`; `rich` and `selective` (below). Prompt v4: no target, the repo's file tree instead, no `list_files` |
 
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),
@@ -66,6 +66,13 @@ spec only): target + definitions of referenced symbols + 1-hop callers, LSP-styl
 2026-11-21, when the agentic level moved from L8 to L7 (eight levels, L0-L7). On reuse tasks the
 needed helper is never referenced from the target, so it adds little over L2; revisit once there are
 several cross-file / convention tasks. Results recorded as L8 were migrated to L7 (new run ids).
+
+Prompt v4 (2026-11-23, implemented, `PROMPT_VERSION` still 3 until the full rerun starts): the shared
+prompt no longer mentions a target file (no "Target file:" line, no "and the target file" in the system
+prompt). L1-L6 still show the target (their context starts with its `File:` block). L7 gets no target: it
+finds the file from the task, and its starting context is the repository's whole file tree (each file's
+line count, importers for .py), so `list_files` (now recursive) is not offered: 97% of L7 runs opened
+with list_files, about 3 calls per run. v4 means new run ids for every config (full rerun).
 
 L7 failed tool calls (bad arguments, unknown tool, a tool call written as text the server couldn't
 parse) get generic feedback (the tool's valid arguments / "couldn't parse, use the tool-calling

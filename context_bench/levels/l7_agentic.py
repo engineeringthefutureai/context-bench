@@ -42,6 +42,7 @@ from ..workspace import Workspace
 
 MAX_TOOL_CALLS = 15
 MAX_LINES = 50          # grep / find_references output cap, with a "(+N more)" note
+MAX_LIST_LINES = 400    # list_files (recursive) and the v4 starting tree
 READ_CAP = 200          # rich/selective: lines per read_file call
 SEARCH_BODY_LINES = 40  # rich/selective: source lines per semantic_search hit
 MAX_SYMBOLS = 8         # rich/selective: names per read_symbol call (total output also capped at READ_CAP)
@@ -75,8 +76,8 @@ _TOOLS = {
              {"pattern": {"type": "string", "description": "regular expression"},
               "path_glob": {"type": "string", "description": "files to search, default \"**/*.py\""}},
              ["pattern"]),
-    "list_files": ("List a directory: subdirectories, and .py files with their line count and how many "
-                   "modules import them.",
+    "list_files": ("List the files under a directory, recursively: each file with its line count, and for "
+                   ".py files how many modules import them.",
                    {"directory": {"type": "string", "description": "relative to the repository root, "
                                   "default \".\""}}, []),
     "read_file": ("Read a whole file.",
@@ -146,25 +147,36 @@ def _spec(name: str, agent_variant: str) -> tuple:
     return _TOOLS[name]
 
 
-def _usage(name: str, agent_variant: str) -> str:
+def _usage(name: str, agent_variant: str, prompt_version: int = 3) -> str:
     """What a failed call should have looked like: the tool's arguments, or the tools that exist."""
-    if name not in _variant_tools(agent_variant):
-        return "Available tools: " + ", ".join(_variant_tools(agent_variant)) + "."
+    if name not in _variant_tools(agent_variant, prompt_version):
+        return "Available tools: " + ", ".join(_variant_tools(agent_variant, prompt_version)) + "."
     _, props, required = _spec(name, agent_variant)
     args = [f"{k} ({v['type']}, {'required' if k in required else 'optional'})" for k, v in props.items()]
     return f"{name} takes: " + (", ".join(args) if args else "no arguments") + "."
 
 
-def _variant_tools(agent_variant: str) -> list[str]:
+def _variant_tools(agent_variant: str, prompt_version: int = 3) -> list[str]:
+    """The variant's tools. From prompt v4 the starting context holds the whole file tree with the same
+    facts list_files gives (line counts, importers), so list_files is not offered."""
     if agent_variant not in _VARIANTS:
         raise ValueError(f"unknown agent_variant {agent_variant!r}")
-    return _VARIANTS[agent_variant]
+    names = _VARIANTS[agent_variant]
+    return [n for n in names if n != "list_files"] if prompt_version >= 4 else names
 
 
-def build_context(task: Task, ws: Workspace, agent_variant: str = "grep") -> ContextBlock:
-    """Initial context only: the target file, then TOOLS_NOTE listing the variant's tools.
-    The rest arrives through tools."""
-    names = _variant_tools(agent_variant)
+def build_context(task: Task, ws: Workspace, agent_variant: str = "grep", prompt_version: int = 3) -> ContextBlock:
+    """Initial context only, then TOOLS_NOTE listing the variant's tools; the rest arrives through tools.
+    prompt_version <= 3: the target file. 4: no target (the agent finds the file from the task), the
+    repository's file tree instead (list_files of the root: saves the opening turn almost every run spent
+    listing directories)."""
+    names = _variant_tools(agent_variant, prompt_version)
+    if prompt_version >= 4:
+        note = TOOLS_NOTE.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS)
+        if agent_variant == "selective":
+            note += "\n" + SELECTIVE_NOTE
+        tree = RepoTools(ws.repo).list_files(".")
+        return ContextBlock(text=f"Repository files:\n{tree}\n\n{note}", included=[])
     path = task.target_file
     if path in ws.files:
         target = f"File: {path}\n```{_lang(path)}\n{ws.files[path].rstrip()}\n```"
@@ -176,10 +188,10 @@ def build_context(task: Task, ws: Workspace, agent_variant: str = "grep") -> Con
     return ContextBlock(text=f"{target}\n\n{note}", included=[path])
 
 
-def tool_schemas(agent_variant: str) -> list[dict]:
+def tool_schemas(agent_variant: str, prompt_version: int = 3) -> list[dict]:
     """OpenAI-style function tool definitions for the variant."""
     out = []
-    for name in _variant_tools(agent_variant):
+    for name in _variant_tools(agent_variant, prompt_version):
         desc, props, required = _spec(name, agent_variant)
         out.append({"type": "function", "function": {
             "name": name, "description": desc,
@@ -282,27 +294,34 @@ class RepoTools:
         return {m: (len(r), sum(map(_is_test, r))) for m, r in seen.items()}
 
     def list_files(self, directory: str = ".") -> str:
-        """One line per entry under `directory`: subdirectories, and .py files as
-        "path  (N lines, imported by M modules)". M counts distinct modules in the repo that import it
-        (absolute or relative imports, via ast), so unused files show "imported by 0"."""
+        """Every file under `directory`, recursively, one line each: .py files as
+        "path  (N lines, imported by M modules)", other files as "path  (N lines)". M counts distinct
+        modules in the repo that import it (absolute or relative imports, via ast), so unused files show
+        "imported by 0". At most MAX_LIST_LINES lines, with a "(+N more)" note. (Until 2026-11-23 it
+        listed one level: subdirectories and files.)"""
         d = self._resolve(directory)
         if not d.is_dir():
             return f"error: not a directory: {directory}"
         importers = self._importers()
+        root = self.root.resolve()
         out = []
-        for p in sorted(d.iterdir()):
-            rel = p.relative_to(self.root.resolve()).as_posix()
-            if p.name in _SKIP:
+        for p in sorted(d.rglob("*")):
+            rel = p.relative_to(root).as_posix()
+            if not p.is_file() or _SKIP & set(p.relative_to(root).parts):
                 continue
-            if p.is_dir():
-                out.append(f"{rel}/")
-            elif p.suffix == ".py":
-                n, tests = importers.get(_module(rel), (0, 0))
+            try:
                 lines = len(p.read_text().splitlines())
+            except UnicodeDecodeError:
+                out.append(rel)
+                continue
+            if p.suffix == ".py":
+                n, tests = importers.get(_module(rel), (0, 0))
                 out.append(f"{rel}  ({lines} lines, imported by {n} modules"
                            + (f", {tests} of them tests" if tests else "") + ")")
             else:
-                out.append(rel)
+                out.append(f"{rel}  ({lines} lines)")
+        if len(out) > MAX_LIST_LINES:
+            out = out[:MAX_LIST_LINES] + [f"(+{len(out) - MAX_LIST_LINES} more)"]
         return "\n".join(out) or "(empty)"
 
     def read_file(self, path: str) -> str:
@@ -659,7 +678,7 @@ def _assistant_message(chat) -> dict:
 def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: str,
               temperature: float | None, seed: int, max_tokens: int,
               context_window: int, thinking: bool = True,
-              failed_call_cost: float | None = None) -> AgentResult:
+              failed_call_cost: float | None = None, prompt_version: int = 3) -> AgentResult:
     """Tool loop: call the model, execute tool calls, feed results back, stop on a final answer
     or when the budget is spent. Before every turn, check prompt tokens + max_tokens against the
     context window; if it no longer fits, stop and report no_fit (never let the server truncate).
@@ -679,7 +698,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     transcript keeps the original result and logs the drop (see turn_prompts). drop calls cost
     nothing; a bad drop (unknown, older or already dropped ID) is a failed call. The cacheable prefix
     of a request after a drop ends at the first changed message. Other variants: unchanged."""
-    schemas = tool_schemas(agent_variant)
+    schemas = tool_schemas(agent_variant, prompt_version)
     schema_tokens = client.count_tokens(json.dumps(schemas))
     msgs = list(messages)
     log = list(messages)                 # the transcript: msgs, but original results + drop records
@@ -832,7 +851,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 except Exception as e:
                     out = f"error: {type(e).__name__}: {e}"
                     if feedback:
-                        out += f". {_usage(name, agent_variant)}"
+                        out += f". {_usage(name, agent_variant, prompt_version)}"
                     calls, errors, spent = calls + 1, errors + 1, spent + cost
                     add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
                 continue
@@ -844,14 +863,14 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 calls += 1
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
-                    if name not in _variant_tools(agent_variant) or not isinstance(args, dict):
+                    if name not in _variant_tools(agent_variant, prompt_version) or not isinstance(args, dict):
                         raise ValueError(f"unknown tool {name!r}")
                     out = tools.call(name, args)
                     spent += 1
                 except Exception as e:          # the model sees the error and can retry
                     out = f"error: {type(e).__name__}: {e}"
                     if feedback:
-                        out += f". {_usage(name, agent_variant)}"
+                        out += f". {_usage(name, agent_variant, prompt_version)}"
                     tools.transcript.append(out)
                     errors += 1
                     spent += cost

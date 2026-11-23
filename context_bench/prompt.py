@@ -133,8 +133,16 @@ modify, each wrapped exactly as:
 - Files you don't change are left out.
 - Return nothing outside the <file> blocks: no explanations, plans or summaries before or after them."""
 
-PROMPT_VERSION = 3       # what new runs use
-SYSTEM_PROMPTS = {1: SYSTEM_PROMPT_V1, 2: SYSTEM_PROMPT_V2, 3: SYSTEM_PROMPT_V3}
+# v4 (2026-11-23): no "target file" anywhere in the shared prompt. The <task> description stops promising
+# one, and the user turn drops the "Target file:" line. L1-L6 still show the target (their context starts
+# with its File: block); L7 gets the repository's file tree instead and finds the file itself.
+SYSTEM_PROMPT_V4 = SYSTEM_PROMPT_V3.replace(
+    "- <task>: the change request from the product team, and the target file the change centers on.",
+    "- <task>: the change request from the product team.")
+assert SYSTEM_PROMPT_V4 != SYSTEM_PROMPT_V3
+
+PROMPT_VERSION = 3       # what new runs use (switch to 4 when the v4 rerun starts)
+SYSTEM_PROMPTS = {1: SYSTEM_PROMPT_V1, 2: SYSTEM_PROMPT_V2, 3: SYSTEM_PROMPT_V3, 4: SYSTEM_PROMPT_V4}
 SYSTEM_PROMPT = SYSTEM_PROMPTS[PROMPT_VERSION]
 
 # Ablation arm only (L1 and L5). Never part of the base arm.
@@ -151,7 +159,8 @@ USER_TEMPLATE = """<context>
 Target file: {target_file}"""
 # The user turn per prompt version (identical for every level and arm within a version).
 USER_TEMPLATES = {1: USER_TEMPLATE, 2: USER_TEMPLATE,
-                  3: USER_TEMPLATE + "\n\nReply with the <file> blocks of your change."}
+                  3: USER_TEMPLATE + "\n\nReply with the <file> blocks of your change.",
+                  4: USER_TEMPLATE.split("\n\nTarget file:")[0] + "\n\nReply with the <file> blocks of your change."}
 
 
 def render(task: Task, context: ContextBlock, prompt_arm: str = "base",

@@ -387,3 +387,38 @@ def test_tool_output_breakdown_by_kind_and_relevance():
     assert b["read_whole_chars"] == len(whole) and b["read_part_chars"] == len(part)
     assert b["other_tool_chars"] == len(grep) and b["tool_out_chars"] == len(whole) + len(part) + len(grep)
     assert b["code_relevant_chars"] == len(whole) and b["code_other_chars"] == len(part)
+
+
+def test_prompt_v4_has_no_target_and_l7_starts_with_the_file_tree():
+    from context_bench.prompt import render
+    task = TASKS["reuse-001"]
+    ws = load_workspace(M)
+    v4 = LEVELS["L7"](task, ws, agent_variant="hybrid", prompt_version=4)
+    assert v4.text.startswith("Repository files:\nshopkit/__init__.py") and v4.included == []
+    assert "shopkit/orders/export.py  (16 lines" in v4.text and "File: shopkit/orders/export.py" not in v4.text
+    assert "semantic_search" in v4.text.splitlines()[-3]
+    v3 = LEVELS["L7"](task, ws, agent_variant="hybrid")
+    assert v3.text.startswith("File: shopkit/orders/export.py")                  # v3 unchanged
+    msgs = render(task, v4, "base", 4)
+    assert "Target file" not in msgs[1]["content"] and "target file" not in msgs[0]["content"].lower()
+    assert "Target file: shopkit/orders/export.py" in render(task, v3, "base", 3)[1]["content"]
+
+
+def test_list_files_is_recursive():
+    t = RepoTools(M)
+    out = t.list_files("shopkit")
+    assert "shopkit/utils/dates.py  (" in out and "shopkit/common/TaxHelper.py  (25 lines" in out
+    assert not any(line.endswith("/") for line in out.splitlines())
+
+
+def test_v4_drops_list_files_from_the_tools():
+    names = lambda v, pv: [t["function"]["name"] for t in tool_schemas(v, pv)]
+    assert "list_files" in names("grep", 3) and "list_files" not in names("grep", 4)
+    assert names("selective", 4) == ["grep", "read_symbol", "read_file", "find_references", "semantic_search", "drop"]
+    ctx = LEVELS["L7"](TASKS["reuse-001"], load_workspace(M), agent_variant="grep", prompt_version=4)
+    assert "grep, read_file, find_references." in ctx.text and "list_files" not in ctx.text
+    client = FakeClient([[("list_files", {})], "final"])
+    res = run_agent(client, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], RepoTools(M),
+                    agent_variant="grep", temperature=None, seed=1, max_tokens=100, context_window=100_000,
+                    failed_call_cost=0.5, prompt_version=4)
+    assert res.tool_errors == 1 and "Available tools: grep, read_file, find_references" in client.seen[1][0][-1]["content"]

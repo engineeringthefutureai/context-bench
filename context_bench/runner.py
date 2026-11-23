@@ -241,7 +241,7 @@ class Experiment:
                 agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking,
-                                  failed_call_cost=rc.failed_call_cost)
+                                  failed_call_cost=rc.failed_call_cost, prompt_version=rc.prompt_version)
                 chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
                                   tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
@@ -426,7 +426,7 @@ class Experiment:
         model = self.config["models"][model_key]["model"]
         client = self._client(model_key)
         rows, n = results.load(self.results_path), 0
-        schema_cache: dict[str, int] = {}
+        schema_cache: dict[tuple, int] = {}
         for r in rows:
             run = self.runs_dir / r["run_id"]
             if r["level"] != "L7" or r["model"] != model or not (run / "transcript.jsonl").is_file() \
@@ -434,11 +434,12 @@ class Experiment:
                 continue
             messages = json.loads((run / "prompt.json").read_text())
             transcript = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines()]
-            if r["agent_variant"] not in schema_cache:
-                schema_cache[r["agent_variant"]] = client.count_tokens(json.dumps(tool_schemas(r["agent_variant"])))
+            skey = (r["agent_variant"], r.get("prompt_version", 1))
+            if skey not in schema_cache:
+                schema_cache[skey] = client.count_tokens(json.dumps(tool_schemas(*skey)))
             total, prev, peak = 0, (0, None), 0
             for msgs, offer in turn_prompts(messages, transcript):
-                tokens = client.count_prompt_tokens(msgs) + (schema_cache[r["agent_variant"]] if offer else 0)
+                tokens = client.count_prompt_tokens(msgs) + (schema_cache[skey] if offer else 0)
                 total += cacheable_prefix(prev[0], prev[1], tokens, offer)
                 prev, peak = (tokens, offer), max(peak, tokens)
             r["tokens_cacheable"] = total
@@ -698,7 +699,7 @@ def _level_options(rc: RunConfig) -> dict:
     if rc.level == "L6":
         return {"docs": rc.map_docs}
     if rc.level == "L7":
-        return {"agent_variant": rc.agent_variant}
+        return {"agent_variant": rc.agent_variant, "prompt_version": rc.prompt_version}
     return {}
 
 
