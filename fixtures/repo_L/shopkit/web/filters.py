@@ -8,7 +8,7 @@ from shopkit.money import format_money
 
 
 def money(cents, currency="USD") -> str:
-    if cents is None or cents == "":
+    if cents is None or str(cents) == "":          # None, "" or an undefined template value
         return ""
     return format_money(int(cents), currency or "USD")
 

@@ -54,3 +54,76 @@ def weekly_report(sales: list[Sale]) -> str:
     for week, ss in sorted(by_week.items()):
         rows.append([week, fmt_count(len(ss)), fmt_amount(sum(s.order.total_cents for s in ss))])
     return pad_table(rows)
+
+
+# ---- channel and refund views (finance, 2025) ---------------------------------------------------
+@dataclass(frozen=True)
+class ChannelSale:
+    sale: Sale
+    channel: str                       # web | app | marketplace | pos
+    refunded_cents: int = 0
+
+    @property
+    def net_cents(self) -> int:
+        return self.sale.order.total_cents - self.refunded_cents
+
+
+def revenue_by_channel(sales: Iterable[ChannelSale]) -> dict[str, int]:
+    """Net revenue (after refunds) per channel, largest first."""
+    totals: dict[str, int] = {}
+    for s in sales:
+        totals[s.channel] = totals.get(s.channel, 0) + s.net_cents
+    return dict(sorted(totals.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def refund_rate(sales: list[ChannelSale]) -> float:
+    """Refunded share of gross revenue, 0.0-1.0."""
+    gross = sum(s.sale.order.total_cents for s in sales)
+    return sum(s.refunded_cents for s in sales) / gross if gross else 0.0
+
+
+def repeat_purchase_share(first_order_days: dict[str, date], sales_by_customer: dict[str, list[Sale]]) -> float:
+    """Share of customers with a second paid order within 90 days of their first."""
+    if not first_order_days:
+        return 0.0
+    repeat = 0
+    for cid, first in first_order_days.items():
+        later = [s for s in sales_by_customer.get(cid, []) if 0 < (s.paid_at.date() - first).days <= 90]
+        repeat += bool(later)
+    return repeat / len(first_order_days)
+
+
+# ---- margin report ------------------------------------------------------------------------------
+# Ported from the old reporting monolith for the Q3 board pack (contractor, 2025-08). Kept as it was
+# delivered; floats are fine here because the output is rounded to whole dollars for slides.
+def marginReport(salesList, costMap, minMarginPct=0.0):
+    """returns list of rows [sku, units, revenue $, cost $, margin %] sorted by margin desc"""
+    agg = {}
+    for s in salesList:
+        for ln in s.order.lines:
+            if ln.sku not in agg:
+                agg[ln.sku] = [0, 0.0, 0.0]
+            agg[ln.sku][0] += ln.qty
+            agg[ln.sku][1] += ln.total_cents / 100.0
+            try:
+                agg[ln.sku][2] += costMap[ln.sku] * ln.qty / 100.0
+            except:
+                pass   # no cost on file (dropship), margin shows as 100%
+    rows = []
+    for sku in agg:
+        units, rev, cost = agg[sku]
+        if rev == 0:
+            continue
+        marginPct = round((rev - cost) / rev * 100.0, 1)
+        if marginPct < minMarginPct:
+            continue
+        rows.append([sku, units, round(rev), round(cost), marginPct])
+    rows.sort(key=lambda r: r[4], reverse=True)
+    return rows
+
+
+def marginTable(salesList, costMap):
+    rows = [["sku", "units", "revenue", "cost", "margin %"]]
+    for r in marginReport(salesList, costMap):
+        rows.append([r[0], str(r[1]), "$" + str(r[2]), "$" + str(r[3]), str(r[4])])
+    return pad_table(rows)
