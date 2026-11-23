@@ -237,8 +237,12 @@
               ? run.penalties.map(p => `<pre class="block"><b>${esc(p.code)} ${p.points}</b>  ${esc(p.quote)}\n${esc(p.why)}</pre>`).join("")
               : `<p class="empty">No penalties.</p>`)); break;
     }
+    const bd = run.badges || {exact: [], intent: []};
+    const chips = (bd.exact || []).map((b) => `<span class="badge exact">${esc(b)}</span>`).join("")
+      + (bd.intent || []).map((b) => `<span class="badge intent ${b.confidence}" title="automatic (embedding match, unverified): ${esc(b.sentence || "")}">${esc(b.badge)} · ${esc(b.confidence)}</span>`).join("");
+    const badgesHTML = chips ? `<div class="badges">${chips}</div>` : "";
     const close = side === "b" ? `<button class="pick" data-close="b">close</button>` : "";
-    return `<div class="pane ${side}"><div class="pane-head"><h3>${side.toUpperCase()} · ${esc(m.task_id)} · ${esc(m.level_label)} · ${esc(m.repo_size)} ${badge(m.outcome)} ${close}</h3>
+    return `<div class="pane ${side}"><div class="pane-head"><h3>${side.toUpperCase()} · ${esc(m.task_id)} · ${esc(m.level_label)} · ${esc(m.repo_size)} ${badge(m.outcome)} ${close}</h3>${badgesHTML}
       <div class="facts">${facts}</div><div class="meta">run <a href="#a=${m.run_id}">${m.run_id}</a> · target ${esc(m.target_file)}</div></div>${body}</div>`;
   }
 

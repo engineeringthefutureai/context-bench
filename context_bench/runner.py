@@ -740,6 +740,18 @@ class Experiment:
             graded += n
         return graded
 
+    def badges(self, results_dir: Path | None = None) -> int:
+        """cbench badges: exact and intent badges for every recorded run (badges.py), written to
+        <results>/badges.jsonl (rewritten in full; embeddings of the examples and sentences are cached)."""
+        from . import badges
+        rdir = results_dir or self.results_path.parent
+        rows = list({r["run_id"]: r for r in results.load(rdir / "results.jsonl")}.values())
+        recs = badges.compute(rows, rdir / "runs", self.embedder())
+        tmp = rdir / "badges.jsonl.tmp"
+        tmp.write_text("".join(json.dumps(x) + "\n" for x in recs))
+        tmp.replace(rdir / "badges.jsonl")
+        return len(recs)
+
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""
         raise NotImplementedError

@@ -45,7 +45,7 @@ def _mtime(p: Path) -> float:
 
 
 def _key() -> tuple:
-    return tuple(_mtime(bs.RESULTS / f) for f in ("results.jsonl", "grades.jsonl", "penalties.jsonl"))
+    return tuple(_mtime(bs.RESULTS / f) for f in ("results.jsonl", "grades.jsonl", "penalties.jsonl", "badges.jsonl"))
 
 
 def _run_mtime(run_id: str) -> float:
@@ -70,6 +70,9 @@ def refresh() -> None:
         return
     bs.GRADES.clear(); bs.GRADES.update(bs.load_grades())
     bs.PENALTIES.clear(); bs.PENALTIES.update(bs.load_penalties())
+    bs.BADGES.clear(); bs.BADGES.update(bs.load_badges())
+    if _state["key"] is None or key[1:] != _state["key"][1:]:
+        _runs.clear()      # grades, penalties or badges changed: they live in every run's payload
     for td in sorted((ROOT / "tasks").iterdir()):
         if (td / "task.toml").is_file():
             bs.TARGETS[td.name] = tomllib.loads((td / "task.toml").read_text()).get("target_file", "")

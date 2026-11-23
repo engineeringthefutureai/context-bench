@@ -57,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--judge", help="penalty mode: a name from [grading.judges] (agy, claude)")
     gr.add_argument("--sample", type=int, help="penalty mode: grade at most N patches (random, seed 1), for calibration")
 
+    bd = sub.add_parser("badges", help="exact and intent badges per run (results/badges.jsonl)")
+    bd.add_argument("--results-dir", help="another results folder, e.g. results/archive-v4-qwen3emb")
     sub.add_parser("report", help="label counts per configuration")
     rs = sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
     rs.add_argument("--cacheable", metavar="MODEL", help="also backfill tokens_cacheable for older L7 runs of "
@@ -109,6 +111,11 @@ def main(argv: list[str] | None = None) -> None:
         else:
             n = exp.grade(args.task, dry_run=args.dry_run, repo_sizes=args.repo_size)
         print(f"judge dirs written to {exp.config['grading']['work_dir']}" if args.dry_run else f"graded {n} runs")
+        return
+    if args.cmd == "badges":
+        exp = Experiment(Path(args.config))
+        n = exp.badges(Path(args.results_dir) if args.results_dir else None)
+        print(f"badges for {n} runs")
         return
     if args.cmd == "report":
         exp = Experiment(Path(args.config))

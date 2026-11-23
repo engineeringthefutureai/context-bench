@@ -81,6 +81,19 @@ def load_grades() -> dict[str, dict]:
 GRADES: dict[str, dict] = {}
 TARGETS: dict[str, str] = {}      # task id -> target file, from tasks/ (v4 prompts don't name it)
 PENALTIES: dict[str, dict] = {}
+BADGES: dict[str, dict] = {}
+
+
+def load_badges() -> dict[str, dict]:
+    """run_id -> {"exact": [...], "intent": [{badge, confidence, margin, sentence}]} (cbench badges)."""
+    path = RESULTS / "badges.jsonl"
+    out: dict[str, dict] = {}
+    if path.exists():
+        for line in path.open():
+            if line.strip():
+                g = json.loads(line)
+                out[g["run_id"]] = g
+    return out
 
 
 def load_penalties() -> dict[str, dict]:
@@ -264,6 +277,8 @@ def run_payload(r: dict) -> dict:
     meta.update(grade_rank_pct=g.get("rank_pct"), grade_correctness=g.get("correctness"), grade_reuse=g.get("reuse"),
                 grade_conventions=g.get("conventions"), grade_scope=g.get("scope"), grade_readability=g.get("readability"),
                 grade_candidates=g.get("n_candidates"))
+    bd = BADGES.get(r["run_id"], {})
+    meta["badges"] = bd.get("exact", []) + [f'{x["badge"]} ({x["confidence"]})' for x in bd.get("intent", [])]
     pen = PENALTIES.get(r["run_id"])
     meta.update(penalty_points=pen["points"] if pen else None, penalty_judge=pen["judge"] if pen else None)
     meta.update(level_label=level_label(r), outcome=outcome(r), model=r.get("model"), quant=r.get("quant"),
@@ -280,6 +295,8 @@ def run_payload(r: dict) -> dict:
         "patch": scrub(read(d / "patch.diff")),
         "tests": scrub(read(d / "tests.txt")),
         "judge_note": scrub(GRADES.get(r["run_id"], {}).get("note")),
+        "badges": {"exact": BADGES.get(r["run_id"], {}).get("exact", []),
+                   "intent": [dict(x, sentence=scrub(x.get("sentence"))) for x in BADGES.get(r["run_id"], {}).get("intent", [])]},
         "penalties": [{"code": p["code"], "points": p["points"], "quote": scrub(p["quote"]), "why": scrub(p["why"])}
                       for p in PENALTIES.get(r["run_id"], {}).get("penalties", [])],
     }
@@ -314,6 +331,7 @@ def main() -> int:
         if (td / "task.toml").is_file():
             TARGETS[td.name] = tomllib.loads((td / "task.toml").read_text()).get("target_file", "")
     PENALTIES.update(load_penalties())
+    BADGES.update(load_badges())
     rows = select_rows()
     if (OUT / "runs").exists():
         shutil.rmtree(OUT / "runs")
