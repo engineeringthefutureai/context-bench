@@ -65,6 +65,17 @@ Harness consequence: the Python-aware tools (L5 function chunks, L6 map, L7 read
 enclosing-function hints) don't see SQL or templates as symbols; those files are visible at L3, L4
 (whole files), grep and read_file. Accepted and reported, not patched per format.
 
+## Naming of old and dead code (rule)
+Old code keeps the names it always had, and new code gets new names. Nothing says what is old, dead
+or still used: no `legacy/`, `v2/`, `old_`, "deprecated", "live parts" or "not adopted" in paths,
+identifiers, docstrings or comments (ordinary history and quirk comments are fine). In L:
+- the old monoliths: `shopkit/core/` (`order_engine.py`, `reporting.py`, `erp.py`, `pricing.py`), parts
+  still called from current code (`orders/lookup.py`, `reports/fiscal.py`, `inventory/erp_import.py`)
+- the abandoned migration: `shopkit/domain/` (money, ids, orders, text), dead, tests only
+- forwarding helpers: `shopkit/utils/helpers.py`, dead, tests only
+- hand-run SQL: `migrations/manual/`
+Which paths are dead is recorded only in `helpers/registry.toml` `[legacy]` (harness-only).
+
 ## Planted helpers, decoys, conventions
 - Keep M's 25 helpers (same public API). Add ~10 L helpers, about half inside long files or legacy
   modules, some only reachable by reading a bloated function (it calls a private helper whose body

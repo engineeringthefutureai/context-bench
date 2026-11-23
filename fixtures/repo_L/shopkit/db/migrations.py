@@ -6,7 +6,7 @@
 
 Each file runs in one transaction and is recorded in `schema_migrations` with its checksum. A file
 that changed after it was applied is an error (never edit an applied migration; add a new one).
-`migrations/legacy/` holds one-off scripts from before the runner existed; they are never applied.
+`migrations/manual/` holds one-off scripts that were run by hand; the runner never applies them.
 
 Statements are split on `;` at the end of a line. Lines starting with `--` are comments. A file may
 start with `-- requires: 0007` to fail early when run against a database missing that migration (used
