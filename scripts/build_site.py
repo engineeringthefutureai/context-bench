@@ -161,6 +161,19 @@ INDEX_FIELDS = ["run_id", "round", "task_id", "category", "tier", "level", "retr
                 "helper_body_at_answer", "dropped_tokens", "drop_saved_tokens"]
 
 
+def outcome(r: dict) -> str:
+    """Report outcome (the stored label is unchanged): PASS, FAIL, INVALID (no accepted answer),
+    OUT OF TOKENS (hit the output limit), NO FIT (prompt too long). Infrastructure errors are never
+    recorded; those runs are redone."""
+    if r.get("label") == "no_fit":
+        return "NO FIT"
+    if "max_output_tokens" in (r.get("error") or ""):
+        return "OUT OF TOKENS"
+    if r.get("label") == "tool_error" or r.get("format_status", "ok") != "ok":
+        return "INVALID"
+    return "PASS" if r.get("label") == "ok" else "FAIL"
+
+
 def read(p: Path) -> str | None:
     return p.read_text(errors="replace") if p.exists() else None
 
@@ -198,7 +211,7 @@ def run_payload(r: dict) -> dict:
                 item["drop"] = [{"id": d["id"], "stub": scrub(d["stub"])} for d in t["drop"]]
             transcript.append(item)
     meta = {k: r.get(k) for k in INDEX_FIELDS}
-    meta.update(level_label=level_label(r), model=r.get("model"), quant=r.get("quant"),
+    meta.update(level_label=level_label(r), outcome=outcome(r), model=r.get("model"), quant=r.get("quant"),
                 embedder=r.get("embedder"), prompt_version=r.get("prompt_version"),
                 max_output_tokens=r.get("max_output_tokens"), context_window=r.get("context_window"),
                 peak_ctx_tokens=r.get("peak_ctx_tokens"), target_file=target)

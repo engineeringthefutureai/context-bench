@@ -29,7 +29,8 @@
   }
 
   // ---------- run list ----------
-  const badge = (label) => `<span class="badge ${label === "ok" ? "b-ok" : label === "broken" ? "b-broken" : "b-other"}">${esc(label)}</span>`;
+  // report outcomes (stored labels stay ok/broken/...): PASS, FAIL, INVALID, OUT OF TOKENS, NO FIT
+  const badge = (o) => `<span class="badge ${o === "PASS" ? "b-ok" : o === "FAIL" ? "b-broken" : "b-other"}">${esc(o)}</span>`;
   const yn = (v) => (v == null ? "–" : v ? "yes" : "no");
   const frac = (a, b) => (b ? `${a}/${b}` : "–");
   const COLS = [
@@ -37,7 +38,7 @@
     ["task_id", "Task", (r) => esc(r.task_id)],
     ["level_label", "Level", (r) => esc(r.level_label)],
     ["repo_size", "Repo", (r) => r.repo_size],
-    ["label", "Label", (r) => badge(r.label)],
+    ["outcome", "Outcome", (r) => badge(r.outcome)],
     ["tests_passed", "Tests", (r) => frac(r.tests_passed, r.tests_total)],
     ["reuse_passed", "Reuse", (r) => yn(r.reuse_passed)],
     ["repo_tests_passed", "Repo tests", (r) => frac(r.repo_tests_passed, r.repo_tests_total)],
@@ -53,7 +54,7 @@
       (!state.round || state.round === "all" || r.round === state.round) &&
       (!state.task || r.task_id === state.task) &&
       (!state.level || r.level_label === state.level) &&
-      (!state.label || r.label === state.label) &&
+      (!state.label || r.outcome === state.label) &&
       (!q || `${r.task_id} ${r.level_label} ${r.category} ${r.run_id}`.toLowerCase().includes(q)));
   }
 
@@ -75,7 +76,7 @@
     const uniq = (k) => [...new Set(runs.map((r) => r[k]))].sort();
     $("#f-task").innerHTML = opts(uniq("task_id"), state.task, "All tasks");
     $("#f-level").innerHTML = opts(uniq("level_label"), state.level, "All levels");
-    $("#f-label").innerHTML = opts(uniq("label"), state.label, "Any label");
+    $("#f-label").innerHTML = opts(uniq("outcome"), state.label, "Any outcome");
     $("#f-round").value = state.round;
     $("#f-q").value = state.q;
   }
@@ -163,7 +164,7 @@
       case "tests": body = run.tests ? `<pre class="block">${esc(run.tests)}</pre>` : `<p class="empty">No test output.</p>`; break;
     }
     const close = side === "b" ? `<button class="pick" data-close="b">close</button>` : "";
-    return `<div class="pane ${side}"><div class="pane-head"><h3>${side.toUpperCase()} · ${esc(m.task_id)} · ${esc(m.level_label)} · ${esc(m.repo_size)} ${badge(m.label)} ${close}</h3>
+    return `<div class="pane ${side}"><div class="pane-head"><h3>${side.toUpperCase()} · ${esc(m.task_id)} · ${esc(m.level_label)} · ${esc(m.repo_size)} ${badge(m.outcome)} ${close}</h3>
       <div class="facts">${facts}</div><div class="meta">run <a href="#a=${m.run_id}">${m.run_id}</a> · target ${esc(m.target_file)}</div></div>${body}</div>`;
   }
 
@@ -173,7 +174,7 @@
     const twins = runs.filter((r) => r.task_id === m.task_id && r.run_id !== m.run_id)
       .sort((x, y) => x.round.localeCompare(y.round) || x.level_label.localeCompare(y.level_label) || x.repo_size.localeCompare(y.repo_size));
     return `<label>Compare A with <select id="twin"><option value="">same task, another run…</option>` +
-      twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${r.round === "final" ? "final" : "think off"} · ${r.label}</option>`).join("") +
+      twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${r.round === "final" ? "final" : "think off"} · ${r.outcome}</option>`).join("") +
       `</select></label>`;
   }
 

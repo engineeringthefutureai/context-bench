@@ -116,6 +116,9 @@ L1/L2/L3/L5/L7, to separate the effect of the model from the effect of context b
 
 ## Labels and reuse
 Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `ok`.
+In the report and viewer the labels show as outcomes (stored labels unchanged): PASS (ok), FAIL
+(valid answer, a hidden test failed), INVALID (no accepted answer: bad format, pretend tool calls,
+tool error), OUT OF TOKENS (hit max output), NO FIT. Never "broken" in reader-facing text.
 Regression check, also separate: `repo_tests_passed/total` = the repo's own `tests/` after the patch
 (catches patches that pass the hidden tests while breaking or deleting code elsewhere; `cbench rescore`
 backfills it from saved replies). Every task's reference solution keeps them green.
