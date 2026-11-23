@@ -117,7 +117,7 @@
     if (!t.length) return run.response ? `<pre class="block">${esc(run.response)}</pre>` : `<p class="empty">No answer saved.</p>`;
     const names = {}, droppedIds = new Set();
     t.forEach((m) => (m.tool_calls || []).forEach((c) => (names[c.id] = c.name)));
-    t.forEach((m) => (m.drop || []).forEach((d) => droppedIds.add(d.id)));
+    t.forEach((m) => (m.drop || []).forEach((id) => droppedIds.add(id)));
     return `<div class="segs">` + t.map((m) => {
       if (m.role === "step") {
         return `<div class="turn"><div class="who">Planning call (${esc(m.step)})</div>
@@ -126,10 +126,12 @@
           <details class="seg k-retrieved"><summary><span class="lab">Hits per query</span></summary><pre>${esc(m.hits)}</pre></details></div>`;
       }
       if (m.role === "tool" && m.drop) {
-        return `<div class="call"><b>dropped</b> ${m.drop.map((d) => esc(d.stub)).join(" · ")}</div>`;
+        return `<div class="call"><b>drop</b> ${esc(m.content)}</div>`;
       }
-      if (m.role === "tool" && droppedIds.has(m.result_id)) {
-        return `<details class="seg k-closing"><summary><span class="lab">#${m.result_id} · ${esc(names[m.tool_call_id] || "tool")} · dropped later (stub sent from then on)</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`;
+      const gone = (m.result_ids || []).filter((id) => droppedIds.has(id));
+      if (m.role === "tool" && gone.length) {
+        const all = gone.length === m.result_ids.length;
+        return `<details class="seg ${all ? "k-closing" : "k-tools"}"><summary><span class="lab">${esc(names[m.tool_call_id] || "tool")} · ${all ? "dropped later" : "partly dropped later"} (${gone.map((i) => "#" + i).join(", ")}; stubs sent from then on)</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`;
       }
       if (m.role === "tool") {
         return `<details class="seg k-tools"><summary><span class="lab">Result · ${esc(names[m.tool_call_id] || "tool")}</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`;

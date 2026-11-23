@@ -206,10 +206,10 @@ def run_payload(r: dict) -> dict:
                                       for c in t["tool_calls"]]
             if t.get("tool_call_id"):
                 item["tool_call_id"] = t["tool_call_id"]
-            if t.get("result_id"):                                   # selective: [#n] result IDs
-                item["result_id"] = t["result_id"]
-            if t.get("drop"):                                        # selective: what a drop call stubbed
-                item["drop"] = [{"id": d["id"], "stub": scrub(d["stub"])} for d in t["drop"]]
+            if t.get("result_ids"):                                  # selective: [#n] segment IDs in this result
+                item["result_ids"] = t["result_ids"]
+            if t.get("dropped_ids"):                                 # selective: what a drop call removed
+                item["drop"] = t["dropped_ids"]
             transcript.append(item)
     meta = {k: r.get(k) for k in INDEX_FIELDS}
     meta.update(level_label=level_label(r), outcome=outcome(r), model=r.get("model"), quant=r.get("quant"),
