@@ -59,9 +59,15 @@ Results table: hard-score parts per configuration, the pass rate with and withou
 penalty points per passing run, and the most frequent penalty codes with example quotes linked to the
 viewer. The limits section says what the judge is and that its penalties are unverified unless sampled.
 
-## Implementation (before the v4 rerun finishes; no run without the user's go)
-- `context_bench/grade.py`: a `penalty` mode next to the comparison mode (kept for the recorded rounds).
-- `grading/penalties.md`: the catalogue and instructions (versioned like the rubric).
-- `cbench grade --mode penalty [--judge agy|claude] [--sample N]`.
-- `results/penalties.jsonl`; `scripts/build_site.py` and `scripts/build_report.py` read it.
-- Tests: validation (unknown code, quote not in diff, cap), the judge never sees run metadata.
+## Implementation (done 2026-11-23; no run without the user's go)
+- `context_bench/penalty.py` (its own module; the comparison judge in `grade.py` stays for the recorded
+  rounds), `grading/penalties.md` (catalogue v1; the judge sees the codes, not the points, so it can't
+  aim at a score).
+- `cbench grade --mode penalty --judge agy|claude [--sample N] [--task ...] [--repo-size ...] [--dry-run]`;
+  judges in `[grading.judges]`. Identical patches are judged once; a patch already graded by the same judge
+  and catalogue version is reused for new runs, so later passes only grade new patches.
+- `results/penalties.jsonl`: per run, judge, catalogue version, accepted penalties (code, points, quote,
+  why), dropped penalties with the reason, points.
+- `cbench report` adds a penalty section (hard pass, graded, mean points, share with no penalty, top codes);
+  the viewer shows points and each penalty under Tests. The Results page section comes with the first data.
+- Tests: `tests/test_penalty.py` (validation, caps, the judge dir, resume and reuse, a fake judge).

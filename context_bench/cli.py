@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--task", action="append", help="limit to these tasks (repeatable)")
     gr.add_argument("--dry-run", action="store_true", help="write judge dirs, don't call the judge")
     gr.add_argument("--repo-size", action="append", help="only these repos (repeatable)")
+    gr.add_argument("--mode", choices=["compare", "penalty"], default="compare",
+                    help="compare: rank all patches per task (rounds up to v3); penalty: one call per passing patch")
+    gr.add_argument("--judge", help="penalty mode: a name from [grading.judges] (agy, claude)")
+    gr.add_argument("--sample", type=int, help="penalty mode: grade at most N patches (random, seed 1), for calibration")
 
     sub.add_parser("report", help="label counts per configuration")
     rs = sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
@@ -97,7 +101,13 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "grade":
         exp = Experiment(Path(args.config))
-        n = exp.grade(args.task, dry_run=args.dry_run, repo_sizes=args.repo_size)
+        if args.mode == "penalty":
+            if not args.judge:
+                raise SystemExit("--mode penalty needs --judge (see [grading.judges])")
+            n = exp.grade_penalty(args.judge, args.task, dry_run=args.dry_run, repo_sizes=args.repo_size,
+                                  sample=args.sample)
+        else:
+            n = exp.grade(args.task, dry_run=args.dry_run, repo_sizes=args.repo_size)
         print(f"judge dirs written to {exp.config['grading']['work_dir']}" if args.dry_run else f"graded {n} runs")
         return
     if args.cmd == "report":

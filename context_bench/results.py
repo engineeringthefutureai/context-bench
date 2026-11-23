@@ -243,6 +243,12 @@ def report(path: Path, grades_path: Path | None = None) -> str:
                     "Per configuration, over tasks with more than one distinct patch: mean rank percentile among"
                     " the candidates for the same task (0 = best) and mean 1-5 scores. Labels are not affected.", ""]
             out += judged
+        from .penalty import report as penalty_report
+        if penalized := penalty_report(rows, grades_path.with_name("penalties.jsonl")):
+            out += ["", "## Penalty grading (passing patches only)", "",
+                    "Hard pass = hidden tests pass and the repo's own tests stay green. Judge penalties apply to"
+                    " passing runs only (0 = none, capped at -40) and never change labels.", ""]
+            out += penalized
 
     errors = [r for r in rows if r.get("error")]
     if errors:

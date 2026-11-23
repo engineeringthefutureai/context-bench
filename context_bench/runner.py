@@ -654,6 +654,43 @@ class Experiment:
                 graded += n
         return graded
 
+    def grade_penalty(self, judge: str, task_ids: list[str] | None = None, dry_run: bool = False,
+                      repo_sizes: list[str] | None = None, sample: int | None = None) -> int:
+        """cbench grade --mode penalty: one judge call per distinct passing patch of the current prompt
+        version on the fixture as it is now (penalty.py). Returns the number of runs graded."""
+        from . import penalty
+        grading = self.config["grading"]
+        judges = grading.get("judges", {})
+        if judge not in judges:
+            raise SystemExit(f"unknown judge {judge!r}; [grading.judges] has: {', '.join(judges) or 'none'}")
+        catalogue = self._path(grading["penalty_catalogue"])
+        version = (re.search(r"catalogue_version:\s*(\S+)", catalogue.read_text()) or [None, "?"])[1]
+        out_path = self._path(self.config["paths"].get("penalties", "results/penalties.jsonl"))
+        rows = [r for r in results.load(self.results_path)
+                if r.get("prompt_version", 1) == PROMPT_VERSION and r["task_id"] in self.tasks
+                and (not task_ids or r["task_id"] in task_ids) and (not repo_sizes or r["repo_size"] in repo_sizes)
+                and r.get("repo_hash") == self.repo_hash(r["repo_size"])
+                and not (r["level"] == "L7" and r.get("failed_call_cost") is None)]
+        latest = {r["run_id"]: r for r in rows}
+        todo = penalty.pending(list(latest.values()), self.runs_dir, penalty.load(out_path), judge, version, sample)
+        work = Path(grading["work_dir"]) / "penalty"
+        graded = 0
+        for i, (h, item) in enumerate(sorted(todo.items(), key=lambda kv: kv[1]["rows"][0]["task_id"]), 1):
+            r0 = item["rows"][0]
+            try:
+                n = penalty.grade_patch(self.tasks[r0["task_id"]], r0["repo_size"], item,
+                                        repo=self._path(self.config["repos"][r0["repo_size"]]), catalogue=catalogue,
+                                        version=version, judge=judge, judge_command=judges[judge],
+                                        work_dir=work, out_path=out_path, dry_run=dry_run)
+            except (RuntimeError, subprocess.SubprocessError) as e:
+                print(f"({i}/{len(todo)}) {r0['task_id']} @{r0['repo_size']} {h[:12]}: judge failed, skipped: {e}",
+                      file=sys.stderr)
+                continue
+            print(f"({i}/{len(todo)}) {r0['task_id']} @{r0['repo_size']} {h[:12]}: {len(item['rows'])} runs"
+                  + (" (earlier grade reused)" if item.get("reuse") else ""), file=sys.stderr)
+            graded += n
+        return graded
+
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""
         raise NotImplementedError

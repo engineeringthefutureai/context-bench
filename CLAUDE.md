@@ -161,6 +161,9 @@ project. The judge never learns how any candidate was produced (level, model, pr
 `[grading].judge_command` confines it to read-only tools inside that directory. Judge: agy (plan mode,
 sandbox, a session-only read-only command allow-list) since 2026-11-22, the Claude Code judge before
 (cheaper; calibrated on 3 tasks). Each grade records its `judge`; never compare ranks across judges.
+Penalty grading (from the v4 round, `docs/penalty-grading-design.md`): `cbench grade --mode penalty
+--judge agy|claude`, one call per distinct passing patch, catalogue `grading/penalties.md`; the harness
+keeps a penalty only if its code is known and its quote is a changed line; `results/penalties.jsonl`.
 
 ## Retrieval
 Everything goes through the `Retriever` protocol (`context_bench/retrieval/base.py`). Reference
