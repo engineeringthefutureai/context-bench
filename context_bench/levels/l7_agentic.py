@@ -156,8 +156,8 @@ _TOOLS_V4 = {
     "grep": ("Search file contents with a Python regular expression. Returns up to 50 matching lines as "
              "\"path:line: text\" (\"(+N more)\" if there are more).",
              {"pattern": {"type": "string", "description": "Python regular expression, e.g. \"def \\w*refund\""},
-              "path_glob": {"type": "string", "description": "which files to search, e.g. \"shopkit/**/*.py\"; "
-                            "default \"**/*.py\""}},
+              "path": {"type": "string", "description": "where to search: a directory (\"shopkit/payouts\"), a file, "
+                       "or a glob (\"shopkit/**/*.py\"); default every .py file"}},
              ["pattern"]),
     "read_file": ("Read a whole file. Returns \"File: path\" and the file's content.",
                   {"path": {"type": "string", "description": "relative to the repository root, e.g. "
@@ -291,6 +291,23 @@ def _is_test(rel: str) -> bool:
     return rel.startswith("tests/") or "/tests/" in rel or Path(rel).name.startswith("test_")
 
 
+def _glob_match(rel: str, pattern: str) -> bool:
+    """Shell-style match where "**/" also matches no directory at all ("shopkit/**/*.py" matches
+    "shopkit/money.py"; until 2026-11-23 it matched only files in subdirectories)."""
+    return fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel, pattern.replace("**/", ""))
+
+
+def _search_glob(path_glob: str, path: str | None) -> str:
+    """grep's file filter from `path_glob` or `path`: a glob as given; a directory or file as itself plus
+    everything under it ("shopkit/payouts" -> "shopkit/payouts/*", which fnmatch matches at any depth)."""
+    if path is None or not path.strip():
+        return path_glob
+    p = path.strip().lstrip("./") or "**/*"
+    if any(ch in p for ch in "*?["):
+        return p
+    return p if p.endswith(".py") else p.rstrip("/") + "/*"         # fnmatch's * also crosses "/"
+
+
 def _cap(lines: list[str]) -> list[str]:
     return lines[:MAX_LINES] + ([f"(+{len(lines) - MAX_LINES} more)"] if len(lines) > MAX_LINES else [])
 
@@ -336,11 +353,13 @@ class RepoTools:
         self.transcript.append(out)
         return out
 
-    def grep(self, pattern: str, path_glob: str = "**/*.py") -> str:
+    def grep(self, pattern: str, path_glob: str = "**/*.py", path: str | None = None) -> str:
+        """`path` (a glob or a directory) is accepted as well as `path_glob`: models often write it."""
+        path_glob = _search_glob(path_glob, path)
         rx = re.compile(pattern)
         hits = []
         for rel in self._files():
-            if not (fnmatch.fnmatch(rel, path_glob) or fnmatch.fnmatch(rel, path_glob.removeprefix("**/"))):
+            if not _glob_match(rel, path_glob):
                 continue
             try:
                 lines = (self.root / rel).read_text().splitlines()
@@ -554,12 +573,13 @@ class RepoTools:
         s, e, q = max(inside, key=lambda f: (f[0], -f[1]))       # innermost
         return f"in {q} (lines {s}-{e})"
 
-    def grep_rich(self, pattern: str, path_glob: str = "**/*.py") -> str:
+    def grep_rich(self, pattern: str, path_glob: str = "**/*.py", path: str | None = None) -> str:
         """grep, with each hit's enclosing function/method/class and its lines (.py files)."""
+        path_glob = _search_glob(path_glob, path)
         rx = re.compile(pattern)
         hits = []
         for rel in self._files():
-            if not (fnmatch.fnmatch(rel, path_glob) or fnmatch.fnmatch(rel, path_glob.removeprefix("**/"))):
+            if not _glob_match(rel, path_glob):
                 continue
             try:
                 lines = (self.root / rel).read_text().splitlines()

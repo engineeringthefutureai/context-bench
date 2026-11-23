@@ -135,7 +135,7 @@ def _run_fc(script, cost=0.5):
 
 
 def test_bad_arguments_get_the_valid_ones_and_cost_half():
-    client, res = _run_fc([[("grep", {"pattern": "def", "path": "x"}), ("bogus", {})], "<file path=\"a.py\">x</file>"])
+    client, res = _run_fc([[("grep", {"pattern": "def", "folder": "x"}), ("bogus", {})], "<file path=\"a.py\">x</file>"])
     errs = [m["content"] for m in client.seen[1][0] if m["role"] == "tool"]
     assert "grep takes: pattern (string, required), path_glob (string, optional)." in errs[0]
     assert "Available tools: grep, list_files, read_file, find_references." in errs[1]
@@ -488,3 +488,22 @@ def test_each_turns_reasoning_is_saved_but_never_sent_back():
     assert [m.get("reasoning") for m in turns] == ["thought 1", "thought 2"]
     assert all("reasoning" not in m for m in client.seen[1][0])                 # not sent to the model
     assert all("reasoning" not in m for m in turn_prompts(base, res.transcript)[1][0])
+
+
+def test_grep_accepts_path_or_path_glob():
+    t = RepoTools(M)
+    a = t.grep("def format_money", path_glob="shopkit/**/*.py")
+    assert a == t.grep("def format_money", path="shopkit") == t.grep("def format_money", path="shopkit/money.py")
+    assert t.grep("def format_money", path="shopkit/**/*.py") == a and "shopkit/money.py" in a
+    assert t.grep("def format_money", path="shopkit/orders") == "(no matches)"
+    rich = RepoTools(M, rich=True)
+    assert "shopkit/money.py:" in rich.call("grep", {"pattern": "def format_money", "path": "shopkit"})
+    v4 = {x["function"]["name"]: x["function"]["parameters"]["properties"] for x in tool_schemas("grep", 4)}
+    assert "path" in v4["grep"] and "path_glob" not in v4["grep"]
+    assert "path_glob" in {x["function"]["name"]: x["function"]["parameters"]["properties"] for x in tool_schemas("grep", 3)}["grep"]
+
+
+def test_double_star_matches_zero_directories():
+    t = RepoTools(M)
+    assert "shopkit/money.py:4:" in t.grep("def format_money", "shopkit/**/*.py")
+    assert "shopkit/money.py:4:" in t.grep("def format_money", "**/*.py")
