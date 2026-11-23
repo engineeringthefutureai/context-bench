@@ -130,3 +130,21 @@ def test_l7_restarts_on_its_own_interval(tmp_path, monkeypatch):
     assert [exp.make_cold("m", "u", "L1") for _ in range(3)] == ["reset"] * 3     # 25-style interval (100)
     assert exp.make_cold("m", "u", "L7") == "restart"                              # 3 + 1 >= 2: restart
     assert [exp.make_cold("m", "u", "L7") for _ in range(2)] == ["reset", "restart"]
+
+
+def test_concurrent_sweep_drains_and_restarts_once_when_memory_is_low(tmp_path, monkeypatch):
+    marker = tmp_path / "restarts.log"
+    exp, client, urls = _clean_exp(tmp_path, monkeypatch, f"echo restart >> {marker}")
+    readings = iter([100] + [10**6] * 1000)              # low once, then plenty
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: next(readings))
+    exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"])
+    rows = results.load(exp.results_path)
+    assert len(rows) >= 4 and marker.read_text().count("restart") == 1
+    assert not any(r.get("cold_start") for r in rows)      # still a normal (not clean) sweep
+
+
+def test_concurrent_sweep_continues_when_the_restart_fails(tmp_path, monkeypatch):
+    exp, client, urls = _clean_exp(tmp_path, monkeypatch, "exit 1")
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: 100)    # always low
+    exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"])
+    assert len(results.load(exp.results_path)) >= 4

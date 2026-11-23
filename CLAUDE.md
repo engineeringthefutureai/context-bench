@@ -119,7 +119,8 @@ time, with the prefix cache made cold before each, so nothing cached carries ove
 all share the same repo and system prompt. Between runs the cache is dropped (`/reset_prefix_cache`,
 vLLM with `VLLM_SERVER_DEV_MODE=1`, 75 ms); the server is fully restarted on the first run, every
 `CBENCH_RESTART_EVERY` runs (25; L7: `CBENCH_RESTART_EVERY_L7`, 12) and when host memory drops below `CBENCH_RESTART_MIN_FREE_MB` (6000),
-since the reset frees no memory and the vLLM workers grow in host RAM. Each run records `cold_method`. Both arms keep separate run ids. Crude on purpose;
+since the reset frees no memory and the vLLM workers grow in host RAM. Each run records `cold_method`. Concurrent (not clean) sweeps also restart the server when host memory drops below
+`CBENCH_RESTART_MIN_FREE_MB`: no new run starts, the runs in flight finish, one restart, then the sweep goes on. Both arms keep separate run ids. Crude on purpose;
 more seeds, a second size and the model axis come later.
 
 Optional model axis (later): an older and a current model of the same family and size, same quantization, on

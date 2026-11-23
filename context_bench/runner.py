@@ -505,7 +505,11 @@ class Experiment:
         connection, HTTP status) skips that run, so the next `cbench run` retries it.
         clean=True: serial (one run at a time, each model's first server only) and the prefix cache is
         made cold before every run (make_cold: a cache reset, with a full restart on the first run,
-        every CBENCH_RESTART_EVERY runs and when host memory runs low). A failed restart stops the sweep."""
+        every CBENCH_RESTART_EVERY runs and when host memory runs low). A failed restart stops the sweep.
+        Not clean (concurrent): when host memory drops below CBENCH_RESTART_MIN_FREE_MB and
+        CBENCH_RESTART_CMD is set, no new run starts, the runs in flight finish, the server is restarted
+        once and the sweep goes on (the vLLM workers grow in host RAM; nothing else restarts them). A
+        failed restart is reported and the sweep continues without it."""
         recorded = {r["run_id"]: r.get("repo_hash") for r in results.load(self.results_path)}
         unique = list({rc.run_id: rc for rc in self.configs(levels, models, repo_sizes, thinking, task_ids)}.values())
         todo = [rc for rc in unique
@@ -521,6 +525,43 @@ class Experiment:
         failed: list[str] = []
         lock = threading.Lock()
         counter = iter(range(1, len(todo) + 1))
+        # concurrent sweeps: drain and restart the server when host memory runs low
+        cond = threading.Condition()
+        gate_state = {"active": 0, "restarting": False, "enabled": not clean and bool(env_value("CBENCH_RESTART_CMD"))}
+        min_free = int(env_value("CBENCH_RESTART_MIN_FREE_MB") or 6000)
+
+        def gate(model: str, url: str) -> None:
+            """Wait for a restart in progress; start one (after the runs in flight) when memory is low."""
+            if not gate_state["enabled"]:
+                return
+            with cond:
+                while gate_state["restarting"]:
+                    cond.wait()
+                if _free_mb() >= min_free:
+                    gate_state["active"] += 1
+                    return
+                gate_state["restarting"] = True
+                while gate_state["active"] > 0:
+                    cond.wait()
+            try:
+                print(f"low memory ({_free_mb()} MB free < {min_free}): restarting the model server",
+                      file=sys.stderr)
+                self.restart_server(model, url)
+            except Exception as e:                   # keep going on the old server, don't try again
+                print(f"server restart failed, continuing without restarts: {e}", file=sys.stderr)
+                gate_state["enabled"] = False
+            finally:
+                with cond:
+                    gate_state["restarting"] = False
+                    gate_state["active"] += 1
+                    cond.notify_all()
+
+        def release() -> None:
+            if not gate_state["enabled"] and gate_state["active"] == 0:
+                return
+            with cond:
+                gate_state["active"] = max(gate_state["active"] - 1, 0)
+                cond.notify_all()
 
         def worker(url: str, queue: list[RunConfig]) -> None:
             while True:
@@ -532,6 +573,7 @@ class Experiment:
                         continue
                     i = next(counter)
                 tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
+                gate(rc.model, url)
                 try:
                     result = self.run_one(rc, url, concurrency=workers_per_url[rc.model, url], cold_start=clean)
                 except NotImplementedError as e:
@@ -559,6 +601,8 @@ class Experiment:
                           f"{type(e).__name__}: {e}", file=sys.stderr)
                     traceback.print_exc(file=sys.stderr)
                     continue
+                finally:
+                    release()
                 with lock:
                     results.append(self.results_path, result)
                     print(f"  ({i}/{len(todo)} done, {url})", file=sys.stderr)
