@@ -186,6 +186,7 @@ class RunResult:
     drop_saved_tokens: int | None = None    # input tokens avoided over all later requests;
                                         #   tokens_in + drop_saved_tokens = the same run without drops
     hit_turn_cap: bool | None = None    # MAX_TURNS backstop reached
+    format_retry: bool | None = None    # L7/L8: an unusable final answer got one more chance (FORMAT_RETRY)
     helper_body_at_answer: bool | None = None   # helper_body_in_context, counting only what was still in
                                         #   the conversation at the final turn (stubs, not dropped bodies)
     legacy_share_at_answer: float | None = None # legacy_ctx_share, same basis

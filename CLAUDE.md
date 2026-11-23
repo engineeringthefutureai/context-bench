@@ -65,6 +65,13 @@ format section: a documented exception to hard rule 1, L8 only. Unknown tools th
 (read_file, write_file, ...) get a specific "there is no X tool" error. All L7 variants and L8 under v4
 see `File: path / (This file does not exist yet.)` when the change creates a new file (as L1-L6 do).
 A final reply that is a tool call after the tools were gone gets one retry (`FINAL_RETRY`).
+L8 checks syntax, never runs code: after every `edit` / `create_file` of a .py file the harness compiles it
+(`compile`, nothing executed) and appends a warning with the line if it no longer parses; ending the run
+while a changed file doesn't parse gets one `SYNTAX_RETRY` (tools stay available). Running code during a
+run (a `run_tests` or code-snippet tool) was deliberately left out of this experiment: it would let the
+model execute arbitrary code on the host, and hidden tests must never be an agent's oracle (rule 6). The
+harness does execute the model's code when it scores a run (hidden tests, repo tests, patch coverage):
+that risk is accepted, the same as for every level.
 
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),

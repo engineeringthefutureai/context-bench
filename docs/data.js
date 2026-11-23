@@ -167,7 +167,12 @@
       }
       if (m.role === "tool") {
         const tool = names[m.tool_call_id] || "tool";
-        const parts = splitResult(m.content || "", tool);
+        // L8 appends "[n of 15 points left]" to a turn's last result: shown as its own item here (the
+        // message the model got is unchanged)
+        const pts = (m.content || "").match(/\n*\[(\d+(?:\.\d+)?) of (\d+) points left\]\s*$/);
+        const content = pts ? m.content.slice(0, pts.index) : (m.content || "");
+        const pointsItem = pts ? {tool: false, html: `<div class="points-left">${esc(pts[1])} of ${esc(pts[2])} points left</div>`} : null;
+        const parts = splitResult(content, tool);
         const gone = (m.result_ids || []).filter((id) => droppedIds.has(id));
         const all = gone.length && gone.length === m.result_ids.length;
         if (parts.length > 1) {                    // one item per definition / range / imports / note
@@ -176,10 +181,12 @@
             return `<details class="seg ${dropped ? "k-closing" : "k-tools"}"><summary><span class="lab">${esc(p.head)}${dropped ? " · dropped later" : ""}</span><span class="sz">≈${fmt(tok(p.text.length))} tok</span></summary><pre>${esc(p.text)}</pre></details>`;
           }).join("");
           harness.push({tool: true, html: `<div class="result-group"><div class="lab">Result · ${esc(tool)} · ${parts.length} parts</div>${items}</div>`});
+          if (pointsItem) harness.push(pointsItem);
           continue;
         }
         const note = gone.length ? ` · ${all ? "dropped later" : "partly dropped later"} (${gone.map((i) => "#" + i).join(", ")}; stubs sent from then on)` : "";
-        harness.push({tool: true, html: `<details class="seg ${all ? "k-closing" : "k-tools"}"><summary><span class="lab">Result · ${esc(tool)}${note}</span><span class="sz">≈${fmt(tok((m.content || "").length))} tok</span></summary><pre>${esc(m.content)}</pre></details>`});
+        harness.push({tool: true, html: `<details class="seg ${all ? "k-closing" : "k-tools"}"><summary><span class="lab">Result · ${esc(tool)}${note}</span><span class="sz">≈${fmt(tok(content.length))} tok</span></summary><pre>${esc(content)}</pre></details>`});
+        if (pointsItem) harness.push(pointsItem);
         continue;
       }
       if (m.role === "user") {

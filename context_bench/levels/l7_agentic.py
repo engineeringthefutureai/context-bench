@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..apply import parse_files
 from ..chunking import chunks_from_source
 from ..retrieval.base import chunk_text
 from ..types import ContextBlock, Task
@@ -125,6 +126,14 @@ _MISSING_EDIT_TOOLS = {"read_file", "list_files", "open", "open_file", "view", "
                        "search_files", "find_files"}
 _CHANGE_TOOLS = {"edit_file", "write", "write_file", "str_replace", "apply_patch", "replace", "insert",
                  "str_replace_editor", "multi_edit"}
+# Sent once when the final answer can't be used (mechanics only, nothing about the task). L7: no complete
+# <file> block (tools off: the answer is due); L8: the run ended without any change (edit tools stay).
+FORMAT_RETRY = ("Your reply couldn't be used: it has no complete <file path=\"...\">...</file> block. Reply with the "
+                "complete new contents of each file you change, in <file> blocks.")
+FORMAT_RETRY_EDIT = ("No changes were made. Change files with edit or create_file, then reply without tool calls.")
+# L8: sent once when the model ends the run while a file it changed doesn't parse (tools stay available).
+SYNTAX_RETRY = ("These files you changed don't parse:\n{problems}\nFix them with edit, or reply without tool "
+                "calls again to finish as they are.")
 BUDGET_SPENT_EDIT = ("No points left for reading or search. edit and create_file still work; when the change "
                      "is complete, reply without tool calls.")
 
@@ -271,13 +280,15 @@ _TOOLS_EDIT = {
              ["ids"]),
     "edit": ("Replace text in a file of the repository: old must match the file exactly (indentation included) "
              "and occur once in it. The change is made at once; later reads show the new code. Returns the lines "
-             "the new text now occupies. Free; a failed edit costs 0.5 points.",
+             "the new text now occupies, and a warning if a Python file no longer parses. Free; a failed edit "
+             "costs 0.5 points.",
              {"path": {"type": "string", "description": "relative to the repository root"},
               "old": {"type": "string", "description": "the exact text to replace; include enough lines to be unique"},
               "new": {"type": "string", "description": "the replacement text (empty to delete)"}},
              ["path", "old", "new"]),
     "create_file": ("Create a new file with the given contents (fails if the file exists: change existing files "
-                    "with edit). Free; a failed call costs 0.5 points.",
+                    "with edit). Returns a warning if a Python file doesn't parse. Free; a failed call costs 0.5 "
+                    "points.",
                     {"path": {"type": "string", "description": "relative to the repository root"},
                      "content": {"type": "string", "description": "the whole file"}},
                     ["path", "content"]),
@@ -421,6 +432,7 @@ class RepoTools:
     last_segments: list[dict] = field(default_factory=list)  # rich: the last call's output in parts
                                                              # (imports / code / note), for selective IDs
     whole_files: bool = False      # L8: read_symbol also takes module-level constants and "path:a-b" ranges
+    edited: set[str] = field(default_factory=set)   # L8: files changed by edit / create_file
     bare_paths: bool = False       # ...and a bare file path for the whole file (off for L8)
 
     def _files(self) -> list[str]:
@@ -846,6 +858,24 @@ class RepoTools:
         return self._imports_seg(rel) + [{"kind": "code", "file": rel, "label": f"read_symbol {key}",
                                           "text": f"{rel}:{a}-{b}  {key}\n" + "\n".join(src)}]
 
+    def syntax_problem(self, rel: str) -> str | None:
+        """L8: a .py file of the repo copy that doesn't compile: "SyntaxError at line N: msg" plus the line.
+        Only parses (compile), never runs anything: executing model code during a run is deliberately left
+        out (see CLAUDE.md, L8)."""
+        if not rel.endswith(".py"):
+            return None
+        text = (self.root / rel).read_text()
+        try:
+            compile(text, rel, "exec", dont_inherit=True)
+        except SyntaxError as e:
+            line = (e.text or "").rstrip("\n")
+            return f"{type(e).__name__} at line {e.lineno}: {e.msg}" + (f"\n    {line}" if line.strip() else "")
+        return None
+
+    def _syntax_note(self, rel: str, verb: str) -> str:
+        problem = self.syntax_problem(rel)
+        return f"\nwarning: {rel} {verb}: {problem}" if problem else ""
+
     def _changed(self) -> None:
         """L8: the repo copy changed; parsed trees, chunks and constants are read again on the next call."""
         for cache in ("_tree_cache", "_chunks", "_const_cache"):
@@ -874,7 +904,9 @@ class RepoTools:
         first = content[:a].count("\n") + 1
         n = max((new or "").count("\n") + (0 if (new or "").endswith("\n") else 1), 0) if new else 0
         where = f"lines {first}-{first + n - 1}" if n else f"removed at line {first}"
-        return f"Edited {rel}: {where} ({len(updated.splitlines())} lines in the file now)"
+        self.edited.add(rel)
+        return (f"Edited {rel}: {where} ({len(updated.splitlines())} lines in the file now)"
+                + self._syntax_note(rel, "no longer parses"))
 
     def create_file(self, path: str, content: str) -> str:
         """L8: a new file in the repo copy (an existing file is an error: use edit)."""
@@ -884,7 +916,9 @@ class RepoTools:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content if content.endswith("\n") else content + "\n")
         self._changed()
-        return f"Created {p.relative_to(self.root.resolve()).as_posix()} ({len(content.splitlines())} lines)"
+        rel = p.relative_to(self.root.resolve()).as_posix()
+        self.edited.add(rel)
+        return f"Created {rel} ({len(content.splitlines())} lines)" + self._syntax_note(rel, "doesn't parse")
 
     def find_references_rich(self, symbol: str) -> str:
         """find_references, with each hit's enclosing function and its line range, so the right lines
@@ -958,6 +992,7 @@ class AgentResult:
     drop_saved_tokens: int | None = None   # input tokens avoided: that difference, summed over every
                                        #   request sent after each drop (tokens_in + this = without drops)
     hit_turn_cap: bool = False         # MAX_TURNS reached (drop calls are free)
+    format_retry: bool = False         # the final answer couldn't be used and got one more chance
     answer_tool_text: str = ""         # tool output still in the conversation at the final turn
 
 
@@ -969,7 +1004,7 @@ def cacheable_prefix(prev_in: int, prev_offer: bool | None, cur_in: int, cur_off
 
 def _closing(content: str) -> bool:
     """A harness message after which the reading tools are no longer offered (L8 keeps edit/create_file)."""
-    return content in (BUDGET_SPENT, FINAL_RETRY, BUDGET_SPENT_EDIT)
+    return content in (BUDGET_SPENT, FINAL_RETRY, BUDGET_SPENT_EDIT, FORMAT_RETRY)
 
 
 def turn_prompts(messages: list[dict], transcript: list[dict]) -> list[tuple[list[dict], bool]]:
@@ -1078,6 +1113,8 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     retried = False                       # FINAL_RETRY sent (at most once per run)
     edit = agent_variant == "edit"        # L8: edits through tools; a reply without tool calls ends the run
     budget_noted = False                  # L8: BUDGET_SPENT_EDIT sent
+    syntax_retried = False                # L8: SYNTAX_RETRY sent (at most once per run)
+    format_retry = False                  # FORMAT_RETRY(_EDIT) sent
     closed = False
 
     def render(index: int) -> str:
@@ -1100,6 +1137,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                            drop_refunds=refunds_earned if refunding else None,
                            drop_refund_clawbacks=clawbacks if refunding else None,
                            drop_saved_tokens=drop_saved if sel else None, hit_turn_cap=capped,
+                           format_retry=format_retry,
                            answer_tool_text="\n\n".join(m["content"] for m in msgs if m.get("role") == "tool"))
 
     while True:
@@ -1148,6 +1186,19 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
             add({"role": "user", "content": FINAL_RETRY})     # once: a tool call after the tools were gone
             retried = True
             continue
+        if feedback and not retried and not chat.tool_calls and (
+                (edit and not tools.edited) or (not edit and not parse_files(chat.content))):
+            # once (shared with FINAL_RETRY): an answer that can't be used gets one more chance
+            add({"role": "user", "content": FORMAT_RETRY_EDIT if edit else FORMAT_RETRY})
+            retried = format_retry = True
+            closed = closed or not edit              # L7: no tools after it; L8 keeps the edit tools
+            continue
+        if edit and feedback and not syntax_retried and not chat.tool_calls:
+            problems = [f"{rel}: {pr}" for rel in sorted(tools.edited) if (pr := tools.syntax_problem(rel))]
+            if problems:                         # once: the run would end with code that can't import
+                add({"role": "user", "content": SYNTAX_RETRY.format(problems="\n".join(problems))})
+                syntax_retried = True
+                continue
         if not chat.tool_calls or not offer:
             break
         droppable, batch = set(tail), []

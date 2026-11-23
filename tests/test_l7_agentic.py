@@ -42,7 +42,7 @@ def test_tools_on_repo_m():
 class FakeClient:
     """Replies from a script: each item is a list of (tool, args) calls, or a final string."""
     def __init__(self, script):
-        self.script, self.seen = list(script), []
+        self.script, self.seen, self.last = list(script), [], ""
 
     def count_tokens(self, text):
         return len(text) // 4
@@ -52,7 +52,10 @@ class FakeClient:
 
     def chat(self, msgs, *, temperature, seed, max_tokens, tools=None, thinking=True):
         self.seen.append((list(msgs), tools))
-        step = self.script.pop(0)
+        # script exhausted: repeat the last final text (the harness may ask once more, e.g. FORMAT_RETRY)
+        step = self.script.pop(0) if self.script else self.last
+        if isinstance(step, str):
+            self.last = step
         if isinstance(step, str):
             return ChatResult(content=step, tokens_in=10, tokens_out=5, finish_reason="stop")
         calls = [{"id": f"c{i}", "type": "function",
@@ -343,13 +346,13 @@ def test_selective_imports_follow_the_last_code_and_return_with_new_code():
 def test_selective_measures_the_context_saved_by_drops():
     read = ("read_symbol", {"symbols": ["shopkit.shipping.packaging.format_weight"]})   # #1 imports, #2 code
     grep = ("grep", {"pattern": "def "})
-    client, res = _sel([[read], [("drop", {"ids": [2]}), grep], [grep], "final"])
+    client, res = _sel([[read], [("drop", {"ids": [2]}), grep], [grep], "<file path=\"a.py\">x</file>"])
     full = [m for m in client.seen[1][0] if m["role"] == "tool"][0]["content"]
     stub = [m for m in client.seen[2][0] if m["role"] == "tool"][0]["content"]
     delta = client.count_tokens(full) - client.count_tokens(stub)
     assert delta > 0 and res.dropped_tokens == delta
     assert res.drop_saved_tokens == 2 * delta          # requests 3 and 4 were each that much smaller
-    _, plain = _sel([[read], "final"])
+    _, plain = _sel([[read], "<file path=\"a.py\">x</file>"])
     assert plain.dropped_tokens == 0 and plain.drop_saved_tokens == 0
 
 
@@ -480,7 +483,7 @@ def test_each_turns_reasoning_is_saved_but_never_sent_back():
             res.reasoning = f"thought {len(self.seen)}"
             return res
 
-    client = Thinking([[("grep", {"pattern": "def format_money"})], "final"])
+    client = Thinking([[("grep", {"pattern": "def format_money"})], "<file path=\"a.py\">x</file>"])
     base = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
     res = run_agent(client, base, RepoTools(M), agent_variant="grep", temperature=None, seed=1, max_tokens=100,
                     context_window=100_000, failed_call_cost=0.5)
@@ -637,3 +640,37 @@ def test_v4_agents_see_the_path_of_a_file_the_change_creates():
         assert new.startswith("File: shopkit/utils/units.py\n(This file does not exist yet.)\n\n")
         old = LEVELS[level](TASKS["reuse-001"], ws, agent_variant=variant, prompt_version=4).text
         assert not old.startswith("File:")                                    # existing targets stay unnamed
+
+
+def test_l8_edits_report_syntax_errors_and_ending_with_one_gets_a_retry(tmp_path):
+    from context_bench.levels.l7_agentic import SYNTAX_RETRY
+    repo = _copy_m(tmp_path)
+    broken = ("edit", {"path": "shopkit/shipping/packaging.py", "old": OLD_LINE, "new": "VOLUMETRIC_DIVISOR = ("})
+    fixed = ("edit", {"path": "shopkit/shipping/packaging.py", "old": "VOLUMETRIC_DIVISOR = (",
+                      "new": "VOLUMETRIC_DIVISOR = 6000"})
+    client, res = _l8([[broken], "done", [fixed], "done"], root=repo)
+    results = [m["content"] for m in res.transcript if m["role"] == "tool"]
+    assert "warning: shopkit/shipping/packaging.py no longer parses: SyntaxError at line" in results[0]
+    retry = [m["content"] for m in res.transcript if m["role"] == "user"]
+    assert retry and retry[0].startswith(SYNTAX_RETRY.split("\n")[0])
+    assert "warning" not in results[-1].split("\n\n[")[0]                   # fixed: no warning
+    assert res.content == "done" and "VOLUMETRIC_DIVISOR = 6000" in (repo / "shopkit/shipping/packaging.py").read_text()
+    client, res = _l8([[broken], "done", "done"], root=_copy_m(tmp_path / "b"))   # only once
+    assert sum(1 for m in res.transcript if m["role"] == "user") == 1 and res.content == "done"
+
+
+def test_unusable_final_answer_gets_one_retry_l7_and_l8(tmp_path):
+    from context_bench.levels.l7_agentic import FORMAT_RETRY, FORMAT_RETRY_EDIT
+    good = "<file path=\"a.py\">x</file>"
+    client, res = _run_fc([[("grep", {"pattern": "def format_money"})], "```python\nx = 1\n```", good])
+    assert client.seen[-1][0][-1]["content"] == FORMAT_RETRY and client.seen[-1][1] is None   # no tools
+    assert res.content == good and res.format_retry
+    client, res = _run_fc([[("grep", {"pattern": "x"})], "prose", "still prose"])           # only once
+    assert res.content == "still prose" and len(client.seen) == 3
+    client, res = _run_fc([[("grep", {"pattern": "x"})], good])
+    assert not res.format_retry
+    repo = _copy_m(tmp_path)
+    edit = ("edit", {"path": "shopkit/shipping/packaging.py", "old": OLD_LINE, "new": "VOLUMETRIC_DIVISOR = 6000"})
+    client, res = _l8(["done", [edit], "done"], root=repo)
+    assert client.seen[1][0][-1]["content"] == FORMAT_RETRY_EDIT and client.seen[1][1]       # edit tools stay
+    assert res.format_retry and "6000" in (repo / "shopkit/shipping/packaging.py").read_text()

@@ -257,7 +257,7 @@ class Experiment:
                 if agent.drops is not None:     # selective
                     at_answer = ContextBlock(text=ctx_text_initial + "\n\n" + agent.answer_tool_text)
                     perf.update(drops=agent.drops, drop_calls=agent.drop_calls,
-                                rereads_after_drop=agent.rereads_after_drop, hit_turn_cap=agent.hit_turn_cap,
+                                rereads_after_drop=agent.rereads_after_drop, hit_turn_cap=agent.hit_turn_cap, format_retry=agent.format_retry,
                                 dropped_tokens=agent.dropped_tokens, drop_saved_tokens=agent.drop_saved_tokens,
                                 drop_refunds=agent.drop_refunds, drop_refund_clawbacks=agent.drop_refund_clawbacks,
                                 helper_body_at_answer=_helper_body_visible(task, at_answer, ws),
