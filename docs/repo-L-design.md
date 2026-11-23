@@ -90,6 +90,34 @@ enclosing-function hints) don't see SQL or templates as symbols; those files are
   doesn't break small-context levels).
 - Every task: unmodified fails, reference passes and keeps `tests/` green, context-blind fails, as now.
 
+## Module map (targets; lines of Python unless noted)
+Totals: ~27k lines of source + ~8k lines of tests + ~1.5k lines of SQL/HTML. M today: 3.1k + 2.5k tests.
+
+| Area | Files | Target lines | Kind |
+|---|---|---|---|
+| M packages, evolved (orders, catalog, customers, inventory, payments, invoices, shipping, tax, promotions, notifications, marketing, reports, api, utils) | ~100 | ~7,000 | mostly current style; some grown; task targets stay valid |
+| `shopkit/db/` migration runner, connection, repositories (sqlite3) | 6 | 900 | current |
+| `migrations/*.sql` | ~25 | 700 (SQL) | current, 3 legacy ad-hoc scripts |
+| `shopkit/web/` template engine, views, forms; `templates/**/*.html` | 8 + ~25 | 1,300 + 800 (HTML) | current |
+| `shopkit/pricing/` price lists, tiers, currency conversion | 7 | 1,200 | current |
+| `shopkit/fulfillment/` waves, picking, carrier handoff | 8 | 1,400 | current, one grown file |
+| `shopkit/payouts/` marketplace seller payouts | 6 | 1,100 | current + 1 bloated function |
+| `shopkit/subscriptions/` billing cycles, proration, dunning | 6 | 1,100 | current |
+| `shopkit/accounting/` ledger, journal entries, period close | 7 | 1,300 | current |
+| `shopkit/integrations/` ERP client, tax provider, carrier APIs (offline stubs) | 8 | 1,400 | mixed |
+| `shopkit/fraud/`, `shopkit/support/`, `shopkit/search/` | 12 | 2,000 | current |
+| `shopkit/legacy/` order_engine (2,500), reporting (2,000), erp_sync (1,800), pricing_old (1,500) | 4 | 7,800 | legacy monoliths, partly live |
+| dead code: `common/` (from M), `shopkit/v2/` half-finished migration, deprecated wrappers, unused modules | ~15 | 2,500 | dead, tests only |
+| incident-bloated functions (inside the files above): checkout pricing, refund settlement, stock reservation, payout batching, webhook delivery | 5 functions | ~2,500 of the totals | live |
+| `tests/` | ~120 | ~8,000 | pytest and old unittest style |
+
+Milestones (each: L's tests pass, a commit):
+1. Copy M; `db` + migrations; `web` + templates; L's test runner green.
+2. Evolve M packages (growth, edits, mixed style) and add `pricing`, `accounting`, `subscriptions`.
+3. Legacy monoliths and dead code (`legacy/`, `v2/`).
+4. Remaining packages; the five bloated functions with their buried rules.
+5. Size and shape check (tokens, map ratio), existing tasks re-verified on L, L tasks.
+
 ## How it gets built
 1. This design reviewed; module map with target sizes per file (a table in this doc).
 2. Copy M to `fixtures/repo_L/`, then evolve package by package: edits, growth, the legacy monoliths,
@@ -112,3 +140,18 @@ Several sessions of work. The current round (M) finishes first and is reported o
 - Size: ~250k tokens of real code; L3 NO FIT, L6 fits, L6+docs on the edge. No capping of L6.
 - Full stack with SQL migrations and server-rendered templates, tested from Python; no JS.
 - A snapshot a year after M (not byte-identical); existing tasks re-verified on L.
+
+## Constraints from the existing tasks (L must not solve them)
+Each M task must still be unsolved on L, so L must not contain:
+- `shopkit/utils/units.py` (`parse_weight`), `shopkit/utils/durations.py` (`parse_duration`)
+- on `Order`: `add_line`, `discount_percent`, `gift_message` (keep `orders/models.py` close to M)
+- `Stock.reserve` (stock reservation in L lives in fulfillment wave allocation, not on `Stock`)
+- transfer announcements (audit/events) or `transfers_by_week` in `inventory/transfers.py`
+- a `return_window_days` setting or a restocking fee in `orders/returns.py`
+- `Product.weight_g`, `Product.url_path`, `parcel_weight_g` in fulfillment
+- `export_orders_csv`; `expected_arrival` in refunds; a bank-transfer reference in `payments/gateway.py`
+- email validation in `marketing/newsletter.py`; card masking in `api/webhooks.py` (the bloated webhook
+  delivery function must not mask either)
+- `customer`/`points` in `checkout.quote()`; `by_email` in `reports/customers_report.py`
+- a weight on shipping labels (`shipping/labels.py`); trap-001's `format_weight` keeps its drift
+New code may use these modules but must not add these features. `test_tasks_verified` on L checks it.
