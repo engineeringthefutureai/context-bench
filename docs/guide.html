@@ -30,7 +30,7 @@
         <tr><td>Chat endpoint</td><td>Yes</td><td>Any OpenAI-compatible <code>/v1/chat/completions</code> API with tool calling (for L7). A hosted API works.</td></tr>
         <tr><td>Embeddings endpoint</td><td>Optional</td><td>Any <code>/v1/embeddings</code> API, for the embedding retriever (L4/L5 <code>embed</code>, L7 <code>hybrid</code>). Without it those variants are skipped and BM25 still runs.</td></tr>
         <tr><td>Cache control</td><td>Optional</td><td>Clean mode needs a vLLM server with <code>VLLM_SERVER_DEV_MODE=1</code> (prefix-cache reset) or a restart command. On a hosted API you can't control caching, so runs may share cached prefixes. This changes latency and cached-token counts, not the answers' correctness.</td></tr>
-        <tr><td>Judge</td><td>Optional</td><td>A coding-agent CLI for blind grading (agy or Claude Code), confined to read-only tools.</td></tr>
+        <tr><td>Judge</td><td>Optional</td><td>A coding-agent CLI for blind grading (agy or Claude Code), confined to read-only tools. It never changes the test-based outcomes.</td></tr>
       </tbody>
     </table></div>
   </section>
@@ -49,9 +49,59 @@ cbench one --task reuse-001 --level L1         # a single run
 cbench run --model &lt;key&gt;                       # the full sweep, resumable
 cbench run --model &lt;key&gt; --clean --thinking    # final-round mode: serial, cold cache
 cbench rescore                                 # recompute derived fields, no model calls
-cbench grade                                   # blind judge per task
+cbench grade --mode penalty --judge claude     # optional: penalty judge per passing patch
 cbench report</pre>
-    <div class="todo"><b>To come</b>A walk-through of config/experiment.toml with a hosted-API example, typical run time and token use per sweep.</div>
+  </section>
+
+  <section>
+    <h2>Walk-through: a hosted model</h2>
+    <p class="prose">Everything you change lives in two files: <code>.env</code> for secrets and the
+    server commands, <code>config/experiment.toml</code> for the model, the embedder and the sweep.</p>
+    <p class="prose"><b>1. The API key.</b> Copy <code>.env.example</code> to <code>.env</code> and set
+    <code>CBENCH_API_KEY</code>. It is sent as a bearer token and never written to results or logs.
+    Leave the <code>CBENCH_RESTART_*</code> lines empty: they are for a server you run yourself.</p>
+    <p class="prose"><b>2. The model.</b> Add an entry under <code>[models]</code>. <code>base_url</code> is
+    everything before <code>/v1</code>: the harness appends <code>/v1/chat/completions</code>.
+    <code>context_window</code> decides what counts as NO FIT, so set it to what the endpoint really accepts.
+    Listing the same URL several times in <code>base_urls</code> runs that many requests at once.</p>
+    <pre class="block">[models."my-model"]
+base_url = "https://api.example.com"     # the harness adds /v1/chat/completions
+base_urls = ["https://api.example.com", "https://api.example.com"]   # 2 requests at a time
+model = "vendor/model-name"              # the id the endpoint expects
+quant = "as served by the provider"      # recorded with every run
+context_window = 131072</pre>
+    <p class="prose"><b>3. The embedder (optional).</b> <code>[embedder]</code> takes any
+    <code>/v1/embeddings</code> endpoint and model. Embeddings are cached on disk per text, so a rerun costs
+    nothing. Without an embedder, skip the <code>embed</code> and <code>hybrid</code> variants with
+    <code>--level</code>, or remove their <code>[[config]]</code> blocks.</p>
+    <p class="prose"><b>4. Generation.</b> <code>[generation]</code> sets <code>max_output_tokens</code>
+    (thinking counts toward it) and <code>thinking</code>. The temperature stays at the server's default
+    unless you set one. Every level gets the same values.</p>
+    <p class="prose"><b>5. The sweep.</b> Each <code>[[config]]</code> block is one configuration: a level plus
+    its options (retriever, query mode, agent variant, prompt arm), optionally limited to some tasks or repos.
+    <code>cbench run --dry-run</code> lists what would run. The sweep resumes: rerunning skips every recorded
+    configuration, and a run that hit a server error is simply retried next time.</p>
+    <p class="prose"><b>6. Check, run, read.</b> <code>cbench validate-retrieval</code> first (recall of the
+    planted helpers, which tells you whether the embedder works), then <code>cbench one</code> on one task,
+    then <code>cbench run</code>, then <code>cbench report</code> or the site builders in
+    <code>scripts/</code>.</p>
+  </section>
+
+  <section>
+    <h2>How long it takes</h2>
+    <p class="prose">From the prompt-v3 round (repos S and M, 440 runs per round, Qwen 3.8 27B on two Intel
+    B60 cards). Token totals carry over to any endpoint; the time depends on your hardware or provider.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Round</th><th class="r">Runs</th><th class="r">Input tokens</th><th class="r">Output tokens</th><th class="r">Model time</th></tr></thead>
+      <tbody>
+        <tr><td>Thinking off, 4 at a time</td><td class="r">440</td><td class="r">6.8M</td><td class="r">0.3M</td><td class="r">5.7 h (about 2 h wall clock)</td></tr>
+        <tr><td>Thinking on, clean (serial, cold cache)</td><td class="r">440</td><td class="r">4.8M</td><td class="r">3.4M</td><td class="r">24.6 h, plus restarts</td></tr>
+      </tbody>
+    </table></div>
+    <p class="prose">Input is dominated by L3 (the whole repository, about 32k tokens a run) and L7 (27-46k
+    over all its turns). Output is dominated by thinking: with it on, a run writes 5-13k tokens, against
+    about 0.5-1k without. Repo L (from the v4 round) adds about 450 configurations, and an L7 run there can
+    read 100-250k input tokens.</p>
   </section>
 
   <section>
