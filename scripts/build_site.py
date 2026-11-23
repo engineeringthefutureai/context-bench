@@ -20,7 +20,11 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--results=")), ROOT / "results"))
 if not RESULTS.is_absolute():
     RESULTS = ROOT / RESULTS
-OUT = ROOT / "docs" / "raw"
+# where the site lives: docs/ (published) or another folder, e.g. a preview of the round in progress
+SITE = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--out=")), ROOT / "docs"))
+if not SITE.is_absolute():
+    SITE = ROOT / SITE
+OUT = SITE / "raw"
 REUSE_HINT = "Prefer reusing existing project helpers over writing new ones."
 
 # ---- privacy -------------------------------------------------------------------------------------
@@ -78,8 +82,9 @@ GRADES: dict[str, dict] = {}
 def select_rows() -> list[dict]:
     rows = [json.loads(line) for line in open(RESULTS / "results.jsonl")]
     rows = [r for r in rows if r.get("backend") == "vllm" and r.get("model") == "Qwen/Qwen3.8-27B"]
-    final = {config_key(r): r for r in rows if r.get("thinking") and r.get("cold_start")}
-    pv = max((r.get("prompt_version", 1) for r in final.values()), default=3)
+    pv = max((r.get("prompt_version", 1) for r in rows), default=3)          # the round's prompt version
+    final = {config_key(r): r for r in rows if r.get("thinking") and r.get("cold_start")
+             and r.get("prompt_version", 1) == pv}
     nothink: dict[tuple, dict] = {}
     for r in rows:
         if r.get("thinking") or r.get("prompt_version", 1) != pv:
@@ -299,7 +304,7 @@ def main() -> int:
             leaks.append((f.name, m.group(0)))
     size = sum(f.stat().st_size for f in OUT.rglob("*.json"))
     rounds = {k: sum(m["round"] == k for m in index) for k in ("final", "nothink")}
-    print(f"{len(index)} runs ({rounds}), {size / 1e6:.1f} MB in {OUT.relative_to(ROOT)}")
+    print(f"{len(index)} runs ({rounds}), {size / 1e6:.1f} MB in {OUT}")
     if leaks:
         print(f"possible leaks: {len(leaks)}; first: {leaks[:5]}")
         return 1

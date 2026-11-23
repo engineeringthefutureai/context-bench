@@ -37,16 +37,17 @@ def e(x) -> str:
 def load():
     rows = [json.loads(line) for line in open(RESULTS / "results.jsonl")]
     grades = {}
-    for line in open(RESULTS / "grades.jsonl"):
+    for line in (open(RESULTS / "grades.jsonl") if (RESULTS / "grades.jsonl").exists() else []):
         g = json.loads(line)
         if str(g.get("rubric_version")) == "2":
             grades[g["run_id"]] = g
     key = lambda r: (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
                      r["repo_size"], bool(r.get("map_docs")))
-    final = {key(r): r for r in rows if r.get("thinking") and r.get("cold_start") and r.get("prompt_version") == 3}
+    pv = max((r.get("prompt_version", 1) for r in rows), default=3)          # the round's prompt version
+    final = {key(r): r for r in rows if r.get("thinking") and r.get("cold_start") and r.get("prompt_version") == pv}
     off = {}
     for r in rows:
-        if not r.get("thinking") and r.get("prompt_version") == 3 and not (r["level"] == "L7" and r.get("failed_call_cost") is None):
+        if not r.get("thinking") and r.get("prompt_version") == pv and not (r["level"] == "L7" and r.get("failed_call_cost") is None):
             off[key(r)] = r
     return final, off, grades
 
@@ -90,8 +91,38 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
             f'<span class="v">{counts.get("pass", 0)}/{n}{note}</span></div>')
 
 
+def build_progress(final: dict, off: dict) -> str:
+    """While a round is in progress (no final-round runs yet): outcomes so far per round and repo."""
+    def table(rows, title):
+        by = collections.defaultdict(collections.Counter)
+        for r in rows:
+            by[r["repo_size"]][outcome(r)] += 1
+        cols = ["PASS", "FAIL", "INVALID", "OUT OF TOKENS", "NO FIT"]
+        body = "".join(f"<tr><td>{s}</td>" + "".join(f"<td class=r>{c[k]}</td>" for k in cols)
+                       + f"<td class=r>{sum(c.values())}</td></tr>" for s, c in sorted(by.items()))
+        return (f"<h3>{e(title)}</h3><div class=table-wrap><table><thead><tr><th>Repo</th>"
+                + "".join(f"<th class=r>{k}</th>" for k in cols) + "<th class=r>Runs</th></tr></thead>"
+                f"<tbody>{body or '<tr><td colspan=7>none yet</td></tr>'}</tbody></table></div>")
+    return HEAD + f"""
+<main>
+  <header style="display:grid;gap:12px">
+    <div class="eyebrow">Round in progress · preview</div>
+    <h1>How context building affects generated code</h1>
+    <p class="lede">The current round is still running. This page shows what has been recorded so far; the
+    full write-up comes when the clean thinking-on round is done. Browse the runs in the raw-data viewer.</p>
+  </header>
+  <section>
+    {table(list(off.values()), "Thinking off (4 at a time)")}
+    {table(list(final.values()), "Final round (thinking on, cold cache)")}
+    <p class="small">Outcomes as defined on the Method page. Configurations still to run aren't shown.</p>
+  </section>
+""" + FOOT
+
+
 def build() -> str:
     final, off, grades = load()
+    if not final:
+        return build_progress(final, off)
     F = list(final.values())
     common = [k for k in final if k in off]
     by = collections.defaultdict(list)
@@ -444,5 +475,7 @@ def head_foot():
 HEAD, FOOT = head_foot()
 
 if __name__ == "__main__":
-    (ROOT / "docs" / "index.html").write_text(build())
-    print("wrote docs/index.html")
+    site = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--out=")), ROOT / "docs"))
+    site = site if site.is_absolute() else ROOT / site
+    (site / "index.html").write_text(build())
+    print(f"wrote {site / 'index.html'}")
