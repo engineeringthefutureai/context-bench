@@ -96,8 +96,9 @@ class Experiment:
     def retrievers(self) -> dict:
         """Retriever name -> factory. "embed" uses the configured embedder and query_prefix."""
         prefix = self.config.get("embedder", {}).get("query_prefix", "")
+        doc_prefix = self.config.get("embedder", {}).get("document_prefix", "")
         return {"bm25": BM25Retriever,
-                "embed": lambda: EmbeddingRetriever(self.embedder(), query_prefix=prefix)}
+                "embed": lambda: EmbeddingRetriever(self.embedder(), query_prefix=prefix, document_prefix=doc_prefix)}
 
     def _path(self, p: str) -> Path:
         return Path(p) if Path(p).is_absolute() else self.root / p
@@ -539,7 +540,7 @@ class Experiment:
         # results/sweep_status.json: what this sweep still has queued and what is running now, for the
         # in-progress page (scripts/build_report.py). Rewritten on every change, removed at the end.
         status_path = self.results_path.parent / "sweep_status.json"
-        status = {"pid": os.getpid(), "started_at": _now(),
+        status = {"pid": os.getpid(), "started_at": _now(), "clean": clean,
                   "runs": {rc.run_id: {**{k: v for k, v in asdict(rc).items()
                                           if k in ("task_id", "level", "retriever", "query_mode", "agent_variant",
                                                    "map_docs", "prompt_arm", "repo_size", "thinking",

@@ -12,16 +12,18 @@ from ..embedders import Embedder
 class EmbeddingRetriever:
     name = "embed"
 
-    def __init__(self, embedder: Embedder, query_prefix: str = ""):
-        """query_prefix goes in front of every query, not of documents (e.g. the instruction
-        format some embedding models are trained with)."""
-        self.embedder, self.query_prefix = embedder, query_prefix
+    def __init__(self, embedder: Embedder, query_prefix: str = "", document_prefix: str = ""):
+        """query_prefix goes in front of every query and document_prefix in front of every indexed text
+        (the task formats embedding models are trained with: Qwen3-Embedding instructs queries only,
+        EmbeddingGemma prefixes both sides)."""
+        self.embedder, self.query_prefix, self.document_prefix = embedder, query_prefix, document_prefix
         self.ids: list[str] = []
         self.vectors = np.zeros((0, 0), dtype=np.float32)
 
     def index(self, ids: Sequence[str], texts: Sequence[str]) -> None:
         self.ids = list(ids)
-        self.vectors = self.embedder.embed(list(texts)) if texts else np.zeros((0, 0), dtype=np.float32)
+        self.vectors = (self.embedder.embed([self.document_prefix + t for t in texts]) if texts
+                        else np.zeros((0, 0), dtype=np.float32))
 
     def search(self, query: str, k: int) -> list[tuple[str, float]]:
         """Top-k by cosine (vectors are normalised); ties keep index order."""

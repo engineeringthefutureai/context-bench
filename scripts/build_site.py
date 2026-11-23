@@ -48,7 +48,7 @@ def scrub(text: str | None) -> str | None:
 # ---- which runs ----------------------------------------------------------------------------------
 def config_key(r: dict) -> tuple:
     return (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
-            r["repo_size"], bool(r.get("map_docs")))
+            r["repo_size"], bool(r.get("map_docs")), bool(r.get("thinking")))   # thinking: the L7 thinking arm
 
 
 def level_label(r: dict) -> str:
@@ -61,6 +61,8 @@ def level_label(r: dict) -> str:
         s += " " + r["agent_variant"]
     if r["prompt_arm"] == "reuse_hint":
         s += " +hint"
+    if r.get("thinking") and not r.get("cold_start"):     # a thinking arm of the thinking-off round
+        s += " thinking"
     return s
 
 
@@ -101,8 +103,8 @@ def select_rows() -> list[dict]:
              and r.get("prompt_version", 1) == pv}
     nothink: dict[tuple, dict] = {}
     for r in rows:
-        if r.get("thinking") or r.get("prompt_version", 1) != pv:
-            continue
+        if (r.get("thinking") and r.get("cold_start")) or r.get("prompt_version", 1) != pv:
+            continue                                                 # the final round is taken above
         if r["level"] == "L7" and r.get("failed_call_cost") is None:
             continue                                                 # original harness (" h1")
         nothink[config_key(r)] = r                                   # latest row per configuration

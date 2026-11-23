@@ -94,6 +94,9 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
             f'<span class="v">{counts.get("pass", 0)}/{n}{note}</span></div>')
 
 
+PROMPT_VERSION_DEFAULT = 4
+
+
 def sweep_status() -> dict | None:
     """results/sweep_status.json (written by cbench run), only while its sweep process is alive."""
     path = RESULTS / "sweep_status.json"
@@ -110,11 +113,21 @@ def build_progress(final: dict, off: dict) -> str:
     recorded so far plus what the running sweep has in progress and queued; then outcomes per repo."""
     status = sweep_status()
     pending = collections.defaultdict(collections.Counter)      # (round, label) -> running / queued
+    rnd_live = "final" if (status or {}).get("clean") else "off"  # a clean sweep is the final round
     for r in (status or {}).get("runs", {}).values():
-        rnd = "final" if r.get("thinking") else "off"
-        pending[rnd, level_label(r)][r["state"]] += 1
+        lab = level_label({**r, "cold_start": rnd_live == "final"})     # a thinking arm gets " thinking"
+        pending[rnd_live, lab][r["state"]] += 1
+    # thinking arms of the thinking-off round (e.g. L7 grep thinking): their own bars
+    pv = max((r.get("prompt_version", 1) for r in off.values()), default=PROMPT_VERSION_DEFAULT)
+    arm = {}
+    for line in open(RESULTS / "results.jsonl"):
+        r = json.loads(line)
+        if r.get("thinking") and not r.get("cold_start") and r.get("prompt_version") == pv:
+            arm[r["run_id"]] = r
 
     def bars(rows, rnd, title):
+        """One bar per configuration (all repos together), on a common scale: recorded outcomes plus what
+        the running sweep has in progress and queued."""
         by = collections.defaultdict(list)
         for r in rows:
             by[level_label(r)].append(r)
@@ -174,10 +187,11 @@ def build_progress(final: dict, off: dict) -> str:
     <h2>Per configuration</h2>
     {live}
     {legend}
-    {bars(list(off.values()), "off", "Thinking off")}
+    {bars(list(off.values()) + list(arm.values()), "off", "Thinking off")}
     {bars(list(final.values()), "final", "Final round (thinking on, cold cache)")}
-    <p class="small">Each bar is one configuration, on a common scale; its length is the runs recorded plus the
-    ones the running sweep still has. The number is PASS out of that total. Outcomes as defined on the Method page.</p>
+    <p class="small">Each bar is one configuration, all repos together, on a common scale: the runs recorded plus
+    the ones the running sweep still has. The number is PASS out of that total. Outcomes as defined on the
+    Method page.</p>
   </section>
   <section>
     <h2>Per repo</h2>

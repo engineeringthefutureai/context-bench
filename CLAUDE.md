@@ -195,7 +195,9 @@ target file left out, recall@1/3/8 split by naming, the first decoy that outrank
 indexed as `chunk_text` (path, qualname, source), the same text L5 searches. Embeddings: `embedders.py`
 (any `/v1/embeddings` endpoint, cached on disk per content under `.cache/embeddings/`) and
 `retrieval/dense.py` (brute-force cosine, `query_prefix` on queries only); `[embedder]` points at
-Ollama on the iGPU (`qwen3-embedding:0.6b`). L4 implements both retrievers (whole files indexed as `file_text`, like validate-retrieval). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L7 `grep`
+Ollama on the iGPU: `embeddinggemma-2` from 2026-11-23 (task prefixes on queries and documents:
+`query_prefix`, `document_prefix`; on repo M about as good as `qwen3-embedding:0.6b`, used before: func@8 7/12
+vs 8/12, file@8 9/12 vs 8/12). L4 implements both retrievers (whole files indexed as `file_text`, like validate-retrieval). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L7 `grep`
 and `hybrid`; other L5 modes raise NotImplementedError, and the sweep skips that
 variant only (level + retriever + query mode + agent variant), not its siblings.
 
@@ -263,4 +265,4 @@ cbench report
 ```
 Model under test: Qwen 3.8 27B. Results so far come from the FP8 build on vLLM (`[models."qwen3.8-27b-fp8"]`,
 2x B60, TP=2, 4 concurrent requests): pass `--model qwen3.8-27b-fp8`, since the default entry is the
-llama.cpp GGUF (`Qwen3.8-27B-UD-Q6_K_XL.gguf`, KV cache q8_0). Embedder: Ollama on the iGPU, port 21434.
+llama.cpp GGUF (`Qwen3.8-27B-UD-Q6_K_XL.gguf`, KV cache q8_0). Embedder: Ollama on the iGPU, port 21434 (`embeddinggemma-2`).
