@@ -149,6 +149,8 @@
       ["round", m.round === "final" ? "final (thinking, cold)" : "thinking off"],
       ["tests", frac(m.tests_passed, m.tests_total)], ["reuse", yn(m.reuse_passed)],
       ["repo tests", frac(m.repo_tests_passed, m.repo_tests_total)], ["format", m.format_status],
+      ["patch run by tests", m.patch_coverage == null ? "–" : `${Math.round(100 * m.patch_coverage)}% of ${m.patch_stmts}`],
+      ["tests added", m.tests_added ?? "–"],
       ["in", fmt(m.tokens_in)], ["cached", fmt(m.tokens_cached)], ["out", fmt(m.tokens_out)],
       ["sec", m.latency_s == null ? "–" : Math.round(m.latency_s)], ["tools", m.tool_calls ?? 0],
       ["helper seen", m.helper_body_in_context ? "body" : m.helper_in_context ? "signature" : "no"],

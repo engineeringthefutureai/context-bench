@@ -1,4 +1,4 @@
-<!-- rubric_version: 1 -->
+<!-- rubric_version: 2 -->
 # Compare candidate changes
 
 Several candidate changes were written independently for the same task in the same repository.
@@ -13,6 +13,9 @@ You can read and search files. Don't run anything.
 Score every candidate 1-5 on each dimension, comparing them against each other:
 
 - **correctness**: does what the task asks, including edge cases it implies; doesn't break anything.
+  The hidden tests check only part of the behaviour, so read every piece of new logic, including code
+  the tests may never run (helpers, branches, other files the candidate changed), and lower the score
+  for code that looks wrong there. Mention it in the note.
 - **reuse**: uses existing project code where it fits instead of re-implementing it.
 - **conventions**: follows how this repo already does things.
 - **scope**: changes what the task needs and nothing else.

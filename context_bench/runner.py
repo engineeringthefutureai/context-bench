@@ -40,7 +40,9 @@ from .levels import LEVELS
 from .levels.l7_agentic import (SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
                                 tool_schemas, turn_prompts)
 from .llm import ChatResult, OpenAICompatClient, env_value
-from .metrics import dead_modules, legacy_ctx_share, legacy_used, usage_visible
+from .metrics import (dead_modules, legacy_ctx_share, legacy_used, relevant_files, tool_output_breakdown,
+                      usage_visible)
+from .evaluate.patch_coverage import patch_coverage, tests_added
 from .prompt import PROMPT_VERSION, render
 from .embedders import CachedEmbedder, OpenAICompatEmbedder
 from .retrieval.bm25 import BM25Retriever
@@ -291,6 +293,11 @@ class Experiment:
                 r_passed, r_total, r_out = run_repo_tests(sandbox, self.shared_dir)
                 perf.update(repo_tests_passed=r_passed, repo_tests_total=r_total)
                 tests_out += "\n--- repo's own tests ---\n" + r_out
+                if patch is not None:
+                    perf.update(patch_coverage(sandbox, task.hidden_tests, self.shared_dir, before, files),
+                                **tests_added(before, files))
+        if agent:
+            perf.update(tool_output_breakdown(agent.transcript, relevant_files(files, list(ws.files))))
         perf.update(self._protocol(task, rc.repo_size, chat.content, files))
         if chat.tool_calls and not files:       # the server parsed pretend tool calls out of the text
             perf["format_status"] = "tool_request"
@@ -370,9 +377,31 @@ class Experiment:
                                             patch_file.read_text() if patch_file.is_file() else None))
             if "repo_tests_total" not in r:
                 r.update(self._repo_tests(r["repo_size"], files))
+            if "patch_coverage" not in r:
+                r.update(self._patch_checks(task, r["repo_size"], files))
+            transcript_file = self.runs_dir / r["run_id"] / "transcript.jsonl"
+            if r["level"] == "L7" and "tool_out_chars" not in r and transcript_file.is_file():
+                tr = [json.loads(line) for line in transcript_file.read_text().splitlines() if line.strip()]
+                repo_files = list(workspaces[r["repo_size"]].files)
+                r.update(tool_output_breakdown(tr, relevant_files(files, repo_files)))
             n += 1
         results.rewrite(self.results_path, rows)
         return n
+
+    def _patch_checks(self, task: Task, repo_size: str, files: dict[str, str]) -> dict:
+        """patch_coverage and tests_added for a saved reply (a fresh sandbox; None without file blocks)."""
+        empty = dict.fromkeys(("patch_stmts", "patch_stmts_covered", "patch_coverage", "tests_added",
+                               "test_files_changed"))
+        if not files:
+            return empty
+        with tempfile.TemporaryDirectory(prefix="cbench-cover-") as tmp:
+            box = make_sandbox(self._path(self.config["repos"][repo_size]), Path(tmp) / "repo")
+            try:
+                before = apply_files(box, files)
+            except UnsafePath:
+                return empty
+            return {**patch_coverage(box, task.hidden_tests, self.shared_dir, before, files),
+                    **tests_added(before, files)}
 
     def _repo_tests(self, repo_size: str, files: dict[str, str]) -> dict:
         """repo_tests_passed/total for a saved reply: apply its <file> blocks to a fresh sandbox and run

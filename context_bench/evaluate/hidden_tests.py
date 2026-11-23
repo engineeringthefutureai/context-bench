@@ -41,9 +41,10 @@ def run_repo_tests(sandbox: Path, shared_dir: Path, timeout: int = 120) -> tuple
     return _pytest(sandbox, shared_dir, timeout, [str(tests)])
 
 
-def _pytest(sandbox: Path, shared_dir: Path, timeout: int, args: list[str]) -> tuple[int, int, str]:
+def _pytest(sandbox: Path, shared_dir: Path, timeout: int, args: list[str],
+            extra_env: dict[str, str] | None = None) -> tuple[int, int, str]:
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(sandbox), str(shared_dir)]),
-           "PYTHONDONTWRITEBYTECODE": "1"}
+           "PYTHONDONTWRITEBYTECODE": "1", **(extra_env or {})}
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "report.xml"
         empty_ini = Path(tmp) / "pytest.ini"

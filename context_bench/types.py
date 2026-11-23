@@ -162,6 +162,20 @@ class RunResult:
     # regression check (added 2026-11-21; backfilled by cbench rescore). Label unaffected.
     repo_tests_passed: int | None = None  # the repo's own tests/ after the patch; None: no <file> blocks
     repo_tests_total: int | None = None
+    # what the hidden tests verify of the patch (added 2026-11-22; backfilled by cbench rescore)
+    patch_stmts: int | None = None      # statements the patch changed/added outside test files
+    patch_stmts_covered: int | None = None  # of those, run by the hidden tests (correctness + reuse)
+    patch_coverage: float | None = None # covered / stmts (None: no statements changed outside tests)
+    tests_added: int | None = None      # new test functions the patch adds (the prompt never asks)
+    test_files_changed: int | None = None
+    # L7: what the tool output was made of (characters; added 2026-11-22; backfilled by cbench rescore)
+    tool_out_chars: int | None = None
+    read_whole_chars: int | None = None # read_file of a whole file
+    read_part_chars: int | None = None  # ranged read_file, read_symbol
+    search_chars: int | None = None     # semantic_search
+    other_tool_chars: int | None = None # grep, list_files, find_references, drop replies, errors
+    code_relevant_chars: int | None = None  # code from files the patch changed or imports from
+    code_other_chars: int | None = None     # code from every other file
     # L7 selective (added 2026-11-22; None for other variants)
     drops: int | None = None            # tool results dropped (live tail only)
     drop_calls: int | None = None

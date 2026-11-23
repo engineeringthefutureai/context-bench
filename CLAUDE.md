@@ -122,6 +122,12 @@ tool error), OUT OF TOKENS (hit max output), NO FIT. Never "broken" in reader-fa
 Regression check, also separate: `repo_tests_passed/total` = the repo's own `tests/` after the patch
 (catches patches that pass the hidden tests while breaking or deleting code elsewhere; `cbench rescore`
 backfills it from saved replies). Every task's reference solution keeps them green.
+Patch coverage, also separate (`evaluate/patch_coverage.py`, stdlib line tracing, backfilled by rescore):
+`patch_stmts` / `patch_stmts_covered` / `patch_coverage` = the patch's changed statements outside test
+files that the hidden tests ran (a PASS with low coverage = much of the new code unverified; every
+reference solution is at 100%). `tests_added` / `test_files_changed`: tests the patch adds (descriptive;
+the prompt never asks for tests). Rubric v2 (2026-11-22, before the final round's grading) asks the judge
+to read new logic the tests may not run; never compare grades across rubric versions.
 Reuse is a separate field, `reuse_passed` (reuse tasks only): each reuse task has
 `hidden_tests/test_reuse.py`, which spies on the needed helper (`tasks/_shared/reuse_spy.py`) and checks
 the new code really calls it. It is reported apart from the correctness tests, so "correct but

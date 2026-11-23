@@ -85,3 +85,71 @@ def legacy_used(patch: str, modules: list[str]) -> bool:
                     pkg and re.search(rf"\bfrom\s+{re.escape(pkg)}\s+import\b.*\b{re.escape(leaf)}\b", line)):
                 return True
     return False
+
+
+# ---- L7: what the tool output was made of ------------------------------------------------------------
+# a block header: a definition hit ("path:a-b  qualname") or a file's imports ("Imports of path:")
+_HIT = re.compile(r"^(?:\[#\d+\] [^\n]*\n)?(?:Imports of (\S+\.py):|(\S+\.py):\d+-\d+  \S)", re.M)
+
+
+def relevant_files(files: dict[str, str], repo_files: list[str]) -> set[str]:
+    """Files the patch changed, plus repo modules the changed code imports: what the change was built on."""
+    import ast
+    by_module = {module_name(p): p for p in repo_files if p.endswith(".py")}
+    out = set(files)
+    for rel, src in files.items():
+        if not rel.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+            for n in names:
+                if n in by_module:
+                    out.add(by_module[n])
+    return out
+
+
+def tool_output_breakdown(transcript: list[dict], relevant: set[str]) -> dict:
+    """Characters of L7 tool output (a proxy for tokens) by kind and by relevance, from a saved transcript.
+
+    Kinds: whole-file reads (read_file without a range, or a range covering the whole file),
+    partial reads (ranged read_file, read_symbol), search (semantic_search), other (grep, list_files,
+    find_references, drop replies, errors). Code from read_file / read_symbol / semantic_search is
+    attributed to its file; `relevant` (relevant_files) splits it into code the change was built on and
+    everything else. Original results count, also when selective dropped them later."""
+    calls = {c["id"]: (c["function"]["name"], c["function"].get("arguments") or "{}")
+             for m in transcript for c in (m.get("tool_calls") or [])}
+    out = dict.fromkeys(("tool_out_chars", "read_whole_chars", "read_part_chars", "search_chars",
+                         "other_tool_chars", "code_relevant_chars", "code_other_chars"), 0)
+    for m in transcript:
+        if m.get("role") != "tool":
+            continue
+        text = m.get("content") or ""
+        out["tool_out_chars"] += len(text)
+        name, raw = calls.get(m.get("tool_call_id"), ("?", "{}"))
+        if "error:" in text[:200] or name not in ("read_file", "read_symbol", "semantic_search"):
+            out["other_tool_chars"] += len(text)
+            continue
+        if name == "read_file":
+            whole = re.search(r"^File: \S+(?: \(lines 1-(\d+) of (\d+)\)| \(empty file\))?$", text, re.M)
+            is_whole = bool(whole) and (whole.group(1) is None or whole.group(1) == whole.group(2))
+            out["read_whole_chars" if is_whole else "read_part_chars"] += len(text)
+            path = (re.search(r"^File: (\S+)", text, re.M) or [None, None])[1]
+            blocks = [(path, text)]
+        else:
+            out["read_part_chars" if name == "read_symbol" else "search_chars"] += len(text)
+            starts = [(mm.start(), mm.group(1) or mm.group(2)) for mm in _HIT.finditer(text)]
+            blocks = [(p, text[s:(starts[i + 1][0] if i + 1 < len(starts) else len(text))])
+                      for i, (s, p) in enumerate(starts)]
+            if not starts:
+                blocks = [(None, text)]
+        for path, chunk in blocks:
+            out["code_relevant_chars" if path in relevant else "code_other_chars"] += len(chunk)
+    return out

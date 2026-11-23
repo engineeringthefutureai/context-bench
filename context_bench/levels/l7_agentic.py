@@ -402,6 +402,10 @@ class RepoTools:
         rel = p.relative_to(self.root.resolve()).as_posix()
         lines = p.read_text().splitlines()
         n = len(lines)
+        if n == 0:
+            self.last_segments = [{"kind": "code", "file": rel, "label": f"read_file {rel}", "provides_imports": True,
+                                   "text": f"File: {rel} (empty file)"}]
+            return f"File: {rel} (empty file)"
         s = 1 if start is None else int(start)
         e = n if end is None else int(end)
         if s < 1 or e < s:
@@ -771,15 +775,21 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                     if not isinstance(ids, list) or not ids or not all(isinstance(i, int) for i in ids):
                         raise ValueError("ids must be a list of result IDs")
                     imp = [i for i in ids if i in segs and segs[i]["kind"] == "imports"]
+                    bad = [i for i in ids if i not in imp and (i not in droppable or segs[i]["dropped"])]
+                    now = ", ".join(f"#{i}" for i in sorted(droppable)
+                                    if not segs[i]["dropped"] and segs[i]["kind"] != "imports")
+                    notes = []
                     if imp:
-                        raise ValueError(f"#{imp[0]} is a file's imports; they leave with the last code from "
-                                         "that file")
-                    bad = [i for i in ids if i not in droppable or segs[i]["dropped"]]
+                        notes.append(f"{', '.join(f'#{i}' for i in imp)}: a file's imports leave with the last "
+                                     "code from that file")
                     if bad:
-                        now = ", ".join(f"#{i}" for i in sorted(droppable)
-                                        if not segs[i]["dropped"] and segs[i]["kind"] != "imports")
-                        raise ValueError(f"can't drop {', '.join(f'#{i}' for i in bad)}: only results of "
-                                         f"your latest tool calls can be dropped (now: {now or 'none'})")
+                        notes.append(f"can't drop {', '.join(f'#{i}' for i in bad)}: only results of your latest "
+                                     f"tool calls can be dropped (now: {now or 'none'})")
+                    refusal = "; ".join(notes)
+                    bad = imp + bad
+                    ids = [i for i in ids if i not in bad]
+                    if not ids:                      # nothing valid: a failed call
+                        raise ValueError(refusal)
                     touched, files, auto = set(), set(), []
                     for i in dict.fromkeys(ids):
                         sg = segs[i]
@@ -815,7 +825,8 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                     drops += len(dict.fromkeys(ids))
                     drop_calls += 1
                     text = "dropped " + ", ".join(f"#{i}" for i in dict.fromkeys(ids)) + (
-                        f" (and #{', #'.join(map(str, auto))}: imports no longer needed)" if auto else "")
+                        f" (and #{', #'.join(map(str, auto))}: imports no longer needed)" if auto else "") + (
+                        f"; {refusal}" if bad else "")
                     add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": text},
                         {"drop": records, "dropped_ids": list(dict.fromkeys(ids)) + auto})
                 except Exception as e:

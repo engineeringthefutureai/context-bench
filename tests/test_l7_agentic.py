@@ -317,7 +317,7 @@ def test_selective_imports_stay_while_any_code_from_the_file_does():
     assert "[#3] read_symbol shopkit.utils.dates.add_business_days" in msg
     # the model can't drop imports itself
     client, res = _sel([[three], [("drop", {"ids": [1]})], "final"])
-    assert "they leave with the last code from that file" in client.seen[2][0][-1]["content"] and res.drops == 0
+    assert "imports leave with the last code from that file" in client.seen[2][0][-1]["content"] and res.drops == 0
     # dropping all three takes the imports along (same batch); the next code from the file brings them back
     one = ("read_symbol", {"symbols": ["shopkit.utils.dates.iso_week_label"]})
     client, res = _sel([[three], [("drop", {"ids": [2, 3, 4]}), one], "final"])
@@ -351,3 +351,39 @@ def test_selective_measures_the_context_saved_by_drops():
     assert res.drop_saved_tokens == 2 * delta          # requests 3 and 4 were each that much smaller
     _, plain = _sel([[read], "final"])
     assert plain.dropped_tokens == 0 and plain.drop_saved_tokens == 0
+
+
+def test_rich_read_file_handles_empty_files_and_partial_drops_apply():
+    t = RepoTools(M, rich=True)
+    empty = next(p for p in sorted(M.rglob("__init__.py")) if not p.read_text().strip("\n"))
+    rel = empty.relative_to(M).as_posix()
+    assert t.call("read_file", {"path": rel}) == f"File: {rel} (empty file)"
+    assert t.call("read_file", {"path": rel, "start": 1, "end": 1}) == f"File: {rel} (empty file)"
+    # a drop mixing valid and invalid IDs drops the valid ones, reports the rest, and isn't a failed call
+    a = ("read_file", {"path": "shopkit/money.py"})
+    client, res = _sel([[a], [a], [("drop", {"ids": [1, 2]})], "final"])
+    reply = client.seen[3][0][-1]["content"]
+    assert reply.startswith("dropped #2") and "can't drop #1" in reply
+    assert res.drops == 1 and res.tool_errors == 0
+
+
+def test_tool_output_breakdown_by_kind_and_relevance():
+    from context_bench.metrics import relevant_files, tool_output_breakdown
+    t = RepoTools(M, rich=True)
+    whole = t.call("read_file", {"path": "shopkit/money.py"})
+    part = t.call("read_symbol", {"symbols": ["shopkit.utils.text.normalize_sku"]})
+    grep = t.call("grep", {"pattern": "def format_money"})
+    tr = [{"role": "assistant", "content": "", "tool_calls": [
+              {"id": "a", "function": {"name": "read_file", "arguments": '{"path": "shopkit/money.py"}'}},
+              {"id": "b", "function": {"name": "read_symbol", "arguments": "{}"}},
+              {"id": "c", "function": {"name": "grep", "arguments": "{}"}}]},
+          {"role": "tool", "tool_call_id": "a", "content": whole},
+          {"role": "tool", "tool_call_id": "b", "content": part},
+          {"role": "tool", "tool_call_id": "c", "content": grep}]
+    patch = {"shopkit/orders/export.py": "from shopkit.money import format_money\n\ndef f():\n    return 1\n"}
+    rel = relevant_files(patch, list(load_workspace(M).files))
+    assert rel == {"shopkit/orders/export.py", "shopkit/money.py"}
+    b = tool_output_breakdown(tr, rel)
+    assert b["read_whole_chars"] == len(whole) and b["read_part_chars"] == len(part)
+    assert b["other_tool_chars"] == len(grep) and b["tool_out_chars"] == len(whole) + len(part) + len(grep)
+    assert b["code_relevant_chars"] == len(whole) and b["code_other_chars"] == len(part)
