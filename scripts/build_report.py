@@ -71,12 +71,19 @@ def link(run_id: str, text: str) -> str:
     return f'<a href="data#round=all&a={e(run_id)}">{e(text)}</a>'
 
 
-def obar(label: str, counts: dict, n: int, cls: str = "") -> str:
+def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str:
+    """One configuration's outcomes on a common scale: slots for tasks this level doesn't run (L0 runs only
+    the tier-1 tasks, L1-L2 each task once on its smallest repo) are drawn as "not run", so a bar's
+    length is comparable across levels."""
+    not_run = max(scale - n, 0)
     parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{k}: {counts.get(k, 0)}"></span>'
                     for k in ("pass", "fail", "invalid", "oot") if counts.get(k))
+    if not_run:
+        parts += f'<span class="o-na" style="flex:{not_run}" title="not run at this level: {not_run}"></span>'
+    note = f' <span class="small">({not_run} n/a)</span>' if not_run else ""
     return (f'<div class="obar {cls}"><span class="lab">{e(label)}</span><span class="track" role="img" '
-            f'aria-label="{e(label)}: {counts.get("pass", 0)} of {n} pass">{parts}</span>'
-            f'<span class="v">{counts.get("pass", 0)}/{n}</span></div>')
+            f'aria-label="{e(label)}: {counts.get("pass", 0)} of {n} pass, {not_run} not run">{parts}</span>'
+            f'<span class="v">{counts.get("pass", 0)}/{n}{note}</span></div>')
 
 
 def build() -> str:
@@ -92,13 +99,14 @@ def build() -> str:
 
     # ---- per level rows
     rows_html, bars = [], []
+    scale = max(len(by[name]) for name in order)
     for i, name in enumerate(order):
         xs = by[name]
         oc = collections.Counter(outcome(r) for r in xs)
         counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"]}
         group = name.split()[0].replace("+docs", "")
         prev = order[i - 1].split()[0].replace("+docs", "") if i else group
-        bars.append(obar(name, counts, len(xs), "group-start" if group != prev else ""))
+        bars.append(obar(name, counts, len(xs), "group-start" if group != prev else "", scale=scale))
         reuse = [r["reuse_passed"] for r in xs if r.get("reuse_passed") is not None]
         ok = [r for r in xs if r["label"] == "ok"]
         kept = sum(1 for r in ok if r.get("repo_tests_total") and r["repo_tests_passed"] == r["repo_tests_total"])
@@ -252,7 +260,8 @@ def build() -> str:
     <h2>Pass rate by context level</h2>
     <p class="prose">Every bar is one configuration over its tasks (27 runs = the 20 tasks, 7 of them on both repos; L0 and L1-L2 run
     each task once, on its smallest repo). <span class="num-good">PASS</span>: a valid answer and every hidden test passes. <span class="num-bad">FAIL</span>:
-    a valid answer, a hidden test fails. Grey: no accepted answer, or the output limit was hit.</p>
+    a valid answer, a hidden test fails. Grey: no accepted answer, or the output limit was hit. Hatched (n/a):
+    tasks the level doesn't run, so every bar is on the same scale.</p>
     <div class="obars">{''.join(bars)}</div>
     <div class="table-wrap"><table>
       <thead><tr><th>Configuration</th><th class=r>Runs</th><th class=r>PASS</th><th class=r>Reuse</th><th class=r>Repo tests kept</th>
