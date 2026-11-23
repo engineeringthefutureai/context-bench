@@ -141,7 +141,8 @@
       }
       const calls = (m.tool_calls || []).map((c) => `<div class="call"><b>${esc(c.name)}</b> ${esc(c.arguments)}</div>`).join("");
       const body = (m.content || "").trim() ? `<pre class="block">${esc(m.content.trim())}</pre>` : "";
-      return `<div class="turn"><div class="who">Model${m.finish_reason ? ` · ${esc(m.finish_reason)}` : ""}</div>${body}${calls}</div>`;
+      const thought = m.reasoning ? `<details class="seg k-closing"><summary><span class="lab">Thinking</span><span class="sz">≈${fmt(tok(m.reasoning.length))} tok</span></summary><pre>${esc(m.reasoning)}</pre></details>` : "";
+      return `<div class="turn"><div class="who">Model${m.finish_reason ? ` · ${esc(m.finish_reason)}` : ""}</div>${thought}${body}${calls}</div>`;
     }).join("") + `</div>`;
   }
 

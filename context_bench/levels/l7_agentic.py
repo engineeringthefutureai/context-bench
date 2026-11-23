@@ -720,7 +720,7 @@ def turn_prompts(messages: list[dict], transcript: list[dict]) -> list[tuple[lis
             out.append((list(msgs), msgs[-1].get("content") != BUDGET_SPENT))
         for d in m.get("drop") or []:
             msgs[d["index"]] = {**msgs[d["index"]], "content": d["content"]}
-        msgs.append({k: v for k, v in m.items() if k not in ("drop", "dropped_ids", "result_ids")})
+        msgs.append({k: v for k, v in m.items() if k not in ("drop", "dropped_ids", "result_ids", "reasoning")})
     return out
 
 
@@ -863,7 +863,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
         peak = max(peak, chat.tokens_in)
         if chat.reasoning:
             reasoning.append(chat.reasoning)
-        add(_assistant_message(chat))
+        # this turn's reasoning goes into the saved transcript only (the model never gets earlier turns'
+        # thinking back), so a run can be read step by step: thought -> calls -> results
+        add(_assistant_message(chat), {"reasoning": chat.reasoning} if chat.reasoning else None)
         if (feedback and offer and not chat.tool_calls and "<file" not in chat.content
                 and _TEXT_CALL.search(chat.content)):
             add({"role": "user", "content": UNPARSED_CALL})

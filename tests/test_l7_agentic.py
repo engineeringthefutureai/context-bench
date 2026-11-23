@@ -469,3 +469,22 @@ def test_v4_refunds_are_capped():
     script.append("final")
     _, res = _sel4(script)
     assert res.drop_refunds == 8 and res.budget_used == 10 - 2.0
+
+
+def test_each_turns_reasoning_is_saved_but_never_sent_back():
+    from context_bench.levels.l7_agentic import turn_prompts
+
+    class Thinking(FakeClient):
+        def chat(self, msgs, **kw):
+            res = super().chat(msgs, **kw)
+            res.reasoning = f"thought {len(self.seen)}"
+            return res
+
+    client = Thinking([[("grep", {"pattern": "def format_money"})], "final"])
+    base = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    res = run_agent(client, base, RepoTools(M), agent_variant="grep", temperature=None, seed=1, max_tokens=100,
+                    context_window=100_000, failed_call_cost=0.5)
+    turns = [m for m in res.transcript if m["role"] == "assistant"]
+    assert [m.get("reasoning") for m in turns] == ["thought 1", "thought 2"]
+    assert all("reasoning" not in m for m in client.seen[1][0])                 # not sent to the model
+    assert all("reasoning" not in m for m in turn_prompts(base, res.transcript)[1][0])

@@ -16,6 +16,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# which round's data: results/ (the current round) or an archive, e.g. results/archive-v3
+RESULTS = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--results=")), ROOT / "results"))
+if not RESULTS.is_absolute():
+    RESULTS = ROOT / RESULTS
 sys.path.insert(0, str(ROOT / "scripts"))
 from build_site import level_label, outcome  # noqa: E402
 
@@ -31,9 +35,9 @@ def e(x) -> str:
 
 
 def load():
-    rows = [json.loads(line) for line in open(ROOT / "results" / "results.jsonl")]
+    rows = [json.loads(line) for line in open(RESULTS / "results.jsonl")]
     grades = {}
-    for line in open(ROOT / "results" / "grades.jsonl"):
+    for line in open(RESULTS / "grades.jsonl"):
         g = json.loads(line)
         if str(g.get("rubric_version")) == "2":
             grades[g["run_id"]] = g
@@ -53,7 +57,7 @@ def classify(r) -> str:
     if r.get("format_status") != "ok" or r["label"] == "tool_error":
         return "invalid"
     try:
-        t = (ROOT / "results" / "runs" / r["run_id"] / "tests.txt").read_text()
+        t = (RESULTS / "runs" / r["run_id"] / "tests.txt").read_text()
     except FileNotFoundError:
         t = ""
     if "SyntaxError" in t or "IndentationError" in t or ("error during collection" in t and r["tests_passed"] == 0):
@@ -206,7 +210,7 @@ def build() -> str:
     sel_in = sum(r["tokens_in"] for r in sel)
     calls = collections.Counter()
     for r in [r for r in F if r["level"] == "L7" and r["agent_variant"] in ("rich", "selective")]:
-        p = ROOT / "results" / "runs" / r["run_id"] / "transcript.jsonl"
+        p = RESULTS / "runs" / r["run_id"] / "transcript.jsonl"
         if p.exists():
             for line in p.open():
                 m = json.loads(line)

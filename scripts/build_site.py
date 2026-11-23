@@ -16,6 +16,10 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# which round's data: results/ (the current round) or an archive, e.g. results/archive-v3
+RESULTS = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--results=")), ROOT / "results"))
+if not RESULTS.is_absolute():
+    RESULTS = ROOT / RESULTS
 OUT = ROOT / "docs" / "raw"
 REUSE_HINT = "Prefer reusing existing project helpers over writing new ones."
 
@@ -58,7 +62,7 @@ def level_label(r: dict) -> str:
 
 def load_grades() -> dict[str, dict]:
     """Latest rubric-v2 grade per run (rank and scores from the blind comparison judge)."""
-    path = ROOT / "results" / "grades.jsonl"
+    path = RESULTS / "grades.jsonl"
     out: dict[str, dict] = {}
     if path.exists():
         for line in path.open():
@@ -72,7 +76,7 @@ GRADES: dict[str, dict] = {}
 
 
 def select_rows() -> list[dict]:
-    rows = [json.loads(line) for line in open(ROOT / "results" / "results.jsonl")]
+    rows = [json.loads(line) for line in open(RESULTS / "results.jsonl")]
     rows = [r for r in rows if r.get("backend") == "vllm" and r.get("model") == "Qwen/Qwen3.8-27B"]
     final = {config_key(r): r for r in rows if r.get("thinking") and r.get("cold_start")}
     pv = max((r.get("prompt_version", 1) for r in final.values()), default=3)
@@ -84,7 +88,7 @@ def select_rows() -> list[dict]:
             continue                                                 # original harness (" h1")
         nothink[config_key(r)] = r                                   # latest row per configuration
     out = [dict(r, round="final") for r in final.values()] + [dict(r, round="nothink") for r in nothink.values()]
-    return [r for r in out if (ROOT / "results" / "runs" / r["run_id"]).is_dir()]
+    return [r for r in out if (RESULTS / "runs" / r["run_id"]).is_dir()]
 
 
 # ---- prompt segmentation -------------------------------------------------------------------------
@@ -196,7 +200,7 @@ def read(p: Path) -> str | None:
 
 
 def run_payload(r: dict) -> dict:
-    d = ROOT / "results" / "runs" / r["run_id"]
+    d = RESULTS / "runs" / r["run_id"]
     target = r.get("target_file")
     prompt = json.loads(read(d / "prompt.json") or "[]")
     system = next((m["content"] for m in prompt if m["role"] == "system"), "")
@@ -216,6 +220,8 @@ def run_payload(r: dict) -> dict:
                                    "queries": t.get("queries"), "hits": t.get("hits")})
                 continue
             item = {"role": t["role"], "content": scrub(t.get("content") or "")}
+            if t.get("reasoning"):                                   # per-turn thinking (L7, from 2026-11-23)
+                item["reasoning"] = scrub(t["reasoning"])
             if t.get("tool_calls"):
                 item["tool_calls"] = [{"id": c.get("id"), "name": c["function"]["name"],
                                        "arguments": scrub(c["function"].get("arguments", ""))}
