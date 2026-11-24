@@ -72,3 +72,41 @@ def test_embedding_retriever_and_cache(tmp_path):
     before = inner.calls
     EmbeddingRetriever(cached).index(["a", "b"], ["zzzz zzz", "aaaa bbb"])   # all from disk
     assert inner.calls == before
+
+
+def test_long_texts_are_embedded_in_windows_and_score_as_their_best_window():
+    import numpy as np
+    from context_bench.retrieval.dense import EmbeddingRetriever, windows
+
+    class Echo:                                   # a window's vector says whether it holds "needle"
+        def embed(self, texts):
+            return np.array([[1.0, 0.0] if "needle" in t else [0.0, 1.0] for t in texts], dtype=np.float32)
+
+    long = "".join(f"line {i}\n" for i in range(3000)) + "needle\n"      # the match is at the very end
+    ws = windows(long, 6000, 500)
+    assert len(ws) > 3 and windows("short", 6000) == ["short"]
+    assert ws[0].splitlines()[-1] in ws[1].splitlines()                 # consecutive windows overlap
+    r = EmbeddingRetriever(Echo(), max_chars=6000, overlap_chars=500)
+    r.index(["long", "other"], [long, "nothing here"], split_long=True)
+    assert r.windowed == 1 and r.search("needle", 1)[0][0] == "long"    # not truncated away
+    r.index(["long"], [long])                                           # default: never split
+    assert r.windowed == 0 and len(r.owner) == 1
+
+
+def test_refused_windows_are_halved_and_refused_functions_are_named():
+    import numpy as np
+    import pytest
+    from context_bench.retrieval.dense import EmbeddingRetriever, TooLongForEmbedder
+
+    class Limited:                                # refuses any text over 100 characters, like truncate=false
+        def embed(self, texts):
+            if any(len(t) > 100 for t in texts):
+                raise ValueError("too long")
+            return np.ones((len(texts), 2), dtype=np.float32) / np.sqrt(2)
+
+    file_text = "".join(f"row {i}\n" for i in range(40))                 # ~240 chars, windows of 200
+    r = EmbeddingRetriever(Limited(), max_chars=200, overlap_chars=0)
+    r.index(["f"], [file_text], split_long=True)
+    assert len(r.owner) > 2 and set(r.owner) == {0}                     # halved until each piece fits
+    with pytest.raises(TooLongForEmbedder, match="big_function"):
+        r.index(["small", "big_function"], ["x = 1", "y" * 150])         # functions: never split

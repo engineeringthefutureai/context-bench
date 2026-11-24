@@ -9,7 +9,7 @@ from ..types import Chunk
 class Retriever(Protocol):
     name: str
 
-    def index(self, ids: Sequence[str], texts: Sequence[str]) -> None:
+    def index(self, ids: Sequence[str], texts: Sequence[str], split_long: bool = False) -> None:
         """Replace the index with these documents."""
 
     def search(self, query: str, k: int) -> list[tuple[str, float]]:

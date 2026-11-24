@@ -61,6 +61,9 @@ produced. Output: an overall ranking and 1-5 scores per dimension. A hand-graded
   output tokens. Keep thinking on for results; `--no-thinking` stays available as an arm.
 
 ## Retrieval: who decides what to look for
+How the embedding index is built (embedder, no truncation, windows, bulk builds on the B60s):
+[semantic-search-design.md](semantic-search-design.md).
+
 Three points on one axis, cheapest first. The open question: how much of C's quality does B recover?
 
 | | Who decides what to retrieve | Model calls | Can correct itself |

@@ -197,7 +197,7 @@ indexed as `chunk_text` (path, qualname, source), the same text L5 searches. Emb
 `retrieval/dense.py` (brute-force cosine, `query_prefix` on queries only); `[embedder]` points at
 Ollama on the iGPU: `embeddinggemma-2` from 2026-11-23 (task prefixes on queries and documents:
 `query_prefix`, `document_prefix`; on repo M about as good as `qwen3-embedding:0.6b`, used before: func@8 7/12
-vs 8/12, file@8 9/12 vs 8/12). L4 implements both retrievers (whole files indexed as `file_text`, like validate-retrieval). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L7 `grep`
+vs 8/12, file@8 9/12 vs 8/12). Never truncated: Ollama's `/api/embed` with `truncate=false`, 8k window; functions whole (one that doesn't fit stops the build), files in ~4k-token windows scored by their best window; `cbench index --embeddings --bulk` builds on both B60s via the GPU manager. Design and trade-offs: `docs/semantic-search-design.md`. L4 implements both retrievers (whole files indexed as `file_text`, like validate-retrieval). L5 implements `task_vs_code` and `model_queries` (BM25 or embed; queries merged round-robin by rank), L7 `grep`
 and `hybrid`; other L5 modes raise NotImplementedError, and the sweep skips that
 variant only (level + retriever + query mode + agent variant), not its siblings.
 

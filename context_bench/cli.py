@@ -39,10 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="serial, restarting the model server before every run (cold cache): needs "
                           "CBENCH_RESTART_CMD; optional CBENCH_READY_TIMEOUT (s)")
 
-    idx = sub.add_parser("index", help="build caches, e.g. function summaries")
+    idx = sub.add_parser("index", help="build caches: embedding indexes (--embeddings), function summaries")
     idx.add_argument("--summaries", action="store_true")
+    idx.add_argument("--embeddings", action="store_true", help="embed every file and function of the repos now")
+    idx.add_argument("--bulk", action="store_true",
+                     help="with --embeddings: build on both B60s through the GPU manager ([bulk_index]; vLLM "
+                          "is unloaded meanwhile and loaded again after)")
     idx.add_argument("--model")
-    idx.add_argument("--repo-size", default="S")
+    idx.add_argument("--repo-size", action="append", help="repos (repeatable; default: all)")
 
     val = sub.add_parser("validate-retrieval", help="recall@k of planted helpers per retriever")
     val.add_argument("--retrievers", default="bm25")
@@ -96,6 +100,19 @@ def main(argv: list[str] | None = None) -> None:
         print(f"rescored {exp.rescore()} runs")
         if args.cacheable:
             print(f"backfilled tokens_cacheable for {exp.backfill_cacheable(args.cacheable)} L7 runs")
+        return
+    if args.cmd == "index":
+        exp = Experiment(Path(args.config))
+        sizes = args.repo_size or list(exp.config["repos"])
+        if args.embeddings:
+            if args.bulk:
+                from .bulk_index import bulk_build
+                print("\n".join(bulk_build(exp, sizes)))
+            else:
+                print("\n".join(exp.build_indexes(sizes)))
+        if args.summaries:
+            for size in sizes:
+                exp.build_summaries(size, args.model or exp.default_model)
         return
     if args.cmd == "validate-retrieval":
         exp = Experiment(Path(args.config))

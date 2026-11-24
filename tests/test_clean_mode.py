@@ -26,6 +26,7 @@ def _clean_exp(tmp_path, monkeypatch, cmd):
         urls.append(url)
         return client
     exp._client_factory = factory
+    exp.build_indexes = lambda sizes: []        # the sweep's embedding pre-flight needs a real embedder
     monkeypatch.setenv("CBENCH_RESTART_CMD", cmd)
     monkeypatch.setenv("CBENCH_READY_TIMEOUT", "30")
     monkeypatch.setattr("context_bench.runner.time.sleep", lambda s: None)

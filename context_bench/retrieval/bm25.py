@@ -20,7 +20,7 @@ class BM25Retriever:
         self.idf: dict[str, float] = {}
         self.avg_len = 0.0
 
-    def index(self, ids: Sequence[str], texts: Sequence[str]) -> None:
+    def index(self, ids: Sequence[str], texts: Sequence[str], split_long: bool = False) -> None:
         self.ids = list(ids)
         self.tf = [Counter(code_tokens(t)) for t in texts]
         self.lengths = [sum(c.values()) for c in self.tf]

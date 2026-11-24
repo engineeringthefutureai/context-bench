@@ -36,7 +36,7 @@ def validate(make: Callable[[], Retriever], ws: Workspace, tasks: list[Task], na
         funcs.index([c.qualname for c in chunks], [chunk_text(c) for c in chunks])
         files = make()
         paths = [p for p in sorted(ws.files) if p != task.target_file]
-        files.index(paths, [file_text(p, ws.files[p]) for p in paths])
+        files.index(paths, [file_text(p, ws.files[p]) for p in paths], split_long=True)
         fhits, phits = funcs.search(task.prompt, DEPTH), files.search(task.prompt, DEPTH)
         for q in task.needed_helpers:
             rank = _rank(fhits, q)

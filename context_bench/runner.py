@@ -89,7 +89,9 @@ class Experiment:
     def _make_embedder(self):
         if self._embedder is None:
             cfg = self.config["embedder"]
-            self._embedder = CachedEmbedder(OpenAICompatEmbedder(cfg["base_url"], cfg["model"]),
+            self._embedder = CachedEmbedder(OpenAICompatEmbedder(cfg["base_url"], cfg["model"],
+                                                                 ollama=cfg.get("api") == "ollama",
+                                                                 context_tokens=cfg.get("context_tokens")),
                                             self._path(self.config["paths"]["cache"]) / "embeddings")
         return self._embedder
 
@@ -98,7 +100,9 @@ class Experiment:
         prefix = self.config.get("embedder", {}).get("query_prefix", "")
         doc_prefix = self.config.get("embedder", {}).get("document_prefix", "")
         return {"bm25": BM25Retriever,
-                "embed": lambda: EmbeddingRetriever(self.embedder(), query_prefix=prefix, document_prefix=doc_prefix)}
+                "embed": lambda: EmbeddingRetriever(self.embedder(), query_prefix=prefix, document_prefix=doc_prefix,
+                                                    max_chars=int(self.config.get("embedder", {}).get("max_chars", 10000)),
+                                                    overlap_chars=int(self.config.get("embedder", {}).get("overlap_chars", 1000)))}
 
     def _path(self, p: str) -> Path:
         return Path(p) if Path(p).is_absolute() else self.root / p
@@ -533,6 +537,14 @@ class Experiment:
             for rc in todo:
                 print(f"  {rc.task_id} {config_label(asdict(rc))}", file=sys.stderr)
             return
+        # pre-flight: build the embedding indexes the queued runs need, so an embedder problem shows up
+        # now instead of halfway through (cached vectors make this quick on later sweeps)
+        needs_embed = sorted({rc.repo_size for rc in todo
+                              if rc.retriever == "embed" or rc.agent_variant in SEMANTIC_VARIANTS},
+                             key="SML".index)
+        if needs_embed:
+            print(f"pre-flight: embedding indexes for {', '.join(needs_embed)}", file=sys.stderr, flush=True)
+            self.build_indexes(needs_embed)
         unimplemented: set[str] = set()
         failed: list[str] = []
         lock = threading.Lock()
@@ -751,6 +763,27 @@ class Experiment:
         tmp.write_text("".join(json.dumps(x) + "\n" for x in recs))
         tmp.replace(rdir / "badges.jsonl")
         return len(recs)
+
+    def build_indexes(self, repo_sizes: list[str]) -> list[str]:
+        """cbench index --embeddings (and the sweep's pre-flight): embed everything the embedding
+        retriever will index on these repos, before any run needs it: whole files (L4, as file_text) and
+        functions/classes (L5 and the agents' semantic_search, as chunk_text). Vectors land in the on-disk
+        cache, so runs only embed their queries. Raises on an embedder error. Returns one report line per
+        index."""
+        from .retrieval.base import chunk_text, file_text
+        lines = []
+        for size in repo_sizes:
+            ws = load_workspace(self._path(self.config["repos"][size]))
+            for kind, ids, texts in (
+                    ("files", sorted(ws.files), [file_text(p, ws.files[p]) for p in sorted(ws.files)]),
+                    ("chunks", [c.qualname for c in ws.chunks], [chunk_text(c) for c in ws.chunks])):
+                start = time.monotonic()
+                r = self.retrievers()["embed"]()
+                r.index(ids, texts, split_long=kind == "files")      # functions are never split
+                lines.append(f"{size} {kind}: {len(ids)} texts, {r.windowed} in windows "
+                             f"({len(r.owner)} vectors), {time.monotonic() - start:.0f}s")
+                print("  index " + lines[-1], file=sys.stderr, flush=True)
+        return lines
 
     def build_summaries(self, repo_size: str, model_key: str) -> int:
         """Cache one-line summaries per function (for L5 task_vs_summary)."""

@@ -38,7 +38,7 @@ def build_context(task: Task, ws: Workspace, retriever: str = "bm25") -> Context
         target = f"File: {path}\n(This file does not exist yet.)"
     paths = [p for p in sorted(ws.files) if p != path]
     r = _make_retriever(retriever, ws)
-    r.index(paths, [file_text(p, ws.files[p]) for p in paths])
+    r.index(paths, [file_text(p, ws.files[p]) for p in paths], split_long=True)   # long files: windows
     picked = [p for p, _ in r.search(task.prompt, TOP_FILES)]
     parts = [target] + ([RETRIEVED_HEADER] + [_show(p, ws.files[p]) for p in picked] if picked else [])
     return ContextBlock(text="\n\n".join(parts), included=[path] + picked, retrieved=picked,
