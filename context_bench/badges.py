@@ -156,17 +156,20 @@ class IntentScorer:
         return found
 
 
-# WANTS TO EXPLORE is measured, not matched to example phrases: the similarity of the whole final answer to
-# the centroid of real "let me look first" replies (docs/labeling-design.md). Built and calibrated by
-# build_dodge_centroid (cbench badges --rebuild-centroid); specific to the embedder and prefix it was built
-# with, so it's skipped (with a warning) under another embedder.
+# WANTS TO EXPLORE is measured, not matched to example phrases (docs/labeling-design.md). Prototypes on both
+# sides: K_DODGE centroids of real "let me look first" replies (their variants: a generic "let me explore",
+# "I'll look at the relevant files", "let me find how X is done", a pretend tool call ...) and K_ANSWER
+# centroids of the prose that comes with real answers ("Creating the module now:", plans, "the task is
+# clear"). A reply scores (similarity to its nearest dodge prototype) - (similarity to its nearest answer
+# prototype). One dodge centroid blurred the variants and, with nothing to compare against, matched any short
+# sentence about the next step. Built and calibrated by build_dodge_prototypes (cbench badges
+# --rebuild-prototypes); specific to the embedder and prefix it was built with.
 DODGE_PREFIX = "task: clustering | query: "
-CENTROID = Path(__file__).resolve().parent.parent / "grading" / "dodge_centroid"     # .npy and .json
+PROTOTYPES = Path(__file__).resolve().parent.parent / "grading" / "dodge_prototypes"     # .npz and .json
+K_DODGE, K_ANSWER = 8, 3
 
-
-# Inside a reply that did answer, the centroid can't tell "let me look first" from "I have enough, writing it
-# now" (both short sentences about the next step; a second centroid for answer prose didn't separate them
-# either). There a WANTS TO EXPLORE badge also needs an explicit look-first phrase.
+# Inside a reply that did answer, look-first sentences are rare and the prototypes still miss or mistake a few
+# (a typo fix, "creating the file now"), so there the badge also needs an explicit look-first phrase.
 LOOK_FIRST = re.compile(r"\b(let me|i'll|i will|i need to|first,? i)\b[^.?!]{0,60}?\b(look|explore|check|search|"
                         r"read|see|inspect|examine|investigate|find)\b|\bi need to (know|understand|see)\b", re.I)
 
@@ -177,7 +180,7 @@ def is_dodge(r: dict) -> bool:
 
 
 def dodge_text(r: dict, run_dir: Path) -> str:
-    """What the centroid compares: the final prose; for a reply without valid code and without prose (a bare
+    """What the prototypes compare: the final prose; for a reply without valid code and without prose (a bare
     pretend tool call, fenced code), the start of the reply."""
     prose = final_prose(r, run_dir)
     if len(prose) >= 20 or r.get("format_status") not in ("no_code", "tool_request", "bad_format"):
@@ -186,33 +189,64 @@ def dodge_text(r: dict, run_dir: Path) -> str:
     return (resp.read_text()[:600] if resp.is_file() else "")
 
 
+def _unit(m: np.ndarray) -> np.ndarray:
+    return m / np.maximum(np.linalg.norm(m, axis=-1, keepdims=True), 1e-12)
+
+
+def _kmeans(v: np.ndarray, k: int, restarts: int = 15) -> np.ndarray:
+    """Cosine k-means, fixed seeds (a rebuild gives the same prototypes); the best of `restarts` runs."""
+    k = min(k, len(v))
+    best = None
+    for seed in range(restarts):
+        c = v[np.random.default_rng(seed).choice(len(v), k, replace=False)]
+        for _ in range(50):
+            a = np.argmax(v @ c.T, 1)
+            c = _unit(np.stack([v[a == j].mean(0) if (a == j).any() else c[j] for j in range(k)]))
+        fit = float(np.mean(np.max(v @ c.T, 1)))
+        if best is None or fit > best[0]:
+            best = (fit, c)
+    return best[1]
+
+
+def _score(x: np.ndarray, dodge: np.ndarray, answer: np.ndarray) -> np.ndarray:
+    return np.max(x @ dodge.T, 1) - np.max(x @ answer.T, 1)
+
+
 class DodgeScorer:
-    def __init__(self, embedder, path: Path = CENTROID):
+    def __init__(self, embedder, path: Path = PROTOTYPES):
         self.embedder = embedder
         self.meta = json.loads(path.with_suffix(".json").read_text())
-        self.c = np.load(path.with_suffix(".npy"))
+        z = np.load(path.with_suffix(".npz"))
+        self.dodge, self.answer = z["dodge"], z["answer"]
         if self.meta["model"] != embedder.name:
-            raise ValueError(f"dodge centroid was built with {self.meta['model']}, not {embedder.name}")
+            raise ValueError(f"dodge prototypes were built with {self.meta['model']}, not {embedder.name}")
 
     def badge(self, text: str, answered: bool = False) -> list[dict]:
         """answered: the reply has an accepted answer (format_status ok), so a look-first phrase is required."""
         if len(text) < 20 or (answered and not LOOK_FIRST.search(text)):
             return []
-        sim = float(self.embedder.embed([DODGE_PREFIX + text])[0] @ self.c)
+        x = self.embedder.embed([DODGE_PREFIX + text])
+        score = float(_score(x, self.dodge, self.answer)[0])
         t = self.meta["thresholds"]
-        if sim < t["medium"]:
+        if score <= t["medium"]:            # strictly above the cutoff (the budget's share of others reach it)
             return []
-        return [{"badge": "WANTS TO EXPLORE", "confidence": "high" if sim >= t["high"] else "medium",
-                 "similarity": round(sim, 3), "sentence": text[:200]}]
+        variant = int(np.argmax(x @ self.dodge.T))
+        return [{"badge": "WANTS TO EXPLORE", "confidence": "high" if score > t["high"] else "medium",
+                 "score": round(score, 3), "variant": variant,
+                 "variant_example": self.meta["variants"][variant]["example"][:120], "sentence": text[:200]}]
 
 
-def build_dodge_centroid(sources: list[tuple[list[dict], Path]], embedder, out: Path = CENTROID) -> dict:
-    """Centroid of every dodge (is_dodge) in thinking-off runs of the given (rows, runs_dir) sources, with
-    thresholds calibrated against prose that came with real answers (PASS/FAIL, single-shot levels, 400 at
-    random, seed 1) and UNPARSABLE replies. Validation: a centroid of the first source alone, scored on the
-    other sources' dodges (held out). medium = the threshold that best balances dodges caught and others
-    cleared; high = where at most 2% of the others reach. Writes out.npy and out.json; returns the json."""
-    pos, neg_prose, neg_unp = [], [], []
+def build_dodge_prototypes(sources: list[tuple[list[dict], Path]], embedder, out: Path = PROTOTYPES,
+                           k_dodge: int = K_DODGE, k_answer: int = K_ANSWER) -> dict:
+    """Prototypes from the thinking-off runs of the given (rows, runs_dir) sources: dodges (is_dodge) against
+    the prose of accepted answers (every level, agents' final replies included), leaving out answer prose
+    with a look-first phrase (some answers open with "let me look..." and would teach the answer side dodge
+    language); UNPARSABLE replies are
+    negatives for calibration only. Thresholds on the score, from a false-alarm budget: medium where 5% of
+    the negatives reach, high where 2% do; the share of dodges caught follows (recorded). Validation: prototypes built from the first source alone, scored on the
+    other sources (held out). Writes out.npz and out.json (with a representative reply per dodge variant);
+    returns the json."""
+    pos, ans, unp = [], [], []
     for k, (rows, runs_dir) in enumerate(sources):
         for r in rows:
             if r.get("thinking") is not False:
@@ -221,41 +255,49 @@ def build_dodge_centroid(sources: list[tuple[list[dict], Path]], embedder, out: 
             if is_dodge(r):
                 pos.append((k, dodge_text(r, d)))
             elif r.get("format_status") == "bad_format":
-                neg_unp.append(dodge_text(r, d))
-            elif r.get("format_status") == "ok" and r["level"] not in ("L7", "L8"):
-                p = final_prose(r, d)
-                if len(p) >= 20:
-                    neg_prose.append(p[:2000])
-    random.Random(1).shuffle(neg_prose)
-    neg = neg_prose[:400] + neg_unp
-    emb = lambda xs: embedder.embed([DODGE_PREFIX + t for t in xs])
-    P, N = emb([t for _, t in pos]), emb(neg)
-    first = np.array([k == 0 for k, _ in pos])
-    unit = lambda v: v / np.linalg.norm(v)
-    c_first = unit(P[first].mean(0))
-    held, others = P[~first] @ c_first, N @ c_first
-    auc = float(np.mean(held[:, None] > others[None, :])) if len(held) else None
-    c = unit(P.mean(0))
-    sp, sn = P @ c, N @ c
-    grid = np.linspace(0.70, 0.98, 281)
-    medium = float(max(grid, key=lambda t: np.mean(sp >= t) + np.mean(sn < t)))
-    high = float(next((t for t in grid if np.mean(sn >= t) <= 0.02), grid[-1]))
-    meta = {"model": embedder.name, "prefix": DODGE_PREFIX, "dodges": int(len(P)), "negatives": int(len(N)),
-            "thresholds": {"medium": round(medium, 3), "high": round(high, 3)},
-            "at_medium": {"dodges_caught": round(float(np.mean(sp >= medium)), 3),
-                          "others_cleared": round(float(np.mean(sn < medium)), 3)},
-            "at_high": {"dodges_caught": round(float(np.mean(sp >= high)), 3),
-                        "others_cleared": round(float(np.mean(sn < high)), 3)},
-            "held_out": {"dodges": int((~first).sum()), "auc": None if auc is None else round(auc, 3)}}
+                unp.append((k, dodge_text(r, d)))
+            elif r.get("format_status") == "ok":
+                text = final_prose(r, d)
+                if len(text) >= 20 and not LOOK_FIRST.search(text):    # look-first talk is dodge language
+                    ans.append((k, text[:2000]))
+    emb = lambda xs: np.asarray(embedder.embed([DODGE_PREFIX + t for _, t in xs])) if xs else None
+    P, A = emb(pos), emb(ans)
+    U = emb(unp) if unp else np.zeros((0, P.shape[1]), dtype=P.dtype)
+    kp, ka, ku = (np.array([k for k, _ in xs]) for xs in (pos, ans, unp))
+    # held-out check: prototypes from source 0, scored on sources 1..n
+    D0, A0 = _kmeans(P[kp == 0], k_dodge), _kmeans(A[ka == 0], k_answer)
+    held_p = _score(P[kp > 0], D0, A0)
+    held_n = _score(np.concatenate([A[ka > 0], U[ku > 0]]), D0, A0)
+    auc = float(np.mean(held_p[:, None] > held_n[None, :])) if len(held_p) and len(held_n) else None
+    # the prototypes in use: all sources
+    D, An = _kmeans(P, k_dodge), _kmeans(A, k_answer)
+    sp, sn = _score(P, D, An), _score(np.concatenate([A, U]), D, An)
+    medium = float(np.quantile(sn, 0.95))     # thresholds from a false-alarm budget: 5% / 2% of the others
+    high = float(np.quantile(sn, 0.98))
+    near = np.argmax(P @ D.T, 1)
+    variants = []
+    for j in range(len(D)):
+        idx = np.where(near == j)[0]
+        rep = idx[np.argmax(P[idx] @ D[j])] if len(idx) else None
+        variants.append({"replies": int(len(idx)), "example": pos[rep][1][:300] if rep is not None else ""})
+    rate = lambda a, t: round(float(np.mean(a > t)), 3)
+    meta = {"model": embedder.name, "prefix": DODGE_PREFIX, "k_dodge": len(D), "k_answer": len(An),
+            "dodges": int(len(P)), "answers": int(len(A)), "unparsable": int(len(U)),
+            "thresholds": {"medium": round(medium, 4), "high": round(high, 4)},
+            "at_medium": {"dodges_caught": rate(sp, medium), "others_over": rate(sn, medium)},
+            "at_high": {"dodges_caught": rate(sp, high), "others_over": rate(sn, high)},
+            "held_out": {"dodges": int(len(held_p)), "others": int(len(held_n)),
+                         "auc": None if auc is None else round(auc, 3)},
+            "variants": variants}
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.save(out.with_suffix(".npy"), c.astype(np.float32))
+    np.savez(out.with_suffix(".npz"), dodge=D.astype(np.float32), answer=An.astype(np.float32))
     out.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
     return meta
 
 
 def compute(rows: list[dict], runs_dir: Path, embedder) -> list[dict]:
     """One record per run: exact badges, intent badges of its final prose, and WANTS TO EXPLORE from the
-    dodge centroid (when one exists for this embedder)."""
+    dodge prototypes (when they exist for this embedder)."""
     scorer = IntentScorer(embedder)
     try:
         dodge = DodgeScorer(embedder)

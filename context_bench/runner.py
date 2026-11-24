@@ -764,16 +764,16 @@ class Experiment:
         tmp.replace(rdir / "badges.jsonl")
         return len(recs)
 
-    def build_dodge_centroid(self) -> dict:
-        """cbench badges --rebuild-centroid: the WANTS TO EXPLORE centroid from this results folder (first, the
-        held-out check's training source) and every results/archive-*/ folder (badges.build_dodge_centroid)."""
+    def build_dodge_prototypes(self) -> dict:
+        """cbench badges --rebuild-prototypes: the WANTS TO EXPLORE prototypes from this results folder (first, the
+        held-out check's training source) and every results/archive-*/ folder (badges.build_dodge_prototypes)."""
         from . import badges
         rdir = self.results_path.parent
         sources = []
         for d in [rdir] + sorted(p for p in rdir.glob("archive-*") if (p / "results.jsonl").is_file()):
             rows = list({r["run_id"]: r for r in results.load(d / "results.jsonl")}.values())
             sources.append((rows, d / "runs"))
-        return badges.build_dodge_centroid(sources, self.embedder())
+        return badges.build_dodge_prototypes(sources, self.embedder())
 
     def build_indexes(self, repo_sizes: list[str]) -> list[str]:
         """cbench index --embeddings (and the sweep's pre-flight): embed everything the embedding

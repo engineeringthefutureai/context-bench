@@ -306,7 +306,9 @@ def run_payload(r: dict) -> dict:
         "tests": scrub(read(d / "tests.txt")),
         "judge_note": scrub(GRADES.get(r["run_id"], {}).get("note")),
         "badges": {"exact": BADGES.get(r["run_id"], {}).get("exact", []),
-                   "intent": [dict(x, sentence=scrub(x.get("sentence"))) for x in BADGES.get(r["run_id"], {}).get("intent", [])]},
+                   "intent": [dict(x, sentence=scrub(x.get("sentence")), **({"variant_example": scrub(x["variant_example"])}
+                                                                    if x.get("variant_example") else {}))
+                              for x in BADGES.get(r["run_id"], {}).get("intent", [])]},
         "penalties": [{"code": p["code"], "points": p["points"], "quote": scrub(p["quote"]), "why": scrub(p["why"])}
                       for p in PENALTIES.get(r["run_id"], {}).get("penalties", [])],
     }

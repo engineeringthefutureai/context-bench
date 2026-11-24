@@ -78,7 +78,7 @@ OUT OF TOKENS, RETRIED: FORMAT, RETRIED: SYNTAX, SYNTAX ERROR IN PATCH, TESTS AD
 
 **Intent badges** describe what the final answer's prose says: DECLARES COMPLETION, CLAIMS VERIFICATION,
 NOTES MISSING CONTEXT, ASKS FOR INFORMATION, STATES A PLAN, CONCEDES, LEAVES WORK UNFINISHED, STATES REUSE
-(example phrases, below), and WANTS TO EXPLORE (the dodge centroid, next section). Method for the
+(example phrases, below), and WANTS TO EXPLORE (dodge prototypes, next section). Method for the
 example-phrase labels:
 
 1. The final prose: the last reply without tool calls (agents) or the response, with `<file>` blocks,
@@ -98,7 +98,8 @@ mostly right for the common labels. The viewer shows each badge with its sentenc
 
 ## Embedding analysis of the no-answer runs (2026-11-24)
 
-The analysis behind the outcome split, and a reusable "dodge" centroid.
+The analysis behind the outcome split, and the measured WANTS TO EXPLORE badge: first one centroid, then
+prototypes on both sides.
 
 **Clustering.** All 167 INVALID runs of the round, embedded with EmbeddingGemma
 (`task: clustering | query: `): the final prose, or the start of the raw reply when the prose is empty
@@ -110,8 +111,8 @@ Lesson: clusters group by prose style, not by what the reply contains. The 6 "pl
 replies sat with the tool calls because both open with an explanation. The outcome rule therefore comes
 from the recorded protocol fields, and embeddings serve as the check.
 
-**The dodge centroid.** Built from the 130 ASKED TO EXPLORE replies of the current round, then tested on
-replies it had never seen:
+**The dodge centroid (first version).** Built from the 130 ASKED TO EXPLORE replies of the current round,
+then tested on replies it had never seen:
 
 | Similarity to the centroid | median | lowest |
 |---|---|---|
@@ -125,33 +126,90 @@ me explore the files..." and then deliver code in the same reply: explore langua
 precision on explore *language* is better than 92%, and it can measure something the outcome can't: a
 model announcing that it wants to explore and answering anyway.
 
-**In use: the WANTS TO EXPLORE badge (2026-11-24).** The centroid replaced the badge's 5 hand-written
-example phrases. It lives in `grading/dodge_centroid.npy`, with its embedder, prefix, size, thresholds and
-validation in `grading/dodge_centroid.json`. `cbench badges --rebuild-centroid` rebuilds it from every
-dodge in `results/` and `results/archive-*/` (thinking off), using the current folder alone for the
-held-out check. First build: 226 dodges, 465 others, medium at similarity 0.878 (91% of dodges caught, 91%
-of others cleared), high at 0.902 (98% of others below), held-out AUC 0.962. A centroid built with another
-embedder is refused, not silently used.
+**Why one centroid wasn't enough.** Used as a badge, the single centroid had two weaknesses, both found by
+reading every hit:
 
-Two rules came from reading every hit:
+- **Dodges come in variants**, and their average is a blur: a generic "let me explore the repository", "I'll
+  look at the relevant files", "I need to understand how X works, let me look", and pretend tool calls. A
+  reply close to one variant can sit far from the average.
+- **Nothing to compare against.** A single centroid answers "how dodge-like is this?" with no idea what
+  else a reply could be. To EmbeddingGemma, "Now I have enough context. Creating the module:" is a short
+  sentence about the next step, just like "Let me look at the helpers first", and scored as high.
+
+Adding a single centroid for answer prose and scoring the difference didn't fix it (held-out AUC 0.93, worse
+than one centroid's 0.96 on that test set): real-answer prose has variants too (plans, "the task is clear",
+"creating the module now"), and its average is a blur as well.
+
+**The fix: prototypes on both sides** (the user's idea: several centroids, bucketed by distance). Cosine
+k-means splits the dodges into K_DODGE prototypes and the prose of real answers into K_ANSWER prototypes.
+A reply's score is its similarity to the nearest dodge prototype minus its similarity to the nearest answer
+prototype: positive means it reads more like some kind of dodge than like any kind of answer. Tried on
+held-out runs (prototypes from the current round, tested on 95 dodges and 317 others from the earlier
+rounds, agents' final replies included), cutoff at 90% of training dodges:
+
+| Dodge prototypes | Answer prototypes | Held-out AUC | Others over the cutoff |
+|---|---|---|---|
+| 1 | none | 0.928 | 14.5% |
+| 1 | 5 | 0.939 | 16.7% |
+| 3 or 5 | none | 0.90-0.92 | 19-26% |
+| 5 | 5 | 0.966 | 5.0% |
+| **8** | **3** | 0.958 | **3.8%** |
+| 8 | 5 or 8 | 0.96 | 4.1% |
+
+More dodge prototypes alone make it worse: they reach out to more kinds of text. The gain comes from
+modelling both sides. 8 + 3 had the fewest false alarms.
+
+**Two refinements, each found by reading the misses and hits:**
+
+- **Answer prototypes leave out look-first talk.** Some real answers open with "let me look at ..." and then
+  give the code. Learned as answer prose, that pulled real dodges ("Let me look at the relevant code to
+  understand the weight formatting") toward the answer side, and 12 were missed. Answer prose with a
+  look-first phrase is now excluded from the answer side: held-out AUC 0.958 -> 0.976.
+- **Cutoffs come from a false-alarm budget**, not a target catch rate: medium where 5% of the non-dodges
+  reach (strictly above the cutoff), high where 2% do. Calibrating "catch 90%" missed 10% of dodges by
+  construction even once false alarms were down to 1%.
+
+**In use: the WANTS TO EXPLORE badge.** The prototypes replaced the badge's 5 hand-written example phrases.
+They live in `grading/dodge_prototypes.npz` (8 dodge and 3 answer vectors), with the embedder, prefix,
+counts, cutoffs, validation and a representative reply per dodge variant in `grading/dodge_prototypes.json`.
+`cbench badges --rebuild-prototypes` rebuilds them from every thinking-off run in `results/` and
+`results/archive-*/`, using the current folder alone for the held-out check; k-means uses fixed seeds, so a
+rebuild is repeatable. Prototypes built with another embedder are refused, not silently used. Each badge
+records its score and the variant it matched.
+
+Two more rules, from reading every hit:
 
 - **An answer made only of code has nothing to compare.** The raw-reply fallback (for replies without
   prose) applies only to replies without valid code; on valid answers it had matched file headers.
-- **Inside a reply that did answer, the centroid alone is about half right.** It scores "Now I have
-  enough context. Creating the module:" as high as "Let me look at the referenced helpers first": to
-  EmbeddingGemma both are short sentences about the next step. A second centroid for answer prose,
-  scored as a margin, didn't separate them either (held-out AUC 0.93, worse). So on runs with an
-  accepted answer the badge also needs an explicit look-first phrase ("let me look / check / search /
-  explore / read ...", "I need to see / know / understand ..."). With it, all 10 such hits in the v4
-  round read as real look-first sentences.
+- **On a reply that did answer, the badge also needs an explicit look-first phrase** ("let me look /
+  check / search / explore / read ...", "I need to see / know / understand ..."). Look-first sentences are
+  rare inside answers and a few borderline ones ("creating the file now", a typo fix) can still score
+  positive; the phrase makes those hits exact.
 
-Result on the v4 thinking-off round (722 runs): 118 of 130 ASKED TO EXPLORE runs carry the badge (82
-high); on runs that answered, 10 do, and 9 of those 10 FAIL: wanting to look first goes with not having
-what's needed.
+The variants (first build, 226 dodges): generic exploring ("Let me start by exploring the repository to
+understand the codebase structure", 54 replies; "I need to understand the code I'm changing. Let me look at
+the relevant files", 27; "...I'll first explore the repository", 25), looking for one specific thing ("I
+need to understand how the shop rounds percentage amounts. Let me look...", 26; the week-label format, 18;
+"how domain events are announced", 20), and pretend tool calls ("I'll investigate the relevant files" +
+`<function_calls>`, 49; 7 more).
 
-Caveats: the centroid is specific to EmbeddingGemma 2 and its prefix (another embedder needs a new one,
-built the same way); it was built on one model's (Qwen 3.8 27B, thinking off) phrasing, so a different
-model's dodges should be checked against it before trusting the threshold.
+**Result** (first build, 226 dodges, 300 answer prose, 122 unparsable): held-out AUC 0.976; medium
+catches 96% of dodges at 5.2% false alarms, high 93% at 2.1%. On the v4 thinking-off round (732 runs):
+126 of 130 ASKED TO EXPLORE runs carry the badge (121 high); the 4 misses are 3 terse dodges and one reply
+that never says it wants to look ("The task is clear: ..." and no code). On runs that answered, 9 carry
+it, all real look-first sentences on reading: 6 FAIL, 1 ran out of tokens, 2 PASS. Wanting to look first
+goes with not having what's needed.
+
+| | single centroid | prototypes |
+|---|---|---|
+| held-out AUC (same test set) | 0.928 | 0.976 |
+| dodges badged (of 130) | 118, 82 high | 126, 121 high |
+| hits on answered runs that were wrong | about half, before the phrase rule | none of 9 |
+
+Caveats: the prototypes are specific to EmbeddingGemma 2 and its prefix (another embedder needs new ones,
+built the same way); they were built on one model's phrasing (Qwen 3.8 27B, thinking off), so a different
+model's dodges should be checked against them before trusting the cutoffs. K_DODGE and K_ANSWER were
+picked on this data; a much larger or more varied set may want more answer prototypes.
 
 ## Rules of thumb
 

@@ -63,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     bd = sub.add_parser("badges", help="exact and intent badges per run (results/badges.jsonl)")
     bd.add_argument("--results-dir", help="another results folder, e.g. results/archive-v4-qwen3emb")
-    bd.add_argument("--rebuild-centroid", action="store_true",
-                    help="rebuild and calibrate the WANTS TO EXPLORE centroid (grading/dodge_centroid.*) first")
+    bd.add_argument("--rebuild-prototypes", action="store_true",
+                    help="rebuild and calibrate the WANTS TO EXPLORE prototypes (grading/dodge_prototypes.*) first")
     sub.add_parser("report", help="label counts per configuration")
     rs = sub.add_parser("rescore", help="recompute output-protocol fields from saved responses (no model calls)")
     rs.add_argument("--cacheable", metavar="MODEL", help="also backfill tokens_cacheable for older L7 runs of "
@@ -133,8 +133,8 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "badges":
         exp = Experiment(Path(args.config))
-        if args.rebuild_centroid:
-            print(json.dumps(exp.build_dodge_centroid(), indent=1))
+        if args.rebuild_prototypes:
+            print(json.dumps(exp.build_dodge_prototypes(), indent=1))
         n = exp.badges(Path(args.results_dir) if args.results_dir else None)
         print(f"badges for {n} runs")
         return

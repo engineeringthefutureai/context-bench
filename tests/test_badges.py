@@ -46,14 +46,16 @@ def test_intent_badges_need_a_margin_over_the_runner_up(monkeypatch):
 
 
 class ExploreEmbedder:
-    """Axis 0: explore words; axis 1: everything else. name like a real embedder (the centroid checks it)."""
+    """Axis 0: look-first words; axis 1: "creating/done" words; axis 2: everything. Named like a real embedder
+    (the prototypes check it)."""
     name = "fake-embed"
 
     def embed(self, texts):
         out = []
         for t in texts:
-            e = sum(w in t.lower() for w in ("explore", "look", "check"))
-            v = np.array([e, 1.0 + ("def " in t) + ("done" in t.lower())], dtype=float)
+            low = t.lower()
+            v = np.array([sum(w in low for w in ("explore", "look", "check")),
+                          sum(w in low for w in ("creating", "done", "added")), 0.5], dtype=float)
             out.append(v / np.linalg.norm(v))
         return np.array(out)
 
@@ -65,26 +67,31 @@ def _run(tmp_path, rid, text, **row):
     return dict({"run_id": rid, "level": "L5", "thinking": False, "label": "broken"}, **row)
 
 
-def test_dodge_centroid_is_built_calibrated_and_used(tmp_path):
-    rows = [_run(tmp_path, f"d{i}", "Let me explore the repository and look at the code first.", format_status="no_code")
-            for i in range(6)]
-    rows += [_run(tmp_path, f"p{i}", "Done: the change adds the field. <file path=\"a.py\">x = 1</file>",
-                  format_status="ok", label="ok") for i in range(6)]
-    rows += [_run(tmp_path, "u0", "```python\ndef f():\n    pass\n```", format_status="bad_format")]
-    out = tmp_path / "grading" / "dodge"
-    meta = B.build_dodge_centroid([(rows[:3] + rows[6:9], tmp_path), (rows[3:6] + rows[9:], tmp_path)],
-                                  ExploreEmbedder(), out)
-    assert meta["dodges"] == 6 and meta["held_out"]["dodges"] == 3 and meta["held_out"]["auc"] == 1.0
-    assert meta["at_medium"]["dodges_caught"] == 1.0 and meta["at_medium"]["others_cleared"] == 1.0
+def test_dodge_prototypes_are_built_calibrated_and_used(tmp_path):
+    dodge = ["Let me explore the repository first.", "I'll look at the relevant files and check the helpers."]
+    answer = ["Creating the module now, the field is added.", "Done: the change is added to the model."]
+    rows = []
+    for src in range(2):
+        rows.append([_run(tmp_path, f"d{src}{i}", dodge[i % 2], format_status="no_code") for i in range(6)]
+                    + [_run(tmp_path, f"a{src}{i}", answer[i % 2] + ' <file path="a.py">x = 1</file>',
+                            format_status="ok", label="ok") for i in range(6)])
+    out = tmp_path / "grading" / "protos"
+    meta = B.build_dodge_prototypes([(rows[0], tmp_path), (rows[1], tmp_path)], ExploreEmbedder(), out,
+                                    k_dodge=2, k_answer=2)
+    assert meta["dodges"] == 12 and meta["held_out"]["dodges"] == 6 and meta["held_out"]["auc"] == 1.0
+    assert meta["at_medium"]["others_over"] == 0.0 and len(meta["variants"]) == 2
     scorer = B.DodgeScorer(ExploreEmbedder(), out)
-    assert scorer.badge("Let me explore the code and check the helpers first.")[0]["badge"] == "WANTS TO EXPLORE"
-    assert scorer.badge("Done, the change is in place as requested.") == []
+    hit = scorer.badge("Let me explore the code and check the helpers first.")
+    assert hit and hit[0]["badge"] == "WANTS TO EXPLORE" and "variant_example" in hit[0]
+    assert scorer.badge("Creating the file now, done.") == []
+    # an answered reply needs a look-first phrase even when it scores like a dodge
+    assert scorer.badge("Exploring done? Check.", answered=True) == []
 
 
-def test_dodge_centroid_refuses_another_embedder(tmp_path):
+def test_dodge_prototypes_refuse_another_embedder(tmp_path):
     out = tmp_path / "c"
-    np.save(out.with_suffix(".npy"), np.array([1.0, 0.0]))
-    out.with_suffix(".json").write_text(json.dumps({"model": "other", "thresholds": {"medium": 0.9, "high": 0.95}}))
+    np.savez(out.with_suffix(".npz"), dodge=np.eye(3)[:1], answer=np.eye(3)[1:2])
+    out.with_suffix(".json").write_text(json.dumps({"model": "other", "thresholds": {"medium": 0.1, "high": 0.2}}))
     try:
         B.DodgeScorer(ExploreEmbedder(), out)
         assert False, "should refuse"
