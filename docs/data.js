@@ -63,7 +63,7 @@
     document.querySelectorAll("#views [data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === state.view)));
     $("#runs").classList.toggle("mx-mode", state.view === "matrix");
     $("#mx-legend").hidden = state.view !== "matrix";
-    if (state.view === "matrix") return renderMatrix();
+    if (state.view === "matrix") { renderMatrixLegend(); return renderMatrix(); }
     const rows = filtered().sort((x, y) => {
       const a = x[sortKey], b = y[sortKey];
       return (a == null) - (b == null) || (a > b ? 1 : a < b ? -1 : 0) * sortDir;
@@ -83,9 +83,11 @@
     "NO ANSWER": "o-noanswer", "INVALID": "o-invalid", "OUT OF TOKENS": "o-oot", "NO FIT": "o-nofit"};
   const REPOS = ["S", "M", "L"];
   const CATS = ["control", "reuse", "convention", "cross_file", "trap", "long"];
+  // compact column labels (the full label is the column's tooltip; the legend explains the abbreviations)
   const shortVariant = (label, level) => {
     const v = label.slice(level.length).trim()
-      .replace("model_queries", "queries").replace("task_vs_code", "task").replace("qwen names", "qwen");
+      .replace("task_vs_code", "").replace("model_queries", "q").replace("embed", "emb").replace("+hint", "+h")
+      .replace("selective", "sel").replace("hybrid", "hyb").replace("qwen names", "qw").replace(/\s+/g, " ").trim();
     return v || "·";
   };
   const levelOrder = (a, b) => a.level.localeCompare(b.level, "en", {numeric: true}) || a.label.localeCompare(b.label);
@@ -98,6 +100,15 @@
     const rounds = state.round === "all" ? ["final", "nothink"] : [state.round || "final"];
     const cols = [...new Map(scope.map((r) => [r.level_label, {label: r.level_label, level: r.level}])).values()].sort(levelOrder);
     const cell = new Map(scope.map((r) => [`${r.task_id}|${r.level_label}|${r.repo_size}|${r.round}`, r]));
+    // thinking on alone: PASS totals also show the change against thinking off, over the runs both rounds have
+    const showDelta = rounds.length === 1 && rounds[0] === "final";
+    const offRun = new Map(showDelta ? runs.filter((r) => r.round === "nothink").map((r) => [`${r.task_id}|${r.level_label}|${r.repo_size}`, r]) : []);
+    const delta = (d, pairs, pp) => {
+      if (!showDelta || !pairs) return "";
+      const v = pp ? Math.round(100 * d / pairs) : d;
+      const txt = v > 0 ? `+${v}` : v < 0 ? `−${-v}` : "±0";
+      return `<span class="mx-d ${v > 0 ? "up" : v < 0 ? "down" : ""}" title="change against thinking off over the ${pairs} runs both rounds have${pp ? " (percentage points)" : ""}">${txt}</span>`;
+    };
     const taskIds = [...new Set(scope.map((r) => r.task_id))];
     const meta = (id) => tasks.get(id) || {category: byTaskCat(id), tier: 0, repo_sizes: REPOS};
     taskIds.sort((a, b) => CATS.indexOf(meta(a).category) - CATS.indexOf(meta(b).category) || meta(a).tier - meta(b).tier || a.localeCompare(b, "en", {numeric: true}));
@@ -106,11 +117,11 @@
     // header: level groups, then variants (vertical)
     const groups = [];
     for (const c of cols) (groups.at(-1)?.level === c.level ? groups.at(-1).n++ : groups.push({level: c.level, n: 1}));
-    const head1 = `<tr><th class="mx-corner" rowspan="2">Task <span class="meta">repos S · M · L, top to bottom${rounds.length > 1 ? "; left think on, right off" : ""}</span></th>`
+    const head1 = `<tr><th class="mx-corner" rowspan="2">Task</th>`
       + groups.map((g) => `<th class="mx-lv" colspan="${g.n}">${esc(g.level)}</th>`).join("") + `<th class="mx-sum" rowspan="2">PASS</th></tr>`;
     const head2 = `<tr>` + cols.map((c) => `<th class="mx-var" title="${esc(c.label)}"><span>${esc(shortVariant(c.label, c.level))}</span></th>`).join("") + `</tr>`;
 
-    const colPass = cols.map(() => [0, 0]);
+    const colPass = cols.map(() => [0, 0]), colDelta = cols.map(() => [0, 0]);
     let body = "", lastCat = null;
     for (const id of taskIds) {
       const m = meta(id);
@@ -118,13 +129,15 @@
         lastCat = m.category;
         body += `<tr class="mx-cat"><th colspan="${cols.length + 2}">${esc(m.category.replace("_", "-"))}</th></tr>`;
       }
-      let pass = 0, n = 0;
+      let pass = 0, n = 0, rowD = 0, rowPairs = 0;
       const tds = cols.map((c, ci) => {
         const stacks = rounds.map((rd) => `<span class="mx-stack">` + REPOS.map((rs) => {
           const r = cell.get(`${id}|${c.label}|${rs}|${rd}`);
           if (!r) return `<span class="mx-chip ${m.repo_sizes.includes(rs) ? "mx-none" : "mx-na"}" aria-hidden="true"></span>`;
           n++; colPass[ci][1]++;
           if (r.outcome === "PASS") { pass++; colPass[ci][0]++; }
+          const off = showDelta && offRun.get(`${id}|${c.label}|${rs}`);
+          if (off) { const d = (r.outcome === "PASS") - (off.outcome === "PASS"); rowD += d; rowPairs++; colDelta[ci][0] += d; colDelta[ci][1]++; }
           const sel = r.run_id === state.a ? " sel-a" : r.run_id === state.b ? " sel-b" : "";
           const tip = `${r.task_id} · ${r.level_label} · repo ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"}\n${r.outcome}`
             + ` · tests ${frac(r.tests_passed, r.tests_total)}${r.reuse_passed == null ? "" : ` · reuse ${yn(r.reuse_passed)}`}`
@@ -134,9 +147,9 @@
         }).join("") + `</span>`).join("");
         return `<td class="mx-cell">${stacks}</td>`;
       }).join("");
-      body += `<tr><th class="mx-task" title="tier ${m.tier}">${esc(id)} <span class="mx-rl">${REPOS.map((rs) => `<i class="${m.repo_sizes.includes(rs) ? "" : "off"}">${rs}</i>`).join("")}</span></th>${tds}<td class="mx-sum">${n ? `${pass}/${n}` : "–"}</td></tr>`;
+      body += `<tr><th class="mx-task" title="tier ${m.tier}">${esc(id)} <span class="mx-rl">${REPOS.map((rs) => `<i class="${m.repo_sizes.includes(rs) ? "" : "off"}">${rs}</i>`).join("")}</span></th>${tds}<td class="mx-sum">${n ? `${pass}/${n}` : "–"}${delta(rowD, rowPairs)}</td></tr>`;
     }
-    const foot = `<tr class="mx-foot"><th>PASS</th>` + colPass.map(([p, n]) => `<td class="mx-sum" title="${p} of ${n} runs">${n ? `${Math.round(100 * p / n)}%` : "–"}</td>`).join("") + `<td></td></tr>`;
+    const foot = `<tr class="mx-foot"><th>PASS</th>` + colPass.map(([p, n], ci) => `<td class="mx-sum" title="${p} of ${n} runs">${n ? `${Math.round(100 * p / n)}%` : "–"}${delta(colDelta[ci][0], colDelta[ci][1], true)}</td>`).join("") + `<td></td></tr>`;
     $("#runs").innerHTML = taskIds.length
       ? `<table class="mx"><thead>${head1}${head2}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`
       : `<p class="empty">No runs match the filters.</p>`;
@@ -146,7 +159,7 @@
   function renderMatrixLegend() {
     $("#mx-legend").innerHTML = Object.entries(OCLS).map(([o, c]) => `<span><i class="mx-chip ${c}"></i>${esc(o)}</span>`).join("")
       + `<span><i class="mx-chip mx-none"></i>no run</span><span><i class="mx-chip mx-na"></i>task not on this repo</span>`
-      + `<span class="meta">At L0–L2, the harness runs each task once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
+      + `<span class="meta">Each cell stacks repos S, M and L from top to bottom${state.round === "all" ? ", with thinking on on the left and off on the right" : ""}. Column labels: q = search queries written by the model, +h = reuse hint, emb = embeddings, hyb = hybrid, sel = selective, qw = Qwen Code tool names. ${(state.round || "final") === "final" ? " Under each PASS total, the change against thinking off is given, counted over the runs both rounds have (columns in percentage points)." : ""} At L0–L2, the harness runs each task once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
   }
 
   function fillFilters() {
@@ -214,13 +227,32 @@
     try { return window.hljs.highlight(text, {language: lang, ignoreIllegals: true}).value; } catch (e) { return esc(text); }
   }
 
+  // Highlights consecutive lines as one text, so constructs spanning lines (docstrings, multi-line strings)
+  // keep their colours, then splits the result back into lines: spans open at a line break are closed at
+  // its end and reopened on the next line. hljs escapes the code, so every "<" in its output is a tag.
+  function hlLines(texts, lang) {
+    if (!window.hljs || lang === "plaintext") return texts.map(esc);
+    const out = [], open = [];
+    for (const line of hl(texts.join("\n"), lang).split("\n")) {
+      const start = open.join("");
+      for (const m of line.matchAll(/<span[^>]*>|<\/span>/g)) m[0][1] === "/" ? open.pop() : open.push(m[0]);
+      out.push(start + line + "</span>".repeat(open.length));
+    }
+    return out;
+  }
+
   // One file of a diff, side by side (the Diff tab and edit calls): f = {old, path, hunks, add, del}.
+  // Each side of a hunk is highlighted as one block (a hunk that starts inside a string can still be off).
   function fileDiffHTML(f, label) {
     const created = f.old === "/dev/null", deleted = f.path === "/dev/null";
     const path = deleted ? f.old : f.path;
     const lang = LANG[(path.split(".").pop() || "").toLowerCase()] || "plaintext";
     const one = created || deleted;
-    const cell = (side, cls) => side ? `<td class="ln">${side.no}</td><td class="code ${cls}">${hl(side.text, lang) || " "}</td>` : `<td class="ln"></td><td class="code none"></td>`;
+    for (const h of f.hunks) for (const k of ["o", "n"]) {
+      const sides = h.rows.map((r) => r[k]).filter(Boolean);
+      hlLines(sides.map((s) => s.text), lang).forEach((html, i) => { sides[i].html = html; });
+    }
+    const cell = (side, cls) => side ? `<td class="ln">${side.no}</td><td class="code ${cls}">${side.html || " "}</td>` : `<td class="ln"></td><td class="code none"></td>`;
     const rows = f.hunks.map((h) => (h.head ? `<tr class="hunk"><td colspan="${one ? 2 : 4}">${esc(h.head)}</td></tr>` : "") + h.rows.map((r) => {
       if (one) return `<tr>${cell(created ? r.n : r.o, created ? "add" : "del")}</tr>`;
       return `<tr>${cell(r.o, r.kind === "chg" ? "del" : "")}${cell(r.n, r.kind === "chg" ? "add" : "")}</tr>`;
@@ -505,7 +537,6 @@
     $("#legend").innerHTML = Object.entries(KINDS).map(([k, t]) => `<span class="k-${k}"><i></i>${t}</span>`).join("");
     [runs] = await Promise.all([fetch("raw/index.json").then((r) => r.json()),
       fetch("raw/tasks.json").then((r) => r.json()).then((ts) => { tasks = new Map(ts.map((x) => [x.id, x])); }).catch(() => {})]);
-    renderMatrixLegend();
     byId = new Map(runs.map((r) => [r.run_id, r]));
     if (state.a && !byId.has(state.a)) state.a = null;
     if (state.b && !byId.has(state.b)) state.b = null;
