@@ -43,3 +43,17 @@ def test_built_pages_in_docs_are_up_to_date():
     `python3 scripts/build_pages.py` after changing a page, the layout, or a CSS/JS file."""
     stale = [n for n in L.page_names() if (ROOT / "docs" / f"{n}.html").read_text() != L.render_page(n)]
     assert not stale, f"rebuild with scripts/build_pages.py: {stale}"
+
+
+def test_report_keeps_the_native_names_arm_apart(tmp_path, monkeypatch):
+    """build_report's rounds are keyed like the site's: a qwen-names run never replaces the plain one."""
+    import json
+    import build_report as br
+    base = {"task_id": "t", "level": "L7", "retriever": "embed", "query_mode": "none", "agent_variant": "selective",
+            "prompt_arm": "base", "repo_size": "M", "map_docs": False, "thinking": False, "prompt_version": 4,
+            "failed_call_cost": 0.5, "label": "ok"}
+    rows = [dict(base, run_id="a"), dict(base, run_id="b", tool_names="qwen", label="broken")]
+    (tmp_path / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(br, "RESULTS", tmp_path)
+    _, off, _ = br.load()
+    assert sorted(r["run_id"] for r in off.values()) == ["a", "b"]

@@ -22,7 +22,7 @@ RESULTS = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--res
 if not RESULTS.is_absolute():
     RESULTS = ROOT / RESULTS
 sys.path.insert(0, str(ROOT / "scripts"))
-from build_site import level_label, outcome, thinking_on_rows  # noqa: E402
+from build_site import config_key, level_label, outcome, thinking_on_rows  # noqa: E402
 import site_layout  # noqa: E402
 
 # Illustrative API prices (USD per million tokens), stated on the page. Not quotes.
@@ -43,8 +43,7 @@ def load():
         g = json.loads(line)
         if str(g.get("rubric_version")) == "2":
             grades[g["run_id"]] = g
-    key = lambda r: (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
-                     r["repo_size"], bool(r.get("map_docs")))
+    key = config_key            # the site's one configuration key (tool_names included: the native-names arm)
     pv = max((r.get("prompt_version", 1) for r in rows), default=3)          # the round's prompt version
     final = {key(r): r for r in thinking_on_rows(rows, pv)}     # thinking on (concurrent; clean only if nothing else)
     off = {}
