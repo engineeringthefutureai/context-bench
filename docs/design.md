@@ -10,6 +10,8 @@ Task set and coverage: [diagrams/task-coverage.html](diagrams/task-coverage.html
 3. What does each level cost in tokens and latency for what it delivers?
 4. (Optional model axis) How much of any difference comes from the model and how much from context
    building?
+5. Does an agent harness that speaks the model's native tool vocabulary beat a model-agnostic one with
+   the same capabilities? (Hypothesis and test plan: "Native tool vocabulary" below.)
 
 ## Metrics
 - Hidden-test pass rate.
@@ -23,6 +25,9 @@ One prompt template; base arm never mentions reuse; first pass: one model, one s
 server-default temperature (crude on purpose; more seeds, sizes and CIs later);
 private purpose-built repo (no memorization); no silent truncation; task text in product language;
 whole-file output format (`<file path="...">`) instead of diffs.
+
+## Labels and badges
+Outcomes, badges and how judged labels are checked: [labeling-design.md](labeling-design.md).
 
 ## Grading
 One blind Claude Code judge per task compares all candidate patches at once (`context_bench/grade.py`,
@@ -46,6 +51,51 @@ produced. Output: an overall ranking and 1-5 scores per dimension. A hand-graded
 - Level modules are self-contained; duplication between them is intentional for readability.
 - No duplication detector for now (simple first). Reuse = a spy-based hidden test; the judge covers how a
   non-reusing patch re-implemented things. A "plagiarism scanner" may come later.
+
+## Native tool vocabulary (hypothesis, 2026-11-24)
+
+**Observation (the user's, from a while back).** The model has strong affinities for specific tools,
+most likely from training on traces of particular agent harnesses.
+
+**Hypothesis.** A harness from the same ecosystem as the model outperforms a model-agnostic harness with
+the same capabilities. A lab knows what its model was trained on and can match tool names, parameters and
+result formats to it. A generalist harness serves many models; some have per-model adjustments, but
+rarely at the level of a native harness.
+
+**Evidence so far (448 L7/L8 runs, v3 and v4, thinking off, 2026-11-24).** The names the model reaches
+for are Qwen Code's (Qwen's own agent, 0.24.7: `read_file`, `write_file`, `edit`, `glob`,
+`grep_search`, `list_directory`, `run_shell_command`, `todo_write`, ...):
+
+| Seen in our runs | Qwen Code |
+|---|---|
+| `read_file` is 3,839 of ~5,850 calls (two thirds), even where the cheaper `read_symbol` is offered (176 calls) | `read_file` |
+| L8 offers no `read_file`; the model still calls `read_file_block`, `read_file=read_file`, `read_file<file_placeholder` | `read_file` |
+| `write_file` and `edit_file` called, never offered | `write_file`, `edit` |
+| `list_files` opened 97% of v3 agent runs | `list_directory` |
+| `path` written in grep calls whatever the schema said (grep now accepts it) | `grep_search(pattern, path, include)` |
+
+L8 stopped calling `read_file` only after the harness answered it with a specific "there is no read_file
+tool" error and the tool note said so. Caveat: Qwen Code is a fork of Gemini CLI, which uses the same
+names, so the affinity may be to a family of harnesses (and similar file tools in OpenHands, Aider and
+others) rather than to one lab's. The hypothesis holds either way; only "native" widens to "the harnesses
+the model was trained on".
+
+**Test plan.**
+1. **Native-names arm (controlled, cheap).** L7 selective and L8, repos M and L: the same tools,
+   budget, results and tool note, with Qwen Code's names and parameters (`read_file(file_path, offset,
+   limit)`, `grep_search(pattern, path, include)`, `glob(pattern)`, `edit(file_path, old_string,
+   new_string)`, `write_file`). Only naming and schema change, so a difference is the affinity alone.
+   An ablation arm like `reuse_hint` (own run ids), about 50-100 runs, after the thinking-off sweep.
+   Watch: failed calls, unknown-tool errors, calls per run, PASS, and for L8 whether `read_file` still
+   pulls the model away from reading by symbol.
+2. **The native harness itself (realistic, less controlled), only if 1 shows an effect.** Qwen Code
+   headless on the same tasks and repo copies, against the same vLLM server, scored by the same hidden
+   tests; reported as a separate "native harness" arm, never as a level. Its system prompt and tools
+   differ, so it compares whole harnesses. Its shell tool executes code, which this experiment left
+   out on purpose: disable it in Qwen Code's settings. Running an external agent touches hard rule 4
+   (no agent frameworks; the rule is about our own harness): needs the user's explicit go.
+3. **The other half of the prediction (with the model axis).** A model from another lab should gain
+   nothing from Qwen-native names, or lose.
 
 ## Later (noted, not scheduled)
 - **Tasks that trip full context (L3).** On repo M (~37k tokens) the 27B at L3 passes everything,

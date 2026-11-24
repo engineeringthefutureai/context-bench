@@ -82,10 +82,12 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
     the tier-1 tasks, L1-L2 each task once on its smallest repo) are drawn as "not run", so a bar's
     length is comparable across levels."""
     not_run = max(scale - n, 0)
-    names = {"pass": "PASS", "fail": "FAIL", "invalid": "INVALID", "oot": "OUT OF TOKENS", "nofit": "NO FIT",
+    names = {"pass": "PASS", "fail": "FAIL", "unparsable": "UNPARSABLE", "explore": "ASKED TO EXPLORE",
+             "invalid": "INVALID", "oot": "OUT OF TOKENS", "nofit": "NO FIT",
              "running": "in progress", "queued": "queued"}
     parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{names[k]}: {counts.get(k, 0)}"></span>'
-                    for k in ("pass", "fail", "invalid", "oot", "nofit", "running", "queued") if counts.get(k))
+                    for k in ("pass", "fail", "unparsable", "explore", "invalid", "oot", "nofit", "running", "queued")
+                    if counts.get(k))
     if not_run:
         parts += f'<span class="o-na" style="flex:{not_run}" title="not run at this level: {not_run}"></span>'
     note = f' <span class="small">({not_run} n/a)</span>' if not_run else ""
@@ -141,7 +143,8 @@ def build_progress(final: dict, off: dict) -> str:
         for i, lab in enumerate(order):
             oc = collections.Counter(outcome(r) for r in by[lab])
             pend = pending[rnd, lab]
-            counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"],
+            counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"], "explore": oc["ASKED TO EXPLORE"],
+                      "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"],
                       "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"]}
             group = lab.split()[0].replace("+docs", "")
             prev = order[i - 1].split()[0].replace("+docs", "") if i else group
@@ -157,15 +160,16 @@ def build_progress(final: dict, off: dict) -> str:
         by = collections.defaultdict(collections.Counter)
         for r in rows:
             by[r["repo_size"]][outcome(r)] += 1
-        cols = ["PASS", "FAIL", "INVALID", "OUT OF TOKENS", "NO FIT"]
+        cols = ["PASS", "FAIL", "UNPARSABLE", "ASKED TO EXPLORE", "INVALID", "OUT OF TOKENS", "NO FIT"]
         body = "".join(f"<tr><td>{s}</td>" + "".join(f"<td class=r>{c[k]}</td>" for k in cols)
                        + f"<td class=r>{sum(c.values())}</td></tr>" for s, c in sorted(by.items()))
         return (f"<h3>{e(title)}</h3><div class=table-wrap><table><thead><tr><th>Repo</th>"
                 + "".join(f"<th class=r>{k}</th>" for k in cols) + "<th class=r>Runs</th></tr></thead>"
-                f"<tbody>{body or '<tr><td colspan=7>none yet</td></tr>'}</tbody></table></div>")
+                f"<tbody>{body or '<tr><td colspan=9>none yet</td></tr>'}</tbody></table></div>")
 
     legend = ('<div class="olegend small">' + "".join(
-        f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("fail", "FAIL"), ("invalid", "INVALID"),
+        f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("fail", "FAIL"),
+                                                          ("unparsable", "UNPARSABLE"), ("explore", "ASKED TO EXPLORE"), ("invalid", "INVALID"),
                                                           ("oot", "OUT OF TOKENS"), ("nofit", "NO FIT"),
                                                           ("running", "in progress"), ("queued", "queued"))) + "</div>")
     if status:
@@ -220,7 +224,8 @@ def build() -> str:
     for i, name in enumerate(order):
         xs = by[name]
         oc = collections.Counter(outcome(r) for r in xs)
-        counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"]}
+        counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"],
+                  "explore": oc["ASKED TO EXPLORE"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"]}
         group = name.split()[0].replace("+docs", "")
         prev = order[i - 1].split()[0].replace("+docs", "") if i else group
         bars.append(obar(name, counts, len(xs), "group-start" if group != prev else "", scale=scale))

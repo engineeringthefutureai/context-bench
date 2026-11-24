@@ -72,4 +72,5 @@ The guide page (`docs/guide.html`) covers configuration: models, the embedder, g
 - `docs/semantic-search-design.md`: the embedding index (no truncation, windows, bulk builds on the B60s)
 - `docs/repo-L-design.md`: how repo L was grown from M
 - `docs/penalty-grading-design.md`: the judge for the v4 round
+- `docs/labeling-design.md`: how runs get outcomes and badges (exact rules, embeddings, validation)
 - `CLAUDE.md`: the hard rules and the current state of every level, in detail

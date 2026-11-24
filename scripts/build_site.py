@@ -222,14 +222,24 @@ INDEX_FIELDS = ["run_id", "round", "task_id", "category", "tier", "level", "retr
 
 
 def outcome(r: dict) -> str:
-    """Report outcome (the stored label is unchanged): PASS, FAIL, INVALID (no accepted answer),
-    OUT OF TOKENS (hit the output limit), NO FIT (prompt too long). Infrastructure errors are never
-    recorded; those runs are redone."""
+    """Report outcome (the stored label is unchanged): PASS, FAIL, OUT OF TOKENS (hit the output limit),
+    NO FIT (prompt too long), and three kinds of no accepted answer:
+    - UNPARSABLE: code is there but not in the required <file> blocks (format_status bad_format);
+    - ASKED TO EXPLORE: no code; the reply asks to look at the repository first, in prose or as a pretend
+      tool call (no_code, tool_request). Checked 2026-11-24 by embedding all 231 such replies of the
+      thinking-off rounds: every one is "let me look first", none asks the user anything;
+    - INVALID: anything else (an agent's tool error).
+    Infrastructure errors are never recorded; those runs are redone."""
     if r.get("label") == "no_fit":
         return "NO FIT"
     if "max_output_tokens" in (r.get("error") or ""):
         return "OUT OF TOKENS"
-    if r.get("label") == "tool_error" or r.get("format_status", "ok") != "ok":
+    fs = r.get("format_status", "ok")
+    if fs == "bad_format":
+        return "UNPARSABLE"
+    if fs in ("no_code", "tool_request") and r.get("label") != "tool_error":
+        return "ASKED TO EXPLORE"
+    if r.get("label") == "tool_error" or fs != "ok":
         return "INVALID"
     return "PASS" if r.get("label") == "ok" else "FAIL"
 
