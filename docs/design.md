@@ -147,6 +147,65 @@ It names what the model already infers, so the effect is probably small, but it 
 frozen (a change reruns everything), so it stays for the v4 round; remove it before any new round or
 fixture change.
 
+## Pretend tool calls at levels without tools (observation, 2026-11-24)
+
+At L0-L6 no tools are offered, yet 60 of ~2,050 replies (current round, v3, archive-v4-qwen3emb) write
+tool calls as text. All 60 are thinking off (0 of ~600 thinking-on runs); 41 are at L6, whose map shows
+names without bodies; 49 contain only the call (ASKED TO EXPLORE), 9 also a valid answer.
+
+The format is not Qwen's. 56 of 60 use Anthropic's pre-native-tools XML:
+`<function_calls><invoke name="Read"><parameter name="file_path">...</parameter></invoke></function_calls>`,
+59 after a "let me look first" sentence, one followed by an invented `<function_results>` block; 3 use
+self-closing `<read_file path=... />` tags. With tools offered, the model writes Qwen's
+`<tool_call><function=...><parameter=...>` (vLLM parses it); the only two text calls in all L7/L8
+transcripts are broken copies of that, never of the XML above.
+
+Vocabulary per reply: generic names (`read_file(path)`, `repo_lookup`, `readCode`) 33; Claude Code 19
+(`Read(file_path, offset, limit)`, `Grep(pattern, output_mode, head_limit, -n, -A)`, `Glob`,
+`mcp__ide__get_terminal_output`, `mcp__server__tool` naming); Cline `execute_command` 2; Gemini CLI /
+Qwen Code (`run_shell_command`, `grep_search`, `ReadFile`) 2. Per-call counts mislead: two runaway replies
+repeat `mcp__typed_json__tool` 319 times (to the 32k limit) and five `Read` calls 165 times.
+
+Semi-speculative reading:
+- The model's "tool memory" has more than one source: offered tools, it follows its own template;
+  without them it falls back to a Claude-style format and, in a third of cases, Claude Code's tools.
+  That fits training on Claude-generated agent transcripts, but the format is publicly documented and
+  such transcripts are in open datasets, so this is consistent with distillation, not proof of it.
+- The native-names arm tested Qwen Code's names; in this data Claude Code's vocabulary appears about
+  ten times as often. If the arm is ever revisited, Claude Code's names are the stronger candidate.
+- `Read(file_path, offset, limit)` is a whole-file reader with paging, the same pull towards reading
+  files that L7 showed (3,839 `read_file` vs 176 `read_symbol` calls) and that L8 removes.
+- Thinking seems to suppress the habit entirely: with reasoning, the model answers with what it has.
+
+## L3 on trap-001: right plan, corrupted answer (observation, 2026-11-24)
+
+Four L3 runs on repo M (v3 and v4, thinking off and on). Both thinking-on reasonings get the trap right:
+they notice that `format_weight` documents "lb" but falls through to kg, reject the dead
+`common/shipping_calc.kgToLbs` (2.2 gives 3.30, not 3.31), ignore the old code's `'USA'`, and plan
+fixes to both files. The answers then diverge from the plans:
+- v4 thinking on: the reasoning ends "Output two file blocks"; the answer has one. The `packaging.py`
+  fix is missing (US labels show "1.5 kg"), and `label_text` gains four lines the plan never had
+  (`lines[1] = format_address(to)`, `lines[1] = ""`, `lines.insert(0, ...)`, then a rebuild).
+- v3 thinking on: correct helper fix, plus `height_cm: int = 0` on the `Box` dataclass, which the
+  reasoning copied unchanged; the module no longer imports.
+- v3 thinking off: `for sku for sku, qty in parcel.items`, a duplicated-token syntax error.
+- v4 thinking off: clean code that trusts the docstring, the intended trap failure.
+
+The v4 reasoning also shows strain before the answer: it writes `packaging.py` out from memory, leaves
+out `pick_box`, notices and patches it ("Preserve all of it"), then drops the file from the answer.
+In the v3 round only L4 and L7, with small contexts and `packaging.py` in view, reused and fixed the helper.
+
+Semi-speculative reading: on this task the whole-repo context did not mislead the reasoning (every
+decoy was weighed and set aside); it degraded execution, the faithful copying of a plan into complete
+files out of a 41k-token prompt. The errors look like attention slips (phantom defaults, stray
+assignments, duplicated tokens, a dropped file), not wrong decisions. Caveats: 4 runs on one task;
+across all tasks L3 doesn't show more non-importing code than other levels on repo M (0-15% vs L1's
+24-50%, mostly invented imports), so this is not evidence of general context pollution.
+
+Test, if wanted (no model calls): for thinking-on runs at every level, compare what the reasoning
+planned with what the answer contains (files planned but not in the answer; changed lines that never
+appear in the reasoning) and see whether that gap grows with context size.
+
 ## Later (noted, not scheduled)
 - **Tasks that trip full context (L3).** On repo M (~37k tokens) the 27B at L3 passes everything,
   decoys and dead code included (2026-11-20). Once the core levels exist, design prompts where
