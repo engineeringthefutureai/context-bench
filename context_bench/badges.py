@@ -11,6 +11,7 @@ Output: one line per run in results/badges.jsonl. Badges never change labels or 
 from __future__ import annotations
 
 import json
+import random
 import re
 from pathlib import Path
 
@@ -39,10 +40,6 @@ INTENTS: dict[str, list[str]] = {
     "ASKS FOR INFORMATION": [
         "Could you share the contents of that file?", "Please provide the missing module.",
         "Which behaviour do you expect here?", "Can you clarify the requirement?",
-    ],
-    "WANTS TO EXPLORE": [
-        "Let me start by exploring the repository.", "First I need to look at the existing code.",
-        "I will search the codebase for the relevant function.", "Let me read that file first.",
     ],
     "STATES A PLAN": [
         "To satisfy the request, I need to do the following steps.", "Here is my plan.",
@@ -159,13 +156,119 @@ class IntentScorer:
         return found
 
 
+# WANTS TO EXPLORE is measured, not matched to example phrases: the similarity of the whole final answer to
+# the centroid of real "let me look first" replies (docs/labeling-design.md). Built and calibrated by
+# build_dodge_centroid (cbench badges --rebuild-centroid); specific to the embedder and prefix it was built
+# with, so it's skipped (with a warning) under another embedder.
+DODGE_PREFIX = "task: clustering | query: "
+CENTROID = Path(__file__).resolve().parent.parent / "grading" / "dodge_centroid"     # .npy and .json
+
+
+# Inside a reply that did answer, the centroid can't tell "let me look first" from "I have enough, writing it
+# now" (both short sentences about the next step; a second centroid for answer prose didn't separate them
+# either). There a WANTS TO EXPLORE badge also needs an explicit look-first phrase.
+LOOK_FIRST = re.compile(r"\b(let me|i'll|i will|i need to|first,? i)\b[^.?!]{0,60}?\b(look|explore|check|search|"
+                        r"read|see|inspect|examine|investigate|find)\b|\bi need to (know|understand|see)\b", re.I)
+
+
+def is_dodge(r: dict) -> bool:
+    """The ASKED TO EXPLORE outcome: no code, asked to look at the repository first."""
+    return r.get("format_status") in ("no_code", "tool_request") and r.get("label") != "tool_error"
+
+
+def dodge_text(r: dict, run_dir: Path) -> str:
+    """What the centroid compares: the final prose; for a reply without valid code and without prose (a bare
+    pretend tool call, fenced code), the start of the reply."""
+    prose = final_prose(r, run_dir)
+    if len(prose) >= 20 or r.get("format_status") not in ("no_code", "tool_request", "bad_format"):
+        return prose[:2000]                  # an answer that is all code has nothing to compare
+    resp = run_dir / "response.txt"
+    return (resp.read_text()[:600] if resp.is_file() else "")
+
+
+class DodgeScorer:
+    def __init__(self, embedder, path: Path = CENTROID):
+        self.embedder = embedder
+        self.meta = json.loads(path.with_suffix(".json").read_text())
+        self.c = np.load(path.with_suffix(".npy"))
+        if self.meta["model"] != embedder.name:
+            raise ValueError(f"dodge centroid was built with {self.meta['model']}, not {embedder.name}")
+
+    def badge(self, text: str, answered: bool = False) -> list[dict]:
+        """answered: the reply has an accepted answer (format_status ok), so a look-first phrase is required."""
+        if len(text) < 20 or (answered and not LOOK_FIRST.search(text)):
+            return []
+        sim = float(self.embedder.embed([DODGE_PREFIX + text])[0] @ self.c)
+        t = self.meta["thresholds"]
+        if sim < t["medium"]:
+            return []
+        return [{"badge": "WANTS TO EXPLORE", "confidence": "high" if sim >= t["high"] else "medium",
+                 "similarity": round(sim, 3), "sentence": text[:200]}]
+
+
+def build_dodge_centroid(sources: list[tuple[list[dict], Path]], embedder, out: Path = CENTROID) -> dict:
+    """Centroid of every dodge (is_dodge) in thinking-off runs of the given (rows, runs_dir) sources, with
+    thresholds calibrated against prose that came with real answers (PASS/FAIL, single-shot levels, 400 at
+    random, seed 1) and UNPARSABLE replies. Validation: a centroid of the first source alone, scored on the
+    other sources' dodges (held out). medium = the threshold that best balances dodges caught and others
+    cleared; high = where at most 2% of the others reach. Writes out.npy and out.json; returns the json."""
+    pos, neg_prose, neg_unp = [], [], []
+    for k, (rows, runs_dir) in enumerate(sources):
+        for r in rows:
+            if r.get("thinking") is not False:
+                continue
+            d = runs_dir / r["run_id"]
+            if is_dodge(r):
+                pos.append((k, dodge_text(r, d)))
+            elif r.get("format_status") == "bad_format":
+                neg_unp.append(dodge_text(r, d))
+            elif r.get("format_status") == "ok" and r["level"] not in ("L7", "L8"):
+                p = final_prose(r, d)
+                if len(p) >= 20:
+                    neg_prose.append(p[:2000])
+    random.Random(1).shuffle(neg_prose)
+    neg = neg_prose[:400] + neg_unp
+    emb = lambda xs: embedder.embed([DODGE_PREFIX + t for t in xs])
+    P, N = emb([t for _, t in pos]), emb(neg)
+    first = np.array([k == 0 for k, _ in pos])
+    unit = lambda v: v / np.linalg.norm(v)
+    c_first = unit(P[first].mean(0))
+    held, others = P[~first] @ c_first, N @ c_first
+    auc = float(np.mean(held[:, None] > others[None, :])) if len(held) else None
+    c = unit(P.mean(0))
+    sp, sn = P @ c, N @ c
+    grid = np.linspace(0.70, 0.98, 281)
+    medium = float(max(grid, key=lambda t: np.mean(sp >= t) + np.mean(sn < t)))
+    high = float(next((t for t in grid if np.mean(sn >= t) <= 0.02), grid[-1]))
+    meta = {"model": embedder.name, "prefix": DODGE_PREFIX, "dodges": int(len(P)), "negatives": int(len(N)),
+            "thresholds": {"medium": round(medium, 3), "high": round(high, 3)},
+            "at_medium": {"dodges_caught": round(float(np.mean(sp >= medium)), 3),
+                          "others_cleared": round(float(np.mean(sn < medium)), 3)},
+            "at_high": {"dodges_caught": round(float(np.mean(sp >= high)), 3),
+                        "others_cleared": round(float(np.mean(sn < high)), 3)},
+            "held_out": {"dodges": int((~first).sum()), "auc": None if auc is None else round(auc, 3)}}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.save(out.with_suffix(".npy"), c.astype(np.float32))
+    out.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
+    return meta
+
+
 def compute(rows: list[dict], runs_dir: Path, embedder) -> list[dict]:
-    """One record per run: exact badges and intent badges of its final prose."""
+    """One record per run: exact badges, intent badges of its final prose, and WANTS TO EXPLORE from the
+    dodge centroid (when one exists for this embedder)."""
     scorer = IntentScorer(embedder)
+    try:
+        dodge = DodgeScorer(embedder)
+    except (FileNotFoundError, ValueError) as e:
+        import sys
+        print(f"badges: no WANTS TO EXPLORE ({e})", file=sys.stderr)
+        dodge = None
     out = []
     for r in rows:
         d = runs_dir / r["run_id"]
         prose = final_prose(r, d)
-        out.append({"run_id": r["run_id"], "exact": exact_badges(r, d),
-                    "intent": scorer.badges(prose) if len(prose) >= 20 else []})
+        intent = scorer.badges(prose) if len(prose) >= 20 else []
+        if dodge:
+            intent += dodge.badge(dodge_text(r, d), answered=r.get("format_status") == "ok")
+        out.append({"run_id": r["run_id"], "exact": exact_badges(r, d), "intent": intent})
     return out

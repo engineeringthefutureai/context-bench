@@ -77,8 +77,9 @@ Badges add detail to a run without touching its outcome. `cbench badges` writes 
 OUT OF TOKENS, RETRIED: FORMAT, RETRIED: SYNTAX, SYNTAX ERROR IN PATCH, TESTS ADDED, USES DEAD CODE.
 
 **Intent badges** describe what the final answer's prose says: DECLARES COMPLETION, CLAIMS VERIFICATION,
-NOTES MISSING CONTEXT, ASKS FOR INFORMATION, WANTS TO EXPLORE, STATES A PLAN, CONCEDES, LEAVES WORK
-UNFINISHED, STATES REUSE. Method:
+NOTES MISSING CONTEXT, ASKS FOR INFORMATION, STATES A PLAN, CONCEDES, LEAVES WORK UNFINISHED, STATES REUSE
+(example phrases, below), and WANTS TO EXPLORE (the dodge centroid, next section). Method for the
+example-phrase labels:
 
 1. The final prose: the last reply without tool calls (agents) or the response, with `<file>` blocks,
    tool-call blocks and code fences removed. Split into sentences (and list items); fragments under 12
@@ -123,6 +124,30 @@ rest. The "real answers" closest to it say "I need to understand the codebase be
 me explore the files..." and then deliver code in the same reply: explore language, real answer. So its
 precision on explore *language* is better than 92%, and it can measure something the outcome can't: a
 model announcing that it wants to explore and answering anyway.
+
+**In use: the WANTS TO EXPLORE badge (2026-11-24).** The centroid replaced the badge's 5 hand-written
+example phrases. It lives in `grading/dodge_centroid.npy`, with its embedder, prefix, size, thresholds and
+validation in `grading/dodge_centroid.json`. `cbench badges --rebuild-centroid` rebuilds it from every
+dodge in `results/` and `results/archive-*/` (thinking off), using the current folder alone for the
+held-out check. First build: 226 dodges, 465 others, medium at similarity 0.878 (91% of dodges caught, 91%
+of others cleared), high at 0.902 (98% of others below), held-out AUC 0.962. A centroid built with another
+embedder is refused, not silently used.
+
+Two rules came from reading every hit:
+
+- **An answer made only of code has nothing to compare.** The raw-reply fallback (for replies without
+  prose) applies only to replies without valid code; on valid answers it had matched file headers.
+- **Inside a reply that did answer, the centroid alone is about half right.** It scores "Now I have
+  enough context. Creating the module:" as high as "Let me look at the referenced helpers first": to
+  EmbeddingGemma both are short sentences about the next step. A second centroid for answer prose,
+  scored as a margin, didn't separate them either (held-out AUC 0.93, worse). So on runs with an
+  accepted answer the badge also needs an explicit look-first phrase ("let me look / check / search /
+  explore / read ...", "I need to see / know / understand ..."). With it, all 10 such hits in the v4
+  round read as real look-first sentences.
+
+Result on the v4 thinking-off round (722 runs): 118 of 130 ASKED TO EXPLORE runs carry the badge (82
+high); on runs that answered, 10 do, and 9 of those 10 FAIL: wanting to look first goes with not having
+what's needed.
 
 Caveats: the centroid is specific to EmbeddingGemma 2 and its prefix (another embedder needs a new one,
 built the same way); it was built on one model's (Qwen 3.8 27B, thinking off) phrasing, so a different
