@@ -42,7 +42,7 @@ In about six years, tools found four answers to "what does the model get to see 
 
 ## The levels
 
-L0 through L6 are one-shot: the harness builds the context once and the model answers in a single reply. L7 and L8 are minimal agent loops, in which the model starts from a small context and calls a few tools to look around before it answers. Since prompt v4, the current round, the prompt never names the file to change, so at L1 to L6 the harness still puts that file first in the context, while at L7 and L8 the agent has to track it down itself.
+L0 through L6 are one-shot: the harness builds the context once and the model answers in a single reply. L7 and L8 are minimal agent loops, in which the model starts from a small context and calls a few tools to look around before it answers. Since prompt v4, the current round, the prompt never names the file to change, so at L1 to L6 the harness still puts that file first in the context, while at L7 and L8 the agent has to track it down itself. The [Levels](levels) page describes every variant in detail, including how the retrievers rank code and what each agent tool returns.
 
 <div class="table-wrap"><table>
   <thead><tr><th>Level</th><th>What the model sees</th></tr></thead>
