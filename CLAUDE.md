@@ -53,7 +53,7 @@ reasonably be done, with no thumb on the scale for or against any strategy.
 | L6 | `l6_repo_map` | Target + one-line signatures of every function/class (`map_docs = true`: + first docstring line, "L6+docs") |
 | L7 | `l7_agentic` | Target + tools `grep`, `list_files`, `read_file`, `find_references` (≤15 calls); `hybrid` adds `semantic_search`; `rich` and `selective` (below). Prompt v4: no target, the repo's file tree instead, no `list_files` |
 
-L8 (experimental, 2026-11-23, repo M only for now): `l7_agentic`'s `edit` variant, registered as its own
+L8 (experimental, 2026-11-23, all repos since the v4 Gemma rerun): `l7_agentic`'s `edit` variant, registered as its own
 level so it never mixes into L7. Starts from the symbol list (per file: path, lines, importers, names of
 functions/classes/methods/module constants, no signatures); `read_symbol` is the only reader (names, and
 "path:start-end"; a bare path or module name returns the file's outline); `grep`, `find_references`,
@@ -87,7 +87,7 @@ spec only): target + definitions of referenced symbols + 1-hop callers, LSP-styl
 needed helper is never referenced from the target, so it adds little over L2; revisit once there are
 several cross-file / convention tasks. Results recorded as L8 were migrated to L7 (new run ids).
 
-Prompt v4 (2026-11-23, implemented, `PROMPT_VERSION` still 3 until the full rerun starts): the shared
+Prompt v4 (2026-11-23, `PROMPT_VERSION = 4`, the current rounds; v3 = the `round-v3` tag): the shared
 prompt no longer mentions a target file (no "Target file:" line, no "and the target file" in the system
 prompt). L1-L6 still show the target (their context starts with its `File:` block). L7 gets no target: it
 finds the file from the task, and its starting context is the repository's whole file tree (each file's
@@ -225,7 +225,7 @@ with thinking on). New tasks must use repo M as it is (25 planted helpers; ~11 u
   Five incident-bloated live functions (200-270 lines, a business rule in the middle): payouts.batching,
   payments.settlement, warehouse.waves, api.webhook_delivery, pricing.cart. The workspace reads .py, .sql
   and .html (chunks stay Python-only; S and M have only .py). L must not contain any M task's feature
-  (list in the design doc); every M task holds on L (`repo_sizes = ["M", "L"]`). Not in the config yet.
+  (list in the design doc); every M task holds on L (`repo_sizes = ["M", "L"]`). In the sweep since v4 (`default_repo_sizes = ["S", "M", "L"]`).
 - `tasks/<id>/task.toml` + `hidden_tests/`. Target: 40 tasks — 20 reuse, 8 cross-file, 6 convention,
   6 control. `reuse-001` is the worked example. Now 30: 10 L-only (long-001..005: a rule buried in a long function, category `long`; reuse-L01..03; cross-L01 full stack; control-L01 long target), and reuse-001..010 (003-010 are M-only, built on
   M's planted helpers, each with a behaviour quirk a naive rewrite gets wrong), cross-001..003,
@@ -259,10 +259,13 @@ cbench one --task reuse-001 --level L1
 cbench run                       # resumable; --level L1 --level L3 to limit, --dry-run to list what is left
 cbench run --clean --thinking    # final round: serial, cold prefix cache before every run (cache reset,
                                  # periodic restarts; CBENCH_RESTART_* in .env), --rerun to redo recorded configs
+cbench index --embeddings       # embed every file window and function now (the sweep's pre-flight does it too);
+                                 # --bulk: on both B60s through the GPU manager (docs/semantic-search-design.md)
+cbench badges                    # exact and intent badges per run (results/badges.jsonl)
 cbench rescore                   # protocol, visibility, repo-tests fields from saved runs, no model calls
 cbench grade                     # blind judge per task (uses the Claude account; --task to limit)
 cbench report
 ```
 Model under test: Qwen 3.8 27B. Results so far come from the FP8 build on vLLM (`[models."qwen3.8-27b-fp8"]`,
-2x B60, TP=2, 4 concurrent requests): pass `--model qwen3.8-27b-fp8`, since the default entry is the
+2x B60, TP=2; 2 concurrent requests since repo L, 4 before): pass `--model qwen3.8-27b-fp8`, since the default entry is the
 llama.cpp GGUF (`Qwen3.8-27B-UD-Q6_K_XL.gguf`, KV cache q8_0). Embedder: Ollama on the iGPU, port 21434 (`embeddinggemma-2`).

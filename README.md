@@ -2,44 +2,71 @@
 
 Measuring how context building shapes LLM-written code, from one pasted file to agentic search.
 
-The same coding tasks run on the same model eight times, each with a different way of building the
-model's context:
+The same coding tasks run on the same model with nine different ways of building the model's context.
+Only the context varies; the system prompt, task text, output format and generation settings are the same
+for every level.
 
 | Level | Strategy |
 |---|---|
-| L0 | No context |
-| L1 | One file |
-| L2 | Hand-picked files |
+| L0 | No context (control tasks only) |
+| L1 | One file (the target) |
+| L2 | Hand-picked files: the target, its imports, its test file |
 | L3 | Whole project |
-| L4 | File-level RAG |
-| L5 | Function-level RAG |
-| L6 | Repo map |
-| L7 | Agentic search (grep / hybrid) |
+| L4 | File-level RAG (BM25 or embeddings) |
+| L5 | Function-level RAG (task text or the model's own queries) |
+| L6 | Repo map: one-line signatures (+ docstrings) |
+| L7 | Agentic search: grep / hybrid / rich / selective tool sets, 15-call budget |
+| L8 | Experimental agent: symbol list, `read_symbol` only, edits made with `edit` / `create_file` tools |
 
-Deprioritized: a symbol-graph level (definitions of referenced symbols + 1-hop callers).
+Each level lives in its own self-contained module under `context_bench/levels/`, so every strategy can be
+read on its own.
 
-Diagram of the ladder and what each level tests: [docs/diagrams/context-levels.html](docs/diagrams/context-levels.html)
-(source: `docs/diagrams/context-levels.json`, rendered with archify). Also: the task set and what it covers,
-[docs/diagrams/task-coverage.html](docs/diagrams/task-coverage.html); the experiment flow,
-[docs/diagrams/experiment-flow.html](docs/diagrams/experiment-flow.html); and the illustrated findings,
-[docs/report.html](docs/report.html).
+For every run we record whether the hidden tests pass, whether the model reused the helper the repo
+already has (a spy test) or wrote its own, whether it saw that helper at all, whether it touched dead
+code, whether the repo's own tests still pass, and what the run cost in tokens and time.
 
-For every run we record whether the hidden tests pass, whether the model reused code the repo already
-has or wrote its own version, whether it referenced things that don't exist, and what the run cost in
-tokens and time.
+## Tasks and repos
 
-Each level lives in its own self-contained module under `context_bench/levels/`, so every strategy can
-be read on its own.
+30 tasks on one synthetic shop codebase (`shopkit`) in three sizes:
 
-**Status:** all eight levels are implemented and a full development round has run (thinking off,
-20 tasks, 386 runs + an L7 rerun, blind-graded). Findings so far: [docs/findings.md](docs/findings.md)
-and the illustrated [docs/report.html](docs/report.html). Next: the final round with thinking on, one
-run at a time on a freshly restarted server, and 20 more tasks.
+- **S** (~2k tokens) and **M** (~41k tokens, 25 planted helpers, near-miss decoys, unlabelled dead code)
+- **L** (~169k tokens, too big for the model's window at L3): the same shop a year later, with SQL
+  migrations, templates and incident-bloated functions
+
+Categories: 13 reuse, 4 cross-file, 3 convention, 4 control, 5 long-function, 1 trap (a helper whose
+docstring no longer matches its body). Hidden tests live outside the repo and never enter the context.
+
+## Status
+
+- **Prompt v3 round (complete, tag `round-v3`):** repos S and M, levels L0-L7, thinking off and on (clean
+  mode: cold prefix cache before every run), 440 + 440 runs, blind-graded. Findings:
+  [docs/findings.md](docs/findings.md), illustrated in [docs/report.html](docs/report.html). The diagrams in
+  `docs/diagrams/` (levels, task coverage, experiment flow) describe this round.
+- **Prompt v4 round (in progress, `main`):** adds repo L, L8, the file tree as L7's starting context, and
+  EmbeddingGemma 2 with an 8k window and no truncation. Thinking off first, then the clean thinking-on
+  round; penalty grading after that.
+
+The site (`docs/`: results, data viewer, method, guide, tasks, downloads) is built from `results/` by the
+scripts in `scripts/`.
+
+## Run it
 
 ```bash
 pip install -e '.[dev]'
 pytest
-cbench --help
+cp .env.example .env                 # API key, optional restart command for clean mode
+cbench validate-retrieval --retrievers bm25,embed
+cbench one --task reuse-001 --level L1
+cbench run --dry-run                 # what a sweep would run; `cbench run` resumes by run id
+cbench report
 ```
 
-Design notes: `docs/design.md`.
+The guide page (`docs/guide.html`) covers configuration: models, the embedder, generation and the sweep.
+
+## Design notes
+
+- `docs/design.md`: questions, metrics, controls, decisions, and dated results per experiment
+- `docs/semantic-search-design.md`: the embedding index (no truncation, windows, bulk builds on the B60s)
+- `docs/repo-L-design.md`: how repo L was grown from M
+- `docs/penalty-grading-design.md`: the judge for the v4 round
+- `CLAUDE.md`: the hard rules and the current state of every level, in detail
