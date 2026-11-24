@@ -35,7 +35,7 @@
   const yn = (v) => (v == null ? "–" : v ? "yes" : "no");
   const frac = (a, b) => (b ? `${a}/${b}` : "–");
   const COLS = [
-    ["round", "Round", (r) => (r.round === "final" ? "final" : "think off")],
+    ["round", "Round", (r) => (r.round === "final" ? "think on" : "think off")],
     ["task_id", "Task", (r) => esc(r.task_id)],
     ["level_label", "Level", (r) => esc(r.level_label)],
     ["repo_size", "Repo", (r) => r.repo_size],
@@ -276,7 +276,7 @@
   function paneHTML(run, side) {
     const m = run.meta;
     const facts = [
-      ["round", m.round === "final" ? "final (thinking, cold)" : "thinking off"],
+      ["round", m.round === "final" ? "thinking on" : "thinking off"],
       ["tests", frac(m.tests_passed, m.tests_total)],
       ["reuse", m.reuse_passed == null && m.category === "reuse" ? "n/a (code didn't run)" : yn(m.reuse_passed)],
       ["repo tests", frac(m.repo_tests_passed, m.repo_tests_total)], ["format", m.format_status],
@@ -319,7 +319,7 @@
     const twins = runs.filter((r) => r.task_id === m.task_id && r.run_id !== m.run_id)
       .sort((x, y) => x.round.localeCompare(y.round) || x.level_label.localeCompare(y.level_label) || x.repo_size.localeCompare(y.repo_size));
     return `<label>Compare A with <select id="twin"><option value="">same task, another run…</option>` +
-      twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${r.round === "final" ? "final" : "think off"} · ${r.outcome}</option>`).join("") +
+      twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"} · ${r.outcome}</option>`).join("") +
       `</select></label>`;
   }
 

@@ -48,7 +48,7 @@ def scrub(text: str | None) -> str | None:
 # ---- which runs ----------------------------------------------------------------------------------
 def config_key(r: dict) -> tuple:
     return (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
-            r["repo_size"], bool(r.get("map_docs")), bool(r.get("thinking")))   # thinking: the L7 thinking arm
+            r["repo_size"], bool(r.get("map_docs")), bool(r.get("thinking")))   # thinking off / on: two rounds
 
 
 def level_label(r: dict) -> str:
@@ -61,8 +61,6 @@ def level_label(r: dict) -> str:
         s += " " + r["agent_variant"]
     if r["prompt_arm"] == "reuse_hint":
         s += " +hint"
-    if r.get("thinking") and not r.get("cold_start"):     # a thinking arm of the thinking-off round
-        s += " thinking"
     return s
 
 
@@ -108,16 +106,24 @@ def load_penalties() -> dict[str, dict]:
     return out
 
 
+def thinking_on_rows(rows: list[dict], pv: int) -> list[dict]:
+    """The thinking-on round: the concurrent thinking-on runs of this prompt version. Clean-mode runs (cold
+    cache, one at a time) are reported separately and left out, unless the round has nothing else (prompt
+    v3, whose thinking-on round was clean)."""
+    on = [r for r in rows if r.get("thinking") and r.get("prompt_version", 1) == pv]
+    warm = [r for r in on if not r.get("cold_start")]
+    return warm or on
+
+
 def select_rows() -> list[dict]:
     rows = [json.loads(line) for line in open(RESULTS / "results.jsonl")]
     rows = [r for r in rows if r.get("backend") == "vllm" and r.get("model") == "Qwen/Qwen3.8-27B"]
     pv = max((r.get("prompt_version", 1) for r in rows), default=3)          # the round's prompt version
-    final = {config_key(r): r for r in rows if r.get("thinking") and r.get("cold_start")
-             and r.get("prompt_version", 1) == pv}
+    final = {config_key(r): r for r in thinking_on_rows(rows, pv)}       # round "final" = thinking on
     nothink: dict[tuple, dict] = {}
     for r in rows:
-        if (r.get("thinking") and r.get("cold_start")) or r.get("prompt_version", 1) != pv:
-            continue                                                 # the final round is taken above
+        if r.get("thinking") or r.get("prompt_version", 1) != pv:
+            continue                                                 # the thinking-on round is taken above
         if r["level"] == "L7" and r.get("failed_call_cost") is None:
             continue                                                 # original harness (" h1")
         nothink[config_key(r)] = r                                   # latest row per configuration

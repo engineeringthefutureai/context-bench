@@ -22,7 +22,7 @@ RESULTS = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--res
 if not RESULTS.is_absolute():
     RESULTS = ROOT / RESULTS
 sys.path.insert(0, str(ROOT / "scripts"))
-from build_site import level_label, outcome  # noqa: E402
+from build_site import level_label, outcome, thinking_on_rows  # noqa: E402
 
 # Illustrative API prices (USD per million tokens), stated on the page. Not quotes.
 PRICES = {"open-weights host": (0.20, 0.80), "frontier API": (3.00, 15.00)}
@@ -45,7 +45,7 @@ def load():
     key = lambda r: (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
                      r["repo_size"], bool(r.get("map_docs")))
     pv = max((r.get("prompt_version", 1) for r in rows), default=3)          # the round's prompt version
-    final = {key(r): r for r in rows if r.get("thinking") and r.get("cold_start") and r.get("prompt_version") == pv}
+    final = {key(r): r for r in thinking_on_rows(rows, pv)}     # thinking on (concurrent; clean only if nothing else)
     off = {}
     for r in rows:
         if not r.get("thinking") and r.get("prompt_version") == pv and not (r["level"] == "L7" and r.get("failed_call_cost") is None):
@@ -96,7 +96,6 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
             f'<span class="v">{counts.get("pass", 0)}/{n}{note}</span></div>')
 
 
-PROMPT_VERSION_DEFAULT = 4
 
 
 def sweep_status() -> dict | None:
@@ -115,17 +114,8 @@ def build_progress(final: dict, off: dict) -> str:
     recorded so far plus what the running sweep has in progress and queued; then outcomes per repo."""
     status = sweep_status()
     pending = collections.defaultdict(collections.Counter)      # (round, label) -> running / queued
-    rnd_live = "final" if (status or {}).get("clean") else "off"  # a clean sweep is the final round
     for r in (status or {}).get("runs", {}).values():
-        lab = level_label({**r, "cold_start": rnd_live == "final"})     # a thinking arm gets " thinking"
-        pending[rnd_live, lab][r["state"]] += 1
-    # thinking arms of the thinking-off round (e.g. L7 grep thinking): their own bars
-    pv = max((r.get("prompt_version", 1) for r in off.values()), default=PROMPT_VERSION_DEFAULT)
-    arm = {}
-    for line in open(RESULTS / "results.jsonl"):
-        r = json.loads(line)
-        if r.get("thinking") and not r.get("cold_start") and r.get("prompt_version") == pv:
-            arm[r["run_id"]] = r
+        pending["final" if r.get("thinking") else "off", level_label(r)][r["state"]] += 1
 
     def bars(rows, rnd, title):
         """One bar per configuration (all repos together), on a common scale: recorded outcomes plus what
@@ -185,14 +175,15 @@ def build_progress(final: dict, off: dict) -> str:
     <div class="eyebrow">Round in progress · preview</div>
     <h1>How context building affects generated code</h1>
     <p class="lede">The current round is still running. This page shows what has been recorded so far; the
-    full write-up comes when the clean thinking-on round is done. Browse the runs in the raw-data viewer.</p>
+    full write-up comes when the thinking-on round is done (clean-mode cost and latency figures are reported
+    separately). Browse the runs in the raw-data viewer.</p>
   </header>
   <section>
     <h2>Per configuration</h2>
     {live}
     {legend}
-    {bars(list(off.values()) + list(arm.values()), "off", "Thinking off")}
-    {bars(list(final.values()), "final", "Final round (thinking on, cold cache)")}
+    {bars(list(off.values()), "off", "Thinking off")}
+    {bars(list(final.values()), "final", "Thinking on")}
     <p class="small">Each bar is one configuration, all repos together, on a common scale: the runs recorded plus
     the ones the running sweep still has. The number is PASS out of that total. Outcomes as defined on the
     Method page.</p>
@@ -200,15 +191,15 @@ def build_progress(final: dict, off: dict) -> str:
   <section>
     <h2>Per repo</h2>
     {table(list(off.values()), "Thinking off")}
-    {table(list(final.values()), "Final round (thinking on, cold cache)")}
+    {table(list(final.values()), "Thinking on")}
   </section>
 """ + FOOT
 
 
 def build() -> str:
     final, off, grades = load()
-    if not final:
-        return build_progress(final, off)
+    if not final or not all(r.get("cold_start") for r in final.values()):
+        return build_progress(final, off)   # the full write-up below is the v3 one (a clean thinking-on round)
     F = list(final.values())
     common = [k for k in final if k in off]
     by = collections.defaultdict(list)
