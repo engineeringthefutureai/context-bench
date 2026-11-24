@@ -23,6 +23,7 @@ if not RESULTS.is_absolute():
     RESULTS = ROOT / RESULTS
 sys.path.insert(0, str(ROOT / "scripts"))
 from build_site import level_label, outcome, thinking_on_rows  # noqa: E402
+import site_layout  # noqa: E402
 
 # Illustrative API prices (USD per million tokens), stated on the page. Not quotes.
 PRICES = {"open-weights host": (0.20, 0.80), "frontier API": (3.00, 15.00)}
@@ -169,8 +170,7 @@ def build_progress(final: dict, off: dict) -> str:
                 f'queued (last update {e(status.get("updated_at", "")[11:16])} UTC).</p>')
     else:
         live = '<p class="small">No sweep running right now.</p>'
-    return HEAD + f"""
-<main>
+    return _page(f"""
   <header style="display:grid;gap:12px">
     <div class="eyebrow">Round in progress · preview</div>
     <h1>How context building affects generated code</h1>
@@ -193,7 +193,7 @@ def build_progress(final: dict, off: dict) -> str:
     {table(list(off.values()), "Thinking off")}
     {table(list(final.values()), "Thinking on")}
   </section>
-""" + FOOT
+""")
 
 
 def build() -> str:
@@ -351,8 +351,7 @@ def build() -> str:
                    / st.median(r["tokens_in"] for r in l3)) if l7g and l3 else 0
     p = lambda xs: sum(r["label"] == "ok" for r in xs)
 
-    page = HEAD + f"""
-<main>
+    page = _page(f"""
   <header style="display:grid;gap:12px">
     <div class="eyebrow">Experiment report · prompt v3 round</div>
     <h1>How context building affects generated code</h1>
@@ -539,19 +538,18 @@ def build() -> str:
       <a href="guide"><b>Run it yourself</b><span>What you need: an OpenAI-compatible API, optionally an embedder.</span></a>
     </div>
   </section>
-""" + FOOT
+""")
     return page
 
 
-def head_foot():
-    """Head, nav and footer from the current page, so the site's header stays in one place."""
-    current = (ROOT / "docs" / "index.html").read_text()
-    head = current.split("<main>")[0]
-    foot = "  <footer>" + current.split("<footer>")[1].split("</footer>")[0] + "</footer>\n</main>\n</body>\n</html>\n"
-    return head, foot
+INDEX_TITLE = "Context Bench: How Context Building Affects Generated Code"
+INDEX_DESCRIPTION = ("The same coding tasks, the same model (Qwen 3.8 27B), eight ways of building its context: no "
+                     "repo, one file, hand-picked files, the whole repo, retrieval, a repo map and an agent with tools.")
 
 
-HEAD, FOOT = head_foot()
+def _page(content: str) -> str:
+    """The Results page: generated content in the site's one layout (site_layout.py)."""
+    return site_layout.render(content, page="index", title=INDEX_TITLE, description=INDEX_DESCRIPTION)
 
 if __name__ == "__main__":
     site = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--out=")), ROOT / "docs"))

@@ -48,8 +48,17 @@ docstring no longer matches its body). Hidden tests live outside the repo and ne
   EmbeddingGemma 2 with an 8k window and no truncation. Thinking off first, then the clean thinking-on
   round; penalty grading after that.
 
-The site (`docs/`, published with GitHub Pages: results, data viewer, method, guide, tasks, downloads) is
-built from `results/` by the scripts in `scripts/`. It counts visits with Google Analytics
+The site (`docs/`, published with GitHub Pages at context.engineeringthefuture.ai) has one layout,
+`site/layout.html` (head, top bar, footer), and two kinds of content:
+
+- **Written pages**, `site/pages/*.md` (method, guide, downloads) and `*.html` shells (raw data, tasks, 404):
+  `python3 scripts/build_pages.py` renders them into the layout (needs `pip install -e '.[site]'`).
+- **Generated content**: `scripts/build_report.py` builds the Results page from `results/` into the same
+  layout; `scripts/build_site.py` writes the run data and tasks JSON that the raw-data and tasks pages load
+  on demand.
+
+`scripts/live_site.py` serves a live preview that renders everything on each request. Assets get a version
+from their content, so nothing is served stale. Visits are counted with Google Analytics
 (`docs/analytics.js`, off on local previews).
 
 ## Run it

@@ -1,0 +1,122 @@
+<!--
+title: Context Bench · Method: How the Experiment Works
+description: How context-bench measures the effect of context building: eight levels, fair-comparison rules, labels, reuse, clean runs and blind grading.
+eyebrow: Method
+heading: How the experiment works
+lede: One model, one set of tasks, one prompt template. Only the `<context>` block changes from level to level.
+-->
+
+## The question
+
+When a model writes code in an existing project, how much does the way its context is built matter? The harness gives the same model the same change requests and varies one thing: what it gets to see of the repository. It measures whether the change is correct, whether it reuses the project's existing helpers instead of re-implementing them, whether it breaks anything else, and what it costs.
+
+## How coding assistants got their context
+
+In about six years the question "what does the model see of the code?" was answered four different ways: the open file, retrieved snippets, the whole repository, and agents that look for themselves. Each level in this experiment reproduces one of these moments (sources in the table below).
+
+<ol class="timeline">
+    <li class="tl-retrieval"><span class="tl-when">2020 <span>May</span></span><span class="tl-dot"></span><span class="tl-what">Retrieval-augmented generation: a model answers with retrieved documents in its prompt (Lewis et al.). <span class="tl-level">L4, L5</span></span></li>
+    <li class="tl-editor"><span class="tl-when">2021 <span>Jun</span></span><span class="tl-dot"></span><span class="tl-what">GitHub Copilot technical preview: completions from the file being edited. <span class="tl-level">L1</span></span></li>
+    <li class="tl-editor"><span class="tl-when">2021 <span>Jul</span></span><span class="tl-dot"></span><span class="tl-what">Codex and HumanEval: writing a function from its docstring alone. <span class="tl-level">L0</span></span></li>
+    <li class="tl-chat"><span class="tl-when">2022 <span>Nov</span></span><span class="tl-dot"></span><span class="tl-what">ChatGPT: developers paste the files they think matter into a chat. <span class="tl-level">L2</span></span></li>
+    <li class="tl-retrieval"><span class="tl-when">2022 <span>Dec</span></span><span class="tl-dot"></span><span class="tl-what">HyDE: a drafted answer becomes the search query. <span class="tl-level">L5</span></span></li>
+    <li class="tl-retrieval"><span class="tl-when">2023 <span>Mar</span></span><span class="tl-dot"></span><span class="tl-what">RepoCoder: function-level retrieval from the repository, refined with drafts. <span class="tl-level">L5</span></span></li>
+    <li class="tl-editor"><span class="tl-when">2023 <span>May</span></span><span class="tl-dot"></span><span class="tl-what">Copilot's neighboring tabs: other open files join the prompt. <span class="tl-level">L2</span></span></li>
+    <li class="tl-retrieval"><span class="tl-when">2023 <span>Oct</span></span><span class="tl-dot"></span><span class="tl-what">Aider's repository map: every definition in one compact list. <span class="tl-level">L6</span></span></li>
+    <li class="tl-context"><span class="tl-when">2024 <span>Feb</span></span><span class="tl-dot"></span><span class="tl-what">Gemini 1.5: a million-token window; whole repositories fit in one prompt. <span class="tl-level">L3</span></span></li>
+    <li class="tl-agents"><span class="tl-when">2024 <span>May</span></span><span class="tl-dot"></span><span class="tl-what">SWE-agent: an agent explores and edits a repository through tools. <span class="tl-level">L7</span></span></li>
+    <li class="tl-agents"><span class="tl-when">2024 <span>Oct</span></span><span class="tl-dot"></span><span class="tl-what">Anthropic's text editor tool: edits as exact-text replacement. <span class="tl-level">L8</span></span></li>
+    <li class="tl-agents"><span class="tl-when">2025 <span>Feb</span></span><span class="tl-dot"></span><span class="tl-what">Claude Code: a terminal agent that searches the code itself. <span class="tl-level">L7</span></span></li>
+    <li class="tl-agents"><span class="tl-when">2025 <span>Sep</span></span><span class="tl-dot"></span><span class="tl-what">Context editing: old tool results are cleared from an agent's context. <span class="tl-level">L7 selective</span></span></li>
+    <li class="tl-agents"><span class="tl-when">2026 <span>Nov</span></span><span class="tl-dot"></span><span class="tl-what">"You don't need long context": agents keep accuracy with short, frequently compacted contexts, at a fraction of the cost (Belcak et al.). <span class="tl-level">L7 selective, L8</span></span></li>
+    <li class="tl-now"><span class="tl-when">2026 <span>Nov</span></span><span class="tl-dot"></span><span class="tl-what">This experiment: the same model and tasks under every strategy above. <span class="tl-level">all</span></span></li>
+</ol>
+
+<p class="small tl-legend"><span class="tl-key tl-editor"></span>editor <span class="tl-key tl-chat"></span>chat <span class="tl-key tl-retrieval"></span>retrieval <span class="tl-key tl-context"></span>long context <span class="tl-key tl-agents"></span>agents</p>
+
+## The levels
+
+L0 to L6 build the context once and the model answers in one reply. L7 and L8 are agents: they start from a small context and use tools to look around before answering. Prompt v4 (the current round) never names the file to change: L1 to L6 still show it as their first context block, while the agents find it themselves.
+
+<div class="table-wrap"><table>
+  <thead><tr><th>Level</th><th>What the model sees</th></tr></thead>
+  <tbody>
+    <tr><td>L0</td><td>The task text only (tier-1 control tasks only): what the model does with no repository at all.</td></tr>
+    <tr><td>L1</td><td>The target file.</td></tr>
+    <tr><td>L2</td><td>The target file, its direct imports and its test file: what a developer would paste by hand.</td></tr>
+    <tr><td>L3</td><td>Every source file in the repository, sorted, with paths. On repo L it doesn't fit the window: NO FIT.</td></tr>
+    <tr><td>L4</td><td>The target file and the top 3 files by retrieval (BM25 or embeddings).</td></tr>
+    <tr><td>L5</td><td>The target file and the top 8 functions by retrieval, with path, imports, signature, docstring and body. The query is the task text, or up to 5 queries the model writes in a planning call.</td></tr>
+    <tr><td>L6</td><td>The target file and a one-line signature of every function and class (L6+docs: plus the first docstring line).</td></tr>
+    <tr><td>L7</td><td>The repository's file tree (line counts, how many modules import each file) and tools, at most 15 calls. <b>grep</b>: <code>grep</code>, <code>read_file</code>, <code>find_references</code>. <b>hybrid</b>: plus <code>semantic_search</code>. <b>rich</b>: richer versions of those tools plus <code>read_symbol</code> (definitions by name) and line ranges for <code>read_file</code>. <b>selective</b>: rich plus <code>drop</code>, which removes results the model no longer needs from the conversation.</td></tr>
+    <tr><td>L8</td><td>Experimental. A list of every file with the names defined in it (no signatures), <code>read_symbol</code> as the only way to read code (by name or line range; a file asked for whole returns its outline), search tools, <code>drop</code>, and <code>edit</code> / <code>create_file</code> tools that change the repository copy directly. The budget is 15 points, with the points left shown after each turn.</td></tr>
+  </tbody>
+</table></div>
+
+When a change creates a file that doesn't exist yet, every level sees its path (L1 to L6 as an empty target block, L7 and L8 as the same two lines), because a new module's name can't be found in the repository. An ablation arm, `reuse_hint`, adds one line to the system prompt on L1 and L5: "Prefer reusing existing project helpers over writing new ones." The base prompt never mentions reuse.
+
+## Why each level
+
+Most levels reproduce a way context is built in a real product or a published method, so the results say something about strategies people actually use. Two are our own: selective dropping in its live-tail form, and L8. Dates are the first public appearance we know of.
+
+<div class="table-wrap"><table>
+  <thead><tr><th>Level</th><th>Precedent</th><th>Why it's here</th></tr></thead>
+  <tbody>
+    <tr><td>L0</td><td>Function synthesis from a docstring, as in OpenAI's Codex paper and its HumanEval benchmark (<a href="https://arxiv.org/abs/2107.03374">Chen et al., 2021</a>).</td><td>The floor: what the model knows without the project. Only meaningful for tasks that need no project code.</td></tr>
+    <tr><td>L1</td><td>Editor completion from the open file, as in GitHub Copilot's technical preview (June 2021).</td><td>The smallest realistic context. Shows how much a task depends on code outside the file.</td></tr>
+    <tr><td>L2</td><td>Hand-picked related files: developers pasting files into chat assistants (from late 2022), and Copilot's "neighboring tabs", which reads the other files open in the editor (<a href="https://github.blog/ai-and-ml/github-copilot/how-github-copilot-is-getting-better-at-understanding-your-code/">GitHub, 2023</a>).</td><td>A deterministic stand-in for "what a careful developer would add": imports and the test file, no search.</td></tr>
+    <tr><td>L3</td><td>Whole-repository prompts with long-context models (1M-token windows from Gemini 1.5, February 2024) and repo-packing tools such as Repomix and gitingest.</td><td>"Give it everything" while it fits. Repo L is too big for it on purpose, which is the common case in real projects.</td></tr>
+    <tr><td>L4</td><td>Retrieval-augmented generation (<a href="https://arxiv.org/abs/2005.11401">Lewis et al., 2020</a>), applied to code by repository-indexing assistants such as Sourcegraph Cody and Cursor's codebase indexing.</td><td>Retrieval at file granularity: cheap to build, but brings whole files.</td></tr>
+    <tr><td>L5</td><td>Function-level retrieval in repository-level completion research such as RepoCoder (<a href="https://arxiv.org/abs/2303.12570">Zhang et al., 2023</a>), whose iterative retrieval uses a first draft as the query (our <code>draft_then_search</code>, related to HyDE, <a href="https://arxiv.org/abs/2212.10496">Gao et al., 2022</a>). <code>model_queries</code> follows the multi-query rewriting common in RAG pipelines.</td><td>Retrieval at function granularity: smaller and more precise than L4, and the place to compare query strategies.</td></tr>
+    <tr><td>L6</td><td>Aider's repository map: a compact list of definitions sent with every request, built with tree-sitter since <a href="https://aider.chat/2023/10/22/repomap.html">October 2023</a> (ctags before).</td><td>A whole-project overview at a fraction of L3's size. Shows whether names and signatures alone are enough to find the helper.</td></tr>
+    <tr><td>L7 grep</td><td>Agentic search with shell-style tools: SWE-agent's agent-computer interface (<a href="https://arxiv.org/abs/2405.15793">Yang et al., 2024</a>), OpenHands (2024), and Claude Code (February 2025), whose team has said it replaced an early vector index with grep-style search.</td><td>The agent decides what to read. The baseline agent.</td></tr>
+    <tr><td>L7 hybrid</td><td>Agents that combine text search with semantic search over an index, as in editor-integrated agents such as Cursor's.</td><td>Adds meaning-based search, so hybrid versus grep measures what embeddings add to an agent.</td></tr>
+    <tr><td>L7 rich</td><td>Symbol-aware navigation, as language servers give editors (Language Server Protocol, 2016), exposed to agents as tools.</td><td>Reading definitions by name instead of whole files. Rich versus hybrid measures the tools.</td></tr>
+    <tr><td>L7 selective</td><td>Clearing old tool results from an agent's context, as in Anthropic's context editing (<a href="https://www.anthropic.com/news/context-management">September 2025</a>). Our form is our own: only the latest results can be dropped, so the cached prefix stays intact, and a sizeable drop gives back part of a call. Recent work argues the same direction from the other side: <a href="https://arxiv.org/abs/2611.05306">Belcak et al. (November 2026)</a> find that later tokens cost more to generate (up to 7&times; on frontier open-weight models) and that frontier models lose little or no accuracy when an agent's context is kept short by frequent compaction. There the harness compacts the conversation into a lossy recap; here the model itself chooses which results to drop, and dropped code can be read again.</td><td>Whether an agent that curates its own context reads less without losing what it needs. Selective versus rich measures the dropping.</td></tr>
+    <tr><td>L8</td><td>Our own combination of established parts: a symbol index (as in ctags or a language server's workspace symbols), reading by name, and edit tools that replace exact text (as in Anthropic's <a href="https://platform.claude.com/docs/en/agents-and-tools/tool-use/text-editor-tool">text editor tool</a>, October 2024, and Aider's search/replace edit format).</td><td>The most selective agent we could build: it never needs a whole file, because it changes code with edit tools instead of returning whole files. It is the one documented exception to "only the context varies": its output format is different, so it is reported apart from L7.</td></tr>
+  </tbody>
+</table></div>
+
+## The agent harness (L7, L8)
+
+- A budget of 15 calls (L8: 15 points). A call that fails (bad arguments, an unknown tool) costs half and gets an error that says what was wrong; several calls can share a turn. L8's `edit`, `create_file` and `drop` are free, and the edit tools keep working when the points are spent.
+- Every tool's description says what it takes and returns, never which tool to prefer. Nothing in any prompt mentions dead code, decoys or reuse.
+- One more chance at the end: a final reply that is a tool call after the tools were gone, an answer without a usable `<file>` block (L8: a run that changed nothing), or (L8) a changed file that no longer parses each get one retry. Each run records whether it used one.
+- L8 checks syntax after every edit (the file is compiled, never run) and warns with the line, much as SWE-agent's interface lints edits ([Yang et al., 2024](https://arxiv.org/abs/2405.15793)); unlike it, L8 keeps the edit, since a change can be made in two steps. No tool runs code: a test-running or code-snippet tool was deliberately left out, because it would let the model execute arbitrary code on the host, and the hidden tests must never be an agent's oracle. The harness does run the model's code when it scores a run (hidden tests, repository tests, patch coverage), a risk accepted for every level.
+
+## Rules that keep the comparison fair
+
+- Only the `<context>` block varies. System prompt, task text, output format, temperature and the output-token limit are identical at every level.
+- Task text uses product language and never names the helper it needs.
+- Hidden tests live outside the repository and never enter the context.
+- Context is never truncated silently. A prompt that doesn't fit the model's window is recorded as `no_fit`, a result in its own right.
+- No agent frameworks. Chunking, tokenization, ranking and prompt assembly are the variables under study, so the harness owns them.
+- Every level is implemented as well as it reasonably can be, with no thumb on the scale for or against any strategy.
+
+## The repository
+
+`shopkit` is a synthetic order and inventory service written for this experiment, in three sizes. S is about 2k tokens. M is about 40k tokens and 110 files, standard library only, with its own passing tests; it has 25 planted helpers, about half named in words a task would use and half not, near-miss decoys that fail the hidden tests if used instead, and dead code named like the canonical place, as in real repositories. L is the same shop about a year later: about 169k tokens and 280 files including SQL migrations and HTML templates, old code that keeps old names, more dead code, and five live functions of 200 to 270 lines with a business rule buried in the middle. It is too big to send whole. See [Tasks](tasks).
+
+## What each run records
+
+<dl class="guide">
+  <dt>Outcome</dt><dd><b>PASS</b>: a valid answer and every hidden test passes. <b>FAIL</b>: a valid answer, but a hidden test fails. No accepted answer comes in three kinds: <b>UNPARSABLE</b>: code is there, but not in the required <code>&lt;file&gt;</code> blocks. <b>ASKED TO EXPLORE</b>: no code; the reply asks to look at the repository first, in prose or as a pretend tool call (a level without tools can't). <b>NO ANSWER</b>: the reply was empty (agents that went silent, often after repeating the same tool call). <b>INVALID</b>: anything else, such as an agent's tool error. <b>OUT OF TOKENS</b>: the answer hit the output-token limit. <b>NO FIT</b>: the prompt didn't fit the context window. Infrastructure errors are never recorded; those runs are redone.</dd>
+  <dt>Reuse</dt><dd>Reuse tasks have a hidden test that spies on the needed helper and checks the new code really calls it. Reported apart from correctness, so "correct but re-implemented" stays visible.</dd>
+  <dt>Regression check</dt><dd>The repository's own tests after the patch. It catches patches that pass the hidden tests while breaking or deleting code elsewhere.</dd>
+  <dt>Visibility</dt><dd>Whether the needed helper was in the context at all: its definition, its full body, or a call site.</dd>
+  <dt>Output protocol</dt><dd><code>ok</code>, <code>bad_format</code>, <code>no_code</code> or <code>tool_request</code> (the model asked to explore instead of answering).</dd>
+  <dt>Cost</dt><dd>Input, cached and output tokens, latency and tool calls.</dd>
+  <dt>Badges</dt><dd>Exact ones read off the run (no code, retried, syntax error in the patch, dead code used, ...) and automatic ones for what the final answer says (declares completion, claims it verified, notes missing context, ...), matched by embedding similarity with a confidence level. The automatic ones are unverified and only for browsing; they never change outcomes.</dd>
+</dl>
+
+## Clean runs
+
+The two rounds the site compares, thinking off and thinking on, run two requests at a time with the server's prefix cache on. That doesn't change what the model writes (prefix caching is exact), so pass rates, reuse and badges are unaffected, but timings and cache hits reflect a shared, warm server. Cost and latency figures that need to stand alone come from clean mode and are reported separately: runs go one at a time, and the prefix cache is made cold before each one, so nothing cached carries over between tasks that share the same repository and system prompt. The cache is dropped through vLLM's reset endpoint, and the server is fully restarted when it must be (on the first run, and when free host memory runs low). In the prompt v3 round, the thinking-on round itself ran in clean mode. Each run records which method was used.
+
+## Blind grading
+
+Tests give the labels. A separate judge adds a view of code quality and never changes them. It never learns how a patch was made (level, prompt, context or tools), and it is limited to read-only tools in a directory outside the project. Up to the v3 round the judge compared every candidate patch for a task side by side and ranked them. From the v4 round the plan is penalty grading: one passing patch at a time, a fixed list of defects, each penalty quoting a line of the patch so the harness can check it.
+
+## Scope
+
+One model (Qwen 3.8 27B, FP8 on vLLM), one sample per configuration, server-default temperature. Embeddings come from EmbeddingGemma 2 (the v3 round used Qwen3-Embedding 0.6B). Every configuration runs twice, with thinking off and with thinking on; both rounds keep separate run ids and both appear in the [raw data](data). Clean-mode runs (for cost and latency) have run ids of their own and are reported apart.

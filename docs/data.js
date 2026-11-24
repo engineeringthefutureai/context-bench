@@ -137,25 +137,48 @@
     try { return window.hljs.highlight(text, {language: lang, ignoreIllegals: true}).value; } catch (e) { return esc(text); }
   }
 
+  // One file of a diff, side by side (the Diff tab and edit calls): f = {old, path, hunks, add, del}.
+  function fileDiffHTML(f, label) {
+    const created = f.old === "/dev/null", deleted = f.path === "/dev/null";
+    const path = deleted ? f.old : f.path;
+    const lang = LANG[(path.split(".").pop() || "").toLowerCase()] || "plaintext";
+    const one = created || deleted;
+    const cell = (side, cls) => side ? `<td class="ln">${side.no}</td><td class="code ${cls}">${hl(side.text, lang) || " "}</td>` : `<td class="ln"></td><td class="code none"></td>`;
+    const rows = f.hunks.map((h) => (h.head ? `<tr class="hunk"><td colspan="${one ? 2 : 4}">${esc(h.head)}</td></tr>` : "") + h.rows.map((r) => {
+      if (one) return `<tr>${cell(created ? r.n : r.o, created ? "add" : "del")}</tr>`;
+      return `<tr>${cell(r.o, r.kind === "chg" ? "del" : "")}${cell(r.n, r.kind === "chg" ? "add" : "")}</tr>`;
+    }).join("")).join("");
+    const tag = created ? " · new file" : deleted ? " · deleted" : "";
+    return `<details class="seg k-file" open><summary><span class="lab">${esc(label || path)}${tag}</span><span class="sz"><span class="add">+${f.add}</span> <span class="del">−${f.del}</span></span></summary>
+        <div class="sbs-wrap"><table class="sbs${one ? " one" : ""}"><colgroup>${one ? "<col class=n><col>" : "<col class=n><col><col class=n><col>"}</colgroup><tbody>${rows}</tbody></table></div></details>`;
+  }
+
   function diffHTML(text) {
     if (!text) return `<p class="empty">No patch (no valid file blocks).</p>`;
     const files = parseDiff(text);
     if (!files.length) return `<pre class="block">${esc(text)}</pre>`;
-    return `<div class="answer-files">` + files.map((f) => {
-      const created = f.old === "/dev/null", deleted = f.path === "/dev/null";
-      const path = deleted ? f.old : f.path;
-      const lang = LANG[(path.split(".").pop() || "").toLowerCase()] || "plaintext";
-      const one = created || deleted;
-      const cell = (side, cls) => side ? `<td class="ln">${side.no}</td><td class="code ${cls}">${hl(side.text, lang) || " "}</td>` : `<td class="ln"></td><td class="code none"></td>`;
-      const rows = f.hunks.map((h) => `<tr class="hunk"><td colspan="${one ? 2 : 4}">${esc(h.head)}</td></tr>` + h.rows.map((r) => {
-        if (one) return `<tr>${cell(created ? r.n : r.o, created ? "add" : "del")}</tr>`;
-        return `<tr>${cell(r.o, r.kind === "chg" ? "del" : "")}${cell(r.n, r.kind === "chg" ? "add" : "")}</tr>`;
-      }).join("")).join("");
-      const tag = created ? " · new file" : deleted ? " · deleted" : "";
-      return `<details class="seg k-file" open><summary><span class="lab">${esc(path)}${tag}</span><span class="sz"><span class="add">+${f.add}</span> <span class="del">−${f.del}</span></span></summary>
-        <div class="sbs-wrap"><table class="sbs${one ? " one" : ""}"><colgroup>${one ? "<col class=n><col>" : "<col class=n><col><col class=n><col>"}</colgroup><tbody>${rows}</tbody></table></div></details>`;
-    }).join("") + `</div>`;
+    return `<div class="answer-files">` + files.map((f) => fileDiffHTML(f)).join("") + `</div>`;
   }
+
+  // An edit's old and new text as one diff hunk (longest common subsequence of lines; line numbers count
+  // within the snippet, since an edit call doesn't say where in the file it lands).
+  function lineDiff(oldT, newT) {
+    const a = oldT.split("\n"), b = newT.split("\n"), n = a.length, m = b.length;
+    const L = Array.from({length: n + 1}, () => new Int32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+      L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    const rows = [];
+    let i = 0, j = 0, dels = [], adds = [], add = 0, del = 0;
+    const flush = () => { for (let k = 0; k < Math.max(dels.length, adds.length); k++) rows.push({o: dels[k] || null, n: adds[k] || null, kind: "chg"}); dels = []; adds = []; };
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) { flush(); rows.push({o: {no: i + 1, text: a[i]}, n: {no: j + 1, text: b[j]}, kind: "ctx"}); i++; j++; }
+      else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) { adds.push({no: j + 1, text: b[j]}); add++; j++; }
+      else { dels.push({no: i + 1, text: a[i]}); del++; i++; }
+    }
+    flush();
+    return {hunks: [{head: "", rows}], add, del};
+  }
+
 
   // A tool result in parts: selective/L8 segments start with "[#n] label"; rich read_symbol and
   // semantic_search output starts each part with "path:a-b  name", "File: path (lines ...", "Imports of
@@ -200,6 +223,31 @@
     const after = text.slice(last).trim();
     if (after) parts.push(`<pre class="block">${esc(after)}</pre>`);
     return `<div class="answer-files">${parts.join("")}</div>`;
+  }
+
+  // One tool call: the tool and what it targets on one line, the raw parameters collapsed, and any code it
+  // carries (a new file's content, an edit's old and new text) as highlighted file text. Both vocabularies:
+  // the harness's (path, old, new) and Qwen Code's (file_path, old_string, new_string).
+  function callHTML(c) {
+    let a = null;
+    try { a = JSON.parse(c.arguments || "{}"); } catch (e) { a = null; }
+    if (!a || typeof a !== "object" || Array.isArray(a)) return `<div class="call"><b>${esc(c.name)}</b> ${esc(c.arguments)}</div>`;
+    const path = a.path || a.file_path || "";
+    const lang = LANG[(String(path).split(".").pop() || "").toLowerCase()] || "plaintext";
+    const code = (label, text) => `<details class="seg k-file" open><summary><span class="lab">${esc(label)}</span><span class="sz">${String(text).split("\n").length} lines</span></summary><pre class="code"><code class="language-${lang}">${esc(text)}</code></pre></details>`;
+    const blocks = [];
+    if (typeof a.content === "string") blocks.push(code(path || "content", a.content));
+    const oldT = a.old ?? a.old_string, newT = a.new ?? a.new_string;
+    if (typeof oldT === "string" && typeof newT === "string")       // an edit: side by side, like the Diff tab
+      blocks.push(fileDiffHTML({old: path || "edit", path: path || "edit", ...lineDiff(oldT, newT)}, `${path} · edit`));
+    const key = ["pattern", "query", "symbol", "symbols", "ids", "path", "file_path", "directory"].find((k) => k in a);
+    const v = key ? a[key] : "";
+    const target = Array.isArray(v) ? v.map((x) => (key === "ids" ? "#" + x : x)).join(", ") : String(v);
+    const shown = new Set([key, "content", "old", "new", "old_string", "new_string"]);
+    const extra = Object.entries(a).filter(([k]) => !shown.has(k))
+      .map(([k, x]) => `${k}=${typeof x === "string" ? x : JSON.stringify(x)}`).join(" ");
+    const params = `<details class="params"><summary>parameters</summary><pre>${esc(JSON.stringify(a, null, 2))}</pre></details>`;
+    return `<div class="call"><div><b>${esc(c.name)}</b> ${esc(target)}${extra && extra.length < 120 ? ` <span class="small">${esc(extra)}</span>` : ""}</div>${blocks.join("")}${params}</div>`;
   }
 
   function transcriptHTML(run) {
@@ -262,7 +310,7 @@
       }
       flushHarness();
       turnNo += 1;
-      const calls = (m.tool_calls || []).map((c) => `<div class="call"><b>${esc(c.name)}</b> ${esc(c.arguments)}</div>`).join("");
+      const calls = (m.tool_calls || []).map(callHTML).join("");
       const text = (m.content || "").trim();
       const body = text ? `<div class="model-text"><div class="lab">${calls ? "Text written with the tool calls" : "Text"}</div>${answerHTML(text)}</div>` : "";
       const callsHTML = calls ? `<div class="lab">Tool calls</div>${calls}` : (text ? "" : `<p class="empty">Empty reply.</p>`);

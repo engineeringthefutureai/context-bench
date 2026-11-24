@@ -10,6 +10,8 @@ request, instead of a periodic rebuild into a folder.
 - /raw/runs/<run_id>.json is built when asked for and cached until that run's files change.
 - / (index.html) is the Results or in-progress page (build_report.build), built on each request; while a
   sweep runs (results/sweep_status.json) it refreshes itself every 30 s.
+- The hand-written pages (site/pages/*.md, *.html) are rendered into the layout on each request, so an
+  edit shows on reload without running build_pages.py.
 The published site (docs/, scripts/build_site.py) is unchanged: this is for watching a round in progress.
 Binds 0.0.0.0. No leak scan: it serves the local machine's results to the local network.
 """
@@ -29,6 +31,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 _argv, sys.argv = sys.argv, [sys.argv[0]] + [a for a in sys.argv[1:] if a.startswith("--results=")]
 import build_report as br  # noqa: E402  (both read --results at import)
 import build_site as bs    # noqa: E402
+import site_layout         # noqa: E402
 sys.argv = _argv
 
 DOCS = ROOT / "docs"
@@ -122,6 +125,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if body is None:
                     return self.send_error(404, "no such run")
                 return self._send(body, "application/json")
+            name = path.strip("/").removesuffix(".html")
+            if name in site_layout.page_names():
+                return self._send(site_layout.render_page(name).encode(), "text/html; charset=utf-8")
         except Exception as e:               # keep serving; show what broke
             return self.send_error(500, f"{type(e).__name__}: {e}")
         if not (DOCS / path.lstrip("/")).exists() and (DOCS / (path.lstrip("/") + ".html")).exists():
