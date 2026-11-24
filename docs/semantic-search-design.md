@@ -128,8 +128,9 @@ It is slow for bulk work and fragile at an 8k window:
   request. Single inputs and batches of 2 or 4 near-limit windows went through. The working theory is
   that Ollama reserves the window per input, so many short texts at 8k cost more than a few long ones.
   The client now sorts texts by length and gives each request the smallest window that holds its longest
-  text (2,048, 4,096 or 8,192), with at most 4 inputs once the window is above 2,048. Not yet confirmed on
-  a full repo L build. That's what the bulk builder below is for.
+  text (2,048, 4,096 or 8,192), with at most 4 inputs once the window is above 2,048. The full rebuild
+  on the B60s (below) went through with this batching without an error; it hasn't been repeated on the
+  iGPU, which now only embeds queries and the agreement sample.
 - **A pre-flight before every sweep** builds the indexes for the repos that need embeddings, so a too-long
   function or a dead embedder stops the sweep before its first run, not in the middle of it.
 
@@ -169,10 +170,35 @@ build dies before unloading them.
 The tool also needs, in `.env` (gitignored): `ARIES_MANAGER_URL=<manager>/api/v1` and `ARIES_CLIENT_TOKEN=<token>`. The
 config holds only profile names and local ports, never the manager's address or token.
 
+## First full rebuild (2026-11-24)
+
+S, M and L from an empty cache on both B60s (the two servers already loaded; the manager steps were
+not part of this run). Log: `results/index-rebuild.log`.
+
+| | |
+|---|---|
+| Texts | 1,660 (S 47, M 649, L 1,630, incl. 21 windows for repo L's 9 long files) |
+| Build time | 115 s, no errors, no function refused |
+| Agreement with the iGPU | lowest cosine 0.99988 on M and on L (12 sample texts each) |
+| Speed per server (4 × 9,000-char windows, warm) | B60 ~1,190 tokens/s each, iGPU ~200 |
+| Split between servers | 432 / 1,228 texts (uneven; probably model reloads when the requested window size changes; not looked into) |
+
+The B60s are really in use: each container gets only its own card's render node, Ollama reports the
+B60 on Vulkan with 25/25 layers offloaded, and the manager measures ~2.9 GiB on each card.
+
+**The old cache held truncated vectors.** The cache is keyed by model and text, not by how a vector was
+made, so vectors embedded while Ollama cut inputs at 2,048 tokens would have been reused. Against the
+rebuilt cache, 12 of 1,639 shared texts differ (cosine below 0.999, lowest 0.98): repo L's long texts.
+The old cache is kept at `.cache/embeddings/embeddinggemma-2_latest.pre-8k`. Lesson: after any change to
+how texts are embedded (endpoint, window, options), rebuild from an empty cache.
+
+The 120 repo L embedding runs set aside earlier run again on this index, in the resumed thinking-off
+sweep.
+
 ## Open
 
-- Confirm the length-sized batching on a full repo L build (bulk on the B60s first, then a spot check on
-  the iGPU).
-- The repo L embedding runs (120, set aside) run again once the index is built.
+- Run `--bulk` end to end through the manager (load with evict, unload, reload vLLM) once the manager
+  settings are in `.env`.
+- The uneven split between the two servers.
 - Repeat the file path and imports in every window: noted above, waits for a reason.
 - Best-window length bias: watch L4 `embed` on repo L for long files ranking first on unrelated tasks.
