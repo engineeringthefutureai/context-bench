@@ -112,4 +112,5 @@ def test_looped_badge_and_no_answer_outcome(tmp_path):
     sys.path.insert(0, "scripts")
     import build_site
     assert build_site.outcome({"label": "broken", "format_status": "empty"}) == "NO ANSWER"
-    assert build_site.outcome({"label": "tool_error", "format_status": "empty"}) == "INVALID"
+    assert build_site.outcome({"label": "tool_error", "format_status": "empty"}) == "NO ANSWER"   # the reply decides
+    assert build_site.outcome({"label": "tool_error", "format_status": "ok"}) == "INVALID"

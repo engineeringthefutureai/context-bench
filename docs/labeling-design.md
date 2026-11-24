@@ -65,9 +65,14 @@ The label stays strict.
 | NO FIT | label `no_fit` | the prompt is larger than the model's window |
 | OUT OF TOKENS | error says `max_output_tokens` | the reply hit the output limit |
 | UNPARSABLE | `format_status = bad_format` | code is there, not in the required blocks |
-| ASKED TO EXPLORE | `format_status` is `no_code` or `tool_request` (not a tool error) | no code; the reply asks to look at the repository first, in prose or as a pretend tool call |
-| NO ANSWER | `format_status = empty` (not a tool error) | the reply was empty: an agent that went silent |
-| INVALID | anything else without an accepted answer (`tool_error`) | an agent's harness-side failure |
+| ASKED TO EXPLORE | `format_status` is `no_code` or `tool_request` | no code; the reply asks to look at the repository first, in prose or as a pretend tool call |
+| NO ANSWER | `format_status = empty` | the reply was empty: an agent that went silent |
+| INVALID | anything else without an accepted answer | a run whose reply doesn't say (a harness failure) |
+
+**The reply decides, not the stored label (2026-11-24).** An agent's stored label is `tool_error` when any
+tool call failed along the way (a bad argument, a call over budget). Those calls get feedback and the run
+goes on, so the label says nothing about how the run ended. Two L7 selective runs (qwen names) that went
+silent showed as INVALID only because one call had failed earlier; they are NO ANSWER.
 | PASS | label `ok` | every hidden test passes |
 | FAIL | otherwise | a valid answer, a hidden test fails |
 

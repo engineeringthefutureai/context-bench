@@ -239,7 +239,9 @@ def outcome(r: dict) -> str:
       thinking-off rounds: every one is "let me look first", none asks the user anything;
     - NO ANSWER: the reply was empty (format_status empty; for agents, nothing at all after their tool calls,
       often after a loop of identical calls);
-    - INVALID: anything else (an agent's tool error).
+    - INVALID: anything else (a run whose reply doesn't say: e.g. a harness failure).
+    The reply decides, not the stored label: an agent's label is tool_error when any tool call failed along
+    the way, but those calls get feedback and the run goes on, so its final reply is what it ended with.
     Infrastructure errors are never recorded; those runs are redone."""
     if r.get("label") == "no_fit":
         return "NO FIT"
@@ -248,9 +250,9 @@ def outcome(r: dict) -> str:
     fs = r.get("format_status", "ok")
     if fs == "bad_format":
         return "UNPARSABLE"
-    if fs in ("no_code", "tool_request") and r.get("label") != "tool_error":
+    if fs in ("no_code", "tool_request"):
         return "ASKED TO EXPLORE"
-    if fs == "empty" and r.get("label") != "tool_error":
+    if fs == "empty":
         return "NO ANSWER"
     if r.get("label") == "tool_error" or fs != "ok":
         return "INVALID"
