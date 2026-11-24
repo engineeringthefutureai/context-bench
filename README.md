@@ -4,9 +4,9 @@ Measuring how context building shapes LLM-written code, from one pasted file to 
 
 Site: **https://context.engineeringthefuture.ai/** (results, the raw data of every run, method, tasks).
 
-The same coding tasks run on the same model with nine different ways of building the model's context.
-Only the context varies; the system prompt, task text, output format and generation settings are the same
-for every level.
+The same model gets the same coding tasks nine times over, each time with its context built a different way,
+while the system prompt, task text, output format and generation settings stay identical at every level. The levels are deliberately simple, one harness component each, so the results show what even a crude
+context strategy does to the code.
 
 | Level | Strategy |
 |---|---|
@@ -20,12 +20,11 @@ for every level.
 | L7 | Agentic search: grep / hybrid / rich / selective tool sets, 15-call budget |
 | L8 | Experimental agent: symbol list, `read_symbol` only, edits made with `edit` / `create_file` tools |
 
-Each level lives in its own self-contained module under `context_bench/levels/`, so every strategy can be
-read on its own.
+Each level sits in its own self-contained module under `context_bench/levels/`, readable without the others.
 
-For every run we record whether the hidden tests pass, whether the model reused the helper the repo
-already has (a spy test) or wrote its own, whether it saw that helper at all, whether it touched dead
-code, whether the repo's own tests still pass, and what the run cost in tokens and time.
+Every run records whether the hidden tests passed, whether the model reused the helper the repo already has
+(a spy test checks this) or wrote its own, whether it had seen that helper at all, whether it touched dead code,
+whether the repo's own tests still pass, and what the run cost in tokens and time.
 
 ## Tasks and repos
 
@@ -35,8 +34,8 @@ code, whether the repo's own tests still pass, and what the run cost in tokens a
 - **L** (~169k tokens, too big for the model's window at L3): the same shop a year later, with SQL
   migrations, templates and incident-bloated functions
 
-Categories: 13 reuse, 4 cross-file, 3 convention, 4 control, 5 long-function, 1 trap (a helper whose
-docstring no longer matches its body). Hidden tests live outside the repo and never enter the context.
+By category that's 13 reuse, 4 cross-file, 3 convention, 4 control, 5 long-function and 1 trap, a helper whose
+docstring no longer matches its body. Hidden tests live outside the repo and never enter the context.
 
 ## Status
 
@@ -46,7 +45,7 @@ docstring no longer matches its body). Hidden tests live outside the repo and ne
   `docs/diagrams/` (levels, task coverage, experiment flow) describe this round.
 - **Prompt v4 round (in progress, `main`):** adds repo L, L8, the file tree as L7's starting context, and
   EmbeddingGemma 2 with an 8k window and no truncation. Thinking off first, then the clean thinking-on
-  round; penalty grading after that.
+  round. Penalty grading comes after that.
 
 The site (`docs/`, published with GitHub Pages at context.engineeringthefuture.ai) has one layout,
 `site/layout.html` (head, top bar, footer), and two kinds of content:
@@ -57,11 +56,11 @@ The site (`docs/`, published with GitHub Pages at context.engineeringthefuture.a
   layout; `scripts/build_site.py` writes the run data and tasks JSON that the raw-data and tasks pages load
   on demand.
 
-`scripts/live_site.py` serves a live preview that renders everything on each request. Assets get a version
-from their content, so nothing is served stale. Visits are counted with Google Analytics
+`scripts/live_site.py` serves a live preview that re-renders everything on every request. Assets are versioned
+by content, so nothing goes stale. Visits are counted with Google Analytics
 (`docs/analytics.js`, off on local previews).
 
-## Run it
+## Running it
 
 ```bash
 pip install -e '.[dev]'

@@ -139,14 +139,14 @@
     const foot = `<tr class="mx-foot"><th>PASS</th>` + colPass.map(([p, n]) => `<td class="mx-sum" title="${p} of ${n} runs">${n ? `${Math.round(100 * p / n)}%` : "–"}</td>`).join("") + `<td></td></tr>`;
     $("#runs").innerHTML = taskIds.length
       ? `<table class="mx"><thead>${head1}${head2}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`
-      : `<p class="empty">No runs are matched by the filters.</p>`;
+      : `<p class="empty">No runs match the filters.</p>`;
   }
   const byTaskCat = (id) => (runs.find((r) => r.task_id === id) || {}).category || "control";
 
   function renderMatrixLegend() {
     $("#mx-legend").innerHTML = Object.entries(OCLS).map(([o, c]) => `<span><i class="mx-chip ${c}"></i>${esc(o)}</span>`).join("")
       + `<span><i class="mx-chip mx-none"></i>no run</span><span><i class="mx-chip mx-na"></i>task not on this repo</span>`
-      + `<span class="meta">At L0–L2, each task is run once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
+      + `<span class="meta">At L0–L2, the harness runs each task once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
   }
 
   function fillFilters() {
@@ -329,7 +329,7 @@
 
   function transcriptHTML(run) {
     const t = run.transcript || [];
-    if (!t.length) return run.response ? answerHTML(run.response) : `<p class="empty">No answer was saved.</p>`;
+    if (!t.length) return run.response ? answerHTML(run.response) : `<p class="empty">The harness saved no answer for this run.</p>`;
     const names = {}, droppedIds = new Set();
     t.forEach((m) => (m.tool_calls || []).forEach((c) => (names[c.id] = c.name)));
     t.forEach((m) => (m.drop || []).forEach((id) => droppedIds.add(id)));
@@ -419,7 +419,7 @@
     let body;
     switch (state.tab) {
       case "prompt": body = promptHTML(run); break;
-      case "thinking": body = run.reasoning ? `<pre class="block">${esc(run.reasoning)}</pre>` : `<p class="empty">No thinking (thinking was off, or none was returned).</p>`; break;
+      case "thinking": body = run.reasoning ? `<pre class="block">${esc(run.reasoning)}</pre>` : `<p class="empty">No thinking (thinking was off, or the model returned none).</p>`; break;
       case "answer": body = transcriptHTML(run); break;
       case "patch": body = diffHTML(run.patch); break;
       case "tests": body = (run.tests ? `<pre class="block">${esc(run.tests)}</pre>` : `<p class="empty">No test output.</p>`)
