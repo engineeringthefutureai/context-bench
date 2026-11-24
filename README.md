@@ -2,6 +2,8 @@
 
 Measuring how context building shapes LLM-written code, from one pasted file to agentic search.
 
+Site: **https://context.engineeringthefuture.ai/** (results, the raw data of every run, method, tasks).
+
 The same coding tasks run on the same model with nine different ways of building the model's context.
 Only the context varies; the system prompt, task text, output format and generation settings are the same
 for every level.
@@ -46,8 +48,9 @@ docstring no longer matches its body). Hidden tests live outside the repo and ne
   EmbeddingGemma 2 with an 8k window and no truncation. Thinking off first, then the clean thinking-on
   round; penalty grading after that.
 
-The site (`docs/`: results, data viewer, method, guide, tasks, downloads) is built from `results/` by the
-scripts in `scripts/`.
+The site (`docs/`, published with GitHub Pages: results, data viewer, method, guide, tasks, downloads) is
+built from `results/` by the scripts in `scripts/`. It counts visits with Google Analytics
+(`docs/analytics.js`, off on local previews).
 
 ## Run it
 
