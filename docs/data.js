@@ -7,7 +7,7 @@
     retrieved: "Retrieved code", map: "Repository map", tools: "Tool instructions / calls", task: "Task",
     closing: "Closing lines",
   };
-  const TABS = [["prompt", "Prompt"], ["thinking", "Thinking"], ["answer", "Answer / transcript"], ["patch", "Patch"], ["tests", "Tests"]];
+  const TABS = [["prompt", "Prompt"], ["thinking", "Thinking"], ["answer", "Answer / transcript"], ["patch", "Diff"], ["tests", "Tests"]];
   const OPEN_BY_DEFAULT = new Set(["task", "hint", "tools", "target", "closing"]);
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -105,11 +105,55 @@
       <div class="group-label">User message</div>${run.user.map(segHTML).join("")}</div>`;
   }
 
+  // Patch: side by side per file (old left, new right), removed and added lines paired row by row,
+  // highlighted per line. A created or deleted file gets one column.
+  function parseDiff(text) {
+    const files = [];
+    let f = null, h = null, oldNo = 0, newNo = 0, dels = [], adds = [];
+    const flush = () => {
+      if (!h) return;
+      for (let i = 0; i < Math.max(dels.length, adds.length); i++) h.rows.push({o: dels[i] || null, n: adds[i] || null, kind: "chg"});
+      dels = []; adds = [];
+    };
+    for (const line of text.split("\n")) {
+      if (line.startsWith("--- ")) { flush(); f = {old: line.slice(4).replace(/^a\//, ""), path: "", hunks: [], add: 0, del: 0}; files.push(f); h = null; continue; }
+      if (line.startsWith("+++ ") && f && !f.path) { f.path = line.slice(4).replace(/^b\//, ""); continue; }
+      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+      if (m && f) { flush(); oldNo = +m[1]; newNo = +m[2]; h = {head: line, rows: []}; f.hunks.push(h); continue; }
+      if (!h || line.startsWith("\\")) continue;           // "\ No newline at end of file"
+      if (line.startsWith("-")) { dels.push({no: oldNo++, text: line.slice(1)}); f.del++; continue; }
+      if (line.startsWith("+")) { adds.push({no: newNo++, text: line.slice(1)}); f.add++; continue; }
+      flush();
+      const t = line.slice(1);
+      h.rows.push({o: {no: oldNo++, text: t}, n: {no: newNo++, text: t}, kind: "ctx"});
+    }
+    flush();
+    return files;
+  }
+
+  function hl(text, lang) {
+    if (!window.hljs || lang === "plaintext") return esc(text);
+    try { return window.hljs.highlight(text, {language: lang, ignoreIllegals: true}).value; } catch (e) { return esc(text); }
+  }
+
   function diffHTML(text) {
     if (!text) return `<p class="empty">No patch (no valid file blocks).</p>`;
-    const lines = esc(text).split("\n").map((l) =>
-      l.startsWith("@@") ? `<span class="hunk">${l}</span>` : l.startsWith("+") ? `<span class="add">${l}</span>` : l.startsWith("-") ? `<span class="del">${l}</span>` : l);
-    return `<pre class="block diff">${lines.join("\n")}</pre>`;
+    const files = parseDiff(text);
+    if (!files.length) return `<pre class="block">${esc(text)}</pre>`;
+    return `<div class="answer-files">` + files.map((f) => {
+      const created = f.old === "/dev/null", deleted = f.path === "/dev/null";
+      const path = deleted ? f.old : f.path;
+      const lang = LANG[(path.split(".").pop() || "").toLowerCase()] || "plaintext";
+      const one = created || deleted;
+      const cell = (side, cls) => side ? `<td class="ln">${side.no}</td><td class="code ${cls}">${hl(side.text, lang) || " "}</td>` : `<td class="ln"></td><td class="code none"></td>`;
+      const rows = f.hunks.map((h) => `<tr class="hunk"><td colspan="${one ? 2 : 4}">${esc(h.head)}</td></tr>` + h.rows.map((r) => {
+        if (one) return `<tr>${cell(created ? r.n : r.o, created ? "add" : "del")}</tr>`;
+        return `<tr>${cell(r.o, r.kind === "chg" ? "del" : "")}${cell(r.n, r.kind === "chg" ? "add" : "")}</tr>`;
+      }).join("")).join("");
+      const tag = created ? " · new file" : deleted ? " · deleted" : "";
+      return `<details class="seg k-file" open><summary><span class="lab">${esc(path)}${tag}</span><span class="sz"><span class="add">+${f.add}</span> <span class="del">−${f.del}</span></span></summary>
+        <div class="sbs-wrap"><table class="sbs${one ? " one" : ""}"><colgroup>${one ? "<col class=n><col>" : "<col class=n><col><col class=n><col>"}</colgroup><tbody>${rows}</tbody></table></div></details>`;
+    }).join("") + `</div>`;
   }
 
   // A tool result in parts: selective/L8 segments start with "[#n] label"; rich read_symbol and
@@ -135,9 +179,31 @@
     });
   }
 
+  // A reply's complete <file path="..."> blocks become collapsible, highlighted code (open by default); text
+  // around them stays as it is. A reply without a complete block renders as plain text, unchanged.
+  const FILE_RX = /<file path="([^"]+)">\n?([\s\S]*?)\n?<\/file>/g;
+  const LANG = {py: "python", sql: "sql", html: "xml", toml: "ini", md: "markdown", json: "json", yaml: "yaml", yml: "yaml"};
+  function answerHTML(text) {
+    const parts = [];
+    let last = 0, m;
+    FILE_RX.lastIndex = 0;
+    while ((m = FILE_RX.exec(text))) {
+      const before = text.slice(last, m.index).trim();
+      if (before) parts.push(`<pre class="block">${esc(before)}</pre>`);
+      const lang = LANG[(m[1].split(".").pop() || "").toLowerCase()] || "plaintext";
+      const lines = m[2] ? m[2].split("\n").length : 0;
+      parts.push(`<details class="seg k-file" open><summary><span class="lab">File · ${esc(m[1])}</span><span class="sz">${lines} line${lines === 1 ? "" : "s"}</span></summary><pre class="code"><code class="language-${lang}">${esc(m[2])}</code></pre></details>`);
+      last = FILE_RX.lastIndex;
+    }
+    if (!parts.length) return `<pre class="block">${esc(text)}</pre>`;
+    const after = text.slice(last).trim();
+    if (after) parts.push(`<pre class="block">${esc(after)}</pre>`);
+    return `<div class="answer-files">${parts.join("")}</div>`;
+  }
+
   function transcriptHTML(run) {
     const t = run.transcript || [];
-    if (!t.length) return run.response ? `<pre class="block">${esc(run.response)}</pre>` : `<p class="empty">No answer saved.</p>`;
+    if (!t.length) return run.response ? answerHTML(run.response) : `<p class="empty">No answer saved.</p>`;
     const names = {}, droppedIds = new Set();
     t.forEach((m) => (m.tool_calls || []).forEach((c) => (names[c.id] = c.name)));
     t.forEach((m) => (m.drop || []).forEach((id) => droppedIds.add(id)));
@@ -197,7 +263,7 @@
       turnNo += 1;
       const calls = (m.tool_calls || []).map((c) => `<div class="call"><b>${esc(c.name)}</b> ${esc(c.arguments)}</div>`).join("");
       const text = (m.content || "").trim();
-      const body = text ? `<div class="model-text"><div class="lab">${calls ? "Text written with the tool calls" : "Text"}</div><pre class="block">${esc(text)}</pre></div>` : "";
+      const body = text ? `<div class="model-text"><div class="lab">${calls ? "Text written with the tool calls" : "Text"}</div>${answerHTML(text)}</div>` : "";
       const callsHTML = calls ? `<div class="lab">Tool calls</div>${calls}` : (text ? "" : `<p class="empty">Empty reply.</p>`);
       const thought = m.reasoning ? `<details class="seg k-closing"><summary><span class="lab">Thinking</span><span class="sz">≈${fmt(tok(m.reasoning.length))} tok</span></summary><pre>${esc(m.reasoning)}</pre></details>` : "";
       out.push(`<div class="turn model"><div class="who">Model · turn ${turnNo}${m.finish_reason ? ` · ${esc(m.finish_reason)}` : ""}</div>${thought}${body}${callsHTML}</div>`);
@@ -269,6 +335,7 @@
     $("#twin-wrap").innerHTML = twinOptions(a);
     el.className = b ? "panes two" : "panes";
     el.innerHTML = paneHTML(a, "a") + (b ? paneHTML(b, "b") : "");
+    if (window.hljs) el.querySelectorAll("pre.code code").forEach((c) => window.hljs.highlightElement(c));
   }
 
   function render() { writeHash(); renderTable(); renderPanes(); }
