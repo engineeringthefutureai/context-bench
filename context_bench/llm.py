@@ -5,6 +5,7 @@ see .env.example). Sent as "Authorization: Bearer <key>"; never logged or writte
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +111,16 @@ class OpenAICompatClient:
             except httpx.HTTPError:
                 pass
         return False
+
+    def started_at(self) -> float | None:
+        """When the server process started (vLLM: process_start_time_seconds on /metrics), to tell a
+        restarted server from the old one still draining. None if the server doesn't say."""
+        try:
+            r = self._http.get("/metrics", timeout=5)
+            m = re.search(r"^process_start_time_seconds\s+(\S+)", r.text, re.M) if r.status_code == 200 else None
+            return float(m.group(1)) if m else None
+        except (httpx.HTTPError, ValueError):
+            return None
 
     def reset_prefix_cache(self) -> bool:
         """Drop the server's prefix cache (vLLM: POST /reset_prefix_cache, needs VLLM_SERVER_DEV_MODE=1).

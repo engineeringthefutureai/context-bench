@@ -143,15 +143,20 @@ class Experiment:
         if not cmd:
             raise RuntimeError("clean mode needs CBENCH_RESTART_CMD (environment or .env)")
         timeout = float(env_value("CBENCH_READY_TIMEOUT") or 1200)
+        # The old server's start time: the restart only counts once the server answering is a new one. A restart
+        # command can return while the old server still answers (2026-11-24: a reload fell back to "load",
+        # which returned at once; 31 runs then hit the old server as it went away: connection refused).
+        old = getattr(self._client(model_key, url), "started_at", lambda: None)()
         subprocess.run(cmd, shell=True, check=True, timeout=timeout,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         with self._client_lock:                  # pooled connections died with the old server
             self._clients.pop((model_key, url), None)
         client = self._client_factory(self.config["models"][model_key], url)
         deadline = time.monotonic() + timeout
-        while not client.ready():
+        started = getattr(client, "started_at", lambda: None)
+        while not client.ready() or (old is not None and started() in (None, old)):
             if time.monotonic() > deadline:
-                raise RuntimeError(f"model server not ready {timeout:.0f}s after restart")
+                raise RuntimeError(f"model server not ready (or not restarted) {timeout:.0f}s after restart")
             time.sleep(2)
         client.chat([{"role": "user", "content": "Reply with OK."}], temperature=None, seed=1,
                     max_tokens=8, thinking=False)

@@ -165,3 +165,25 @@ def test_concurrent_sweep_restarts_before_each_agentic_run(tmp_path, monkeypatch
     exp.sweep(["L1", "L7"], task_ids=["control-001", "control-002"])
     n_l7 = seen.count("L7")
     assert n_l7 >= 1 and marker.read_text().count("restart") == n_l7      # one restart per agentic run, none for L1 (EVERY_L7=1)
+
+
+def test_restart_waits_for_a_new_server_not_the_old_one_still_answering(tmp_path, monkeypatch):
+    """A restart command can return while the old server still answers (it is draining). The restart only
+    counts once the server's start time has changed."""
+    class OldThenNew(ReadyClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.start_probes = 0
+
+        def ready(self):
+            return True                    # the old server answers as ready the whole time
+
+        def started_at(self):
+            self.start_probes += 1
+            return 100.0 if self.start_probes <= 4 else 200.0     # the first probes still reach the old process
+
+    client = OldThenNew(REPLY)
+    exp, _, _ = _clean_exp(tmp_path, monkeypatch, "true")
+    exp._client_factory = lambda m, url: client
+    exp.restart_server(exp.default_model, "http://a")
+    assert client.start_probes >= 5               # waited until the start time changed
