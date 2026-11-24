@@ -22,7 +22,7 @@ RESULTS = Path(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--res
 if not RESULTS.is_absolute():
     RESULTS = ROOT / RESULTS
 sys.path.insert(0, str(ROOT / "scripts"))
-from build_site import config_key, level_label, outcome, thinking_on_rows  # noqa: E402
+from build_site import level_label, pair_key, outcome, thinking_on_rows  # noqa: E402
 import site_layout  # noqa: E402
 
 # Illustrative API prices (USD per million tokens), stated on the page. Not quotes.
@@ -43,7 +43,7 @@ def load():
         g = json.loads(line)
         if str(g.get("rubric_version")) == "2":
             grades[g["run_id"]] = g
-    key = config_key            # the site's one configuration key (tool_names included: the native-names arm)
+    key = pair_key              # one dict per round, so the key leaves the round out and the rounds pair up
     pv = max((r.get("prompt_version", 1) for r in rows), default=3)          # the round's prompt version
     final = {key(r): r for r in thinking_on_rows(rows, pv)}     # thinking on (concurrent; clean only if nothing else)
     off = {}
@@ -168,14 +168,17 @@ def build_progress(final: dict, off: dict) -> str:
                 f'{sum(r["state"] == "running" for r in runs)} in progress, {sum(r["state"] == "queued" for r in runs)} '
                 f'queued (last update {e(status.get("updated_at", "")[11:16])} UTC).</p>')
     else:
-        live = '<p class="small">No sweep running right now.</p>'
+        live = '<p class="small">No sweep is being run right now.</p>'
     return _page(f"""
   <header style="display:grid;gap:12px">
     <div class="eyebrow">Round in progress · preview</div>
     <h1>How context building affects generated code</h1>
-    <p class="lede">The current round is still running. This page shows what has been recorded so far; the
-    full write-up comes when the thinking-on round is done (clean-mode cost and latency figures are reported
-    separately). Browse the runs in the raw-data viewer.</p>
+    <p class="lede">The same coding tasks are given to the same model, and only the way its context is built is
+    varied, with deliberately simple builders. Each level is one primitive component of a coding harness, not a
+    complete agentic harness: the impact of even a primitive implementation on the results is what is shown.</p>
+    <p class="small">The current round is still being run. What has been recorded so far is shown on this page; the
+    full write-up will follow when the thinking-on round is finished (clean-mode cost and latency figures are
+    reported separately). The runs can be browsed in the raw-data viewer.</p>
   </header>
   <section>
     <h2>Per configuration</h2>
@@ -184,8 +187,8 @@ def build_progress(final: dict, off: dict) -> str:
     {bars(list(off.values()), "off", "Thinking off")}
     {bars(list(final.values()), "final", "Thinking on")}
     <p class="small">Each bar is one configuration, all repos together, on a common scale: the runs recorded plus
-    the ones the running sweep still has. The number is PASS out of that total. Outcomes as defined on the
-    Method page.</p>
+    the ones still queued by the running sweep. PASS out of that total is given as the number. The outcomes are
+    defined on the Method page.</p>
   </section>
   <section>
     <h2>Per repo</h2>
@@ -354,88 +357,92 @@ def build() -> str:
   <header style="display:grid;gap:12px">
     <div class="eyebrow">Experiment report · prompt v3 round</div>
     <h1>How context building affects generated code</h1>
-    <p class="lede">The same coding tasks, the same model and eight ways of building its context, from no repository
-    at all to an agent that explores with tools. {n_all} final-round runs: thinking on, a cold prefix cache before
+    <p class="lede">The same coding tasks are given to the same model, and its context is built in eight deliberately
+    simple ways, from no repository at all to a minimal agent loop by which the repository is explored with tools.
+    Each level is one primitive component of a coding harness, not a complete agentic harness: the impact of even a
+    primitive implementation on the results is what is shown. {n_all} final-round runs: thinking on, a cold prefix cache before
     every run, one sample per configuration.</p>
     <div class="meta"><span>Qwen 3.8 27B FP8 on vLLM</span><span>20 tasks on repos S and M</span><span>compared with a thinking-off round of the same configurations</span></div>
   </header>
 
   <section class="takeaways breakout" aria-label="Key findings">
-    <div class="takeaway"><b>Thinking beats any context level</b><span>{pct(t_off['pass'], nc)} → {pct(t_on['pass'], nc)} PASS over the same {nc} configurations. Answers with no usable code: {t_off['invalid']} → {t_on['invalid']}.</span></div>
-    <div class="takeaway"><b>The agent leads, the whole repo is close</b><span>L7 grep {p(l7g)}/{len(l7g)}, L3 {p(l3)}/{len(l3)}, on {fresh_ratio:.0%} of L3's fresh input per run.</span></div>
-    <div class="takeaway"><b>Seeing the helper drives reuse</b><span>Full source in context: {vis['full source'][1]}/{vis['full source'][0]} reused. Not seen: {vis['not seen'][1]}/{vis['not seen'][0]}.</span></div>
-    <div class="takeaway"><b>About one answer in six is silently wrong</b><span>{pct(t_on['silent'], nc)} with thinking, {pct(t_off['silent'], nc)} without: wrong, yet the repo's own tests pass. Thinking doesn't change that.</span></div>
+    <div class="takeaway"><b>Any context level is beaten by thinking</b><span>{pct(t_off['pass'], nc)} → {pct(t_on['pass'], nc)} PASS over the same {nc} configurations. Answers with no usable code: {t_off['invalid']} → {t_on['invalid']}.</span></div>
+    <div class="takeaway"><b>The lead is taken by the agent, the whole repo is close behind</b><span>L7 grep {p(l7g)}/{len(l7g)}, L3 {p(l3)}/{len(l3)}, on {fresh_ratio:.0%} of L3's fresh input per run.</span></div>
+    <div class="takeaway"><b>Reuse is driven by seeing the helper</b><span>Full source in context: {vis['full source'][1]}/{vis['full source'][0]} reused. Not seen: {vis['not seen'][1]}/{vis['not seen'][0]}.</span></div>
+    <div class="takeaway"><b>About one answer in six is silently wrong</b><span>{pct(t_on['silent'], nc)} with thinking, {pct(t_off['silent'], nc)} without: wrong, yet the repo's own tests are passed. This isn't changed by thinking.</span></div>
   </section>
 
   <section>
     <div class="eyebrow">Results</div>
     <h2>Pass rate by context level</h2>
-    <p class="prose">Every bar is one configuration over its tasks (27 runs = the 20 tasks, 7 of them on both repos; L0 and L1-L2 run
-    each task once, on its smallest repo). <span class="num-good">PASS</span>: a valid answer and every hidden test passes. <span class="num-bad">FAIL</span>:
-    a valid answer, a hidden test fails. Grey: no accepted answer, or the output limit was hit. Hatched (n/a):
-    tasks the level doesn't run, so every bar is on the same scale.</p>
+    <p class="prose">Every bar is one configuration over its tasks (27 runs = the 20 tasks, 7 of them on both repos; at L0 and L1-L2,
+    each task is run once, on its smallest repo). <span class="num-good">PASS</span>: a valid answer is given and every hidden test is passed. <span class="num-bad">FAIL</span>:
+    a valid answer is given, but a hidden test is failed. Grey: no accepted answer is given, or the output limit was hit. Hatched (n/a):
+    tasks not run at the level, so that every bar is kept on the same scale.</p>
     <div class="obars">{''.join(bars)}</div>
     <div class="table-wrap"><table>
       <thead><tr><th>Configuration</th><th class=r>Runs</th><th class=r>PASS</th><th class=r>Reuse</th><th class=r>Repo tests kept</th>
       <th class=r>Judge rank</th><th class=r>Input</th><th class=r>Output</th><th class=r>Seconds</th></tr></thead>
       <tbody>{''.join(rows_html)}</tbody></table></div>
-    <p class="small">Reuse: reuse tasks where the hidden spy saw the needed helper called. Repo tests kept: passing runs whose
-    patch also keeps the repository's own test suite green. Judge rank: mean share of the other candidate patches the
-    blind judge ranked above this configuration's patches (0 = always best, lower is better). Input, output, seconds:
+    <p class="small">Reuse: reuse tasks in which a call to the needed helper by the new code was observed by the hidden spy. Repo tests
+    kept: passing runs in which the repository's own test suite is also kept green by the patch. Judge rank: mean share
+    of the other candidate patches ranked above this configuration's patches by the blind judge (0 = always ranked
+    best; lower is better). Input, output, seconds:
     medians per run.</p>
   </section>
 
   <section>
     <div class="eyebrow">Reuse</div>
-    <h2>What the model saw of the helper decides whether it reuses it</h2>
+    <h2>Whether the helper is reused is decided by what was seen of it</h2>
     <div class="table-wrap"><table>
       <thead><tr><th>Needed helper in context as</th><th class=r>Reused, thinking on</th><th class=r>Reused, thinking off</th></tr></thead>
       <tbody>{vis_rows}</tbody></table></div>
-    <p class="prose">With the full source in context the helper is almost always used. With thinking on, a bare signature
-    (the L6 repository map) is enough too; with thinking off it mostly wasn't, the model asked to look first instead of
-    answering. When the helper isn't in the context at all, the model writes its own version.</p>
+    <p class="prose">With the full source in context, the helper is almost always used. With thinking on, a bare
+    signature (the L6 repository map) is enough too; with thinking off it mostly isn't: a look is asked for first,
+    instead of an answer being given. When the helper isn't in the context at all, a version of its own is written.</p>
   </section>
 
   <section>
     <div class="eyebrow">Hypotheses</div>
-    <h2>What we expected and what happened</h2>
+    <h2>What was expected and what was found</h2>
     <div class="table-wrap"><table>
       <thead><tr><th>Expectation</th><th>Verdict</th><th>Evidence (final round)</th></tr></thead>
       <tbody>
-        <tr><td>Reuse depends on whether the helper's code is visible.</td><td><span class="verdict v-held">held</span></td>
+        <tr><td>Reuse is determined by whether the helper's code is visible.</td><td><span class="verdict v-held">held</span></td>
             <td>Full source {vis['full source'][1]}/{vis['full source'][0]}, signature {vis['signature only'][1]}/{vis['signature only'][0]}, not seen {vis['not seen'][1]}/{vis['not seen'][0]}.</td></tr>
-        <tr><td>An agent with tools matches the whole repo at a fraction of the input.</td><td><span class="verdict v-held">held</span></td>
+        <tr><td>The whole repo is matched by an agent with tools, at a fraction of the input.</td><td><span class="verdict v-held">held</span></td>
             <td>L7 grep {p(l7g)}/{len(l7g)} vs L3 {p(l3)}/{len(l3)}; median fresh input per run {st.median(r['tokens_in'] - (r.get('tokens_cached') or 0) for r in l7g) / 1000:.0f}k vs {st.median(r['tokens_in'] for r in l3) / 1000:.0f}k.</td></tr>
-        <tr><td>Model-written search queries beat changing the search engine.</td><td><span class="verdict v-part">partly</span></td>
-            <td>With BM25, model queries {p(by.get('L5 bm25 model_queries', []))}/27 vs task text {p(by.get('L5 bm25 task_vs_code', []))}/27; with embeddings the task text did as well ({p(by.get('L5 embed task_vs_code', []))}/27).</td></tr>
-        <tr><td>A repository map of signatures is enough to write the change.</td><td><span class="verdict v-part">with thinking</span></td>
-            <td>L6 {p(by.get('L6', []))}/27 with thinking, {lv_think['L6'][1]}/{lv_think['L6'][0]} without (thinking off, the model asked to see code instead of answering).</td></tr>
-        <tr><td>Thinking matters most when the context is thin.</td><td><span class="verdict v-held">held</span></td>
+        <tr><td>More is gained from model-written search queries than from a changed search engine.</td><td><span class="verdict v-part">partly</span></td>
+            <td>With BM25, model queries {p(by.get('L5 bm25 model_queries', []))}/27 vs task text {p(by.get('L5 bm25 task_vs_code', []))}/27; with embeddings, as much was achieved with the task text ({p(by.get('L5 embed task_vs_code', []))}/27).</td></tr>
+        <tr><td>A repository map of signatures is enough for the change to be written.</td><td><span class="verdict v-part">with thinking</span></td>
+            <td>L6 {p(by.get('L6', []))}/27 with thinking, {lv_think['L6'][1]}/{lv_think['L6'][0]} without (with thinking off, code was asked for instead of an answer being given).</td></tr>
+        <tr><td>Most is gained from thinking when the context is thin.</td><td><span class="verdict v-held">held</span></td>
             <td>Largest gains at L6 ({lv_think['L6'][1]} → {lv_think['L6'][2]}) and L1 ({lv_think['L1'][1]} → {lv_think['L1'][2]}); smallest at L3 ({lv_think['L3'][1]} → {lv_think['L3'][2]}).</td></tr>
-        <tr><td>Richer agent tools and a self-managed working set help.</td><td><span class="verdict v-not">not on repo M</span></td>
-            <td>rich {p(by.get('L7 rich', []))}/27, selective {p(by.get('L7 selective', []))}/27 vs grep {p(l7g)}/27; M's files are small, so there's little to save (repo L tests this next).</td></tr>
-        <tr><td>Documentation drift (the trap) is caught only by levels that show and check the helper's body.</td><td><span class="verdict v-held">held</span></td>
-            <td>Reused and fixed only at L4 and L7; the signature-only levels (L6) trusted the docs.</td></tr>
+        <tr><td>Results are improved by richer agent tools and a self-managed working set.</td><td><span class="verdict v-not">not on repo M</span></td>
+            <td>rich {p(by.get('L7 rich', []))}/27, selective {p(by.get('L7 selective', []))}/27 vs grep {p(l7g)}/27; M's files are small, so little can be saved (this is tested next, on repo L).</td></tr>
+        <tr><td>Documentation drift (the trap) is caught only at levels at which the helper's body is shown and checked.</td><td><span class="verdict v-held">held</span></td>
+            <td>The helper was reused and fixed only at L4 and L7; at the signature-only level (L6), the docs were trusted.</td></tr>
       </tbody></table></div>
   </section>
 
   <section>
     <div class="eyebrow">Reasoning</div>
     <h2>Thinking on vs thinking off</h2>
-    <p class="prose">The same {nc} configurations with and without thinking. Thinking costs about
-    {out_on / out_off:.0f}× the output tokens ({out_off:,.0f} → {out_on:,.0f} per run). What it buys is mostly answers
-    that work at all: with thinking off a third of the runs produced no usable code or code that doesn't import.
-    Those failures are exactly the ones a harness that runs tests would catch and could retry. The silently wrong
-    answers, whose repo tests pass, are as common either way. Only tests that cover the behaviour catch those.</p>
+    <p class="prose">The same {nc} configurations, with and without thinking. About {out_on / out_off:.0f}× the output
+    tokens are spent on thinking ({out_off:,.0f} → {out_on:,.0f} per run). What is bought with them is mostly answers
+    that work at all: with thinking off, no usable code, or code that doesn't import, was produced in a third of the
+    runs. Those failures are exactly the ones that would be caught, and could be retried, by a harness in which tests
+    are run. The silently wrong answers, by which the repo tests are passed, are as common either way. Those are
+    caught only by tests in which the behaviour is covered.</p>
     <div class="table-wrap"><table>
       <thead><tr><th>Outcome</th><th class=r>Thinking off</th><th class=r>Thinking on</th></tr></thead>
       <tbody>{think_rows}</tbody></table></div>
     <div class="table-wrap"><table>
       <thead><tr><th>Level</th><th class=r>PASS, off</th><th class=r>PASS, on</th><th class=r>Change</th></tr></thead>
       <tbody>{think_lv_rows}</tbody></table></div>
-    <p class="small">No level could run code, so nothing told the model it was wrong. With a test loop, thinking off would
-    likely close part of the gap, at the cost of retries. Latency isn't compared here: the thinking-off round ran 4
-    requests at a time on a warm cache.</p>
+    <p class="small">Code couldn't be run at any level, so the model was never told it was wrong. With a test loop, part
+    of the gap would likely be closed with thinking off, at the cost of retries. Latency isn't compared here: in the
+    thinking-off round, 4 requests were run at a time on a warm cache.</p>
   </section>
 
   <section>
@@ -445,8 +452,8 @@ def build() -> str:
     <div class="table-wrap"><table>
       <thead><tr><th>Level</th>{''.join(f'<th class=r>{e(b)}</th>' for b in buckets)}<th class=r>Median s</th><th class=r>Minutes per PASS</th></tr></thead>
       <tbody>{''.join(lat_rows)}</tbody></table></div>
-    <p class="small">Minutes per PASS: all time spent at that level divided by its passing runs. Thin-context levels think
-    longest (L1 runs often think for 10k+ tokens); the agent is the fastest per pass.</p>
+    <p class="small">Minutes per PASS: all time spent at that level, divided by its passing runs. The longest thinking is
+    done at thin-context levels (10k+ tokens are often spent on thinking in L1 runs); per pass, the agent is the fastest.</p>
   </section>
 
   <section>
@@ -457,7 +464,7 @@ def build() -> str:
       <th class=r>Tokens per PASS</th>{''.join(f'<th class=r>$ per 100 PASS, {e(n)}</th>' for n in PRICES)}</tr></thead>
       <tbody>{''.join(cost_rows)}</tbody></table></div>
     <p class="small">Illustrative prices, not quotes: {e(price_note)}. Cached input is counted at the full price here;
-    with prompt caching the agent's repeated prefixes (the "cached" column) would cost less.</p>
+    with prompt caching, less would be paid for the agent's repeated prefixes (the "cached" column).</p>
   </section>
 
   <section>
@@ -467,65 +474,72 @@ def build() -> str:
       <thead><tr><th>L7 variant</th><th class=r>PASS</th><th class=r>Reuse</th><th class=r>Input</th><th class=r>Cached</th>
       <th class=r>Tool calls</th><th class=r>Seconds</th></tr></thead>
       <tbody>{''.join(agents)}</tbody></table></div>
-    <p class="prose"><b>grep</b> and <b>hybrid</b>: grep, file reads, references (hybrid adds semantic search).
-    <b>rich</b>: the same tools, richer (search hits with source, line ranges, read a function by name).
-    <b>selective</b>: rich plus <code>drop</code>, which removes earlier results from the conversation. On repo M the richer
-    tools didn't help: the files are small, so reading whole files is cheap, and the model rarely used
-    <code>read_symbol</code> ({calls['read_symbol']} calls against {calls['read_file']} file reads). With thinking on,
-    {sel_drop_runs} of {len(sel)} selective runs dropped something, but the context saved was small:
-    {sel_dropped:,} tokens dropped and {sel_saved:,} input tokens avoided in total, about
-    {100 * sel_saved / sel_in:.1f}% of selective's input. Repo L (169k tokens, files and functions hundreds of lines
-    long) is built to give these tools something to do.</p>
+    <p class="prose"><b>grep</b> and <b>hybrid</b>: grep, file reads, references (semantic search is added in hybrid).
+    <b>rich</b>: the same tools, richer (search hits are given with source, line ranges can be read, a function can be
+    read by name). <b>selective</b>: <code>drop</code> is added to rich, by which earlier results are removed from the
+    conversation. On repo M, nothing was gained from the richer tools: the files are small, so whole files are cheap to
+    read, and <code>read_symbol</code> was rarely used ({calls['read_symbol']} calls against {calls['read_file']} file
+    reads). With thinking on, something was dropped in {sel_drop_runs} of {len(sel)} selective runs, but little context
+    was saved: {sel_dropped:,} tokens were dropped and {sel_saved:,} input tokens avoided in total, about
+    {100 * sel_saved / sel_in:.1f}% of selective's input. Repo L (169k tokens, with files and functions hundreds of lines
+    long) was built to give these tools something to do.</p>
   </section>
 
   <section>
     <div class="eyebrow">Quality</div>
     <h2>Judged code quality</h2>
-    <p class="prose">A blind judge (agy, rubric v2) compared all candidate patches of a task side by side, without knowing
-    how any was made. Its correctness score agrees with the tests almost everywhere:
-    {agree[(False, False)]} failing runs got a low score and none a high one; {agree[(True, True)]} passing runs got a
-    high one. The {agree[(True, False)]} passing runs it scored low are where the hidden tests miss something.</p>
+    <p class="prose">All candidate patches of a task were compared side by side by a blind judge (agy, rubric v2), with no
+    knowledge of how any of them was made. The tests are agreed with almost everywhere by its correctness score: a low
+    score was given to {agree[(False, False)]} failing runs and a high one to none; a high one was given to
+    {agree[(True, True)]} passing runs. The {agree[(True, False)]} passing runs that were scored low are where something
+    is missed by the hidden tests.</p>
     <div class="table-wrap"><table>
       <thead><tr><th></th><th class=r>Judge: correctness 4-5</th><th class=r>Judge: 1-3</th></tr></thead>
       <tbody><tr><td>Hidden tests pass</td><td class=r>{agree[(True, True)]}</td><td class=r>{agree[(True, False)]}</td></tr>
       <tr><td>Hidden tests fail</td><td class=r>{agree[(False, True)]}</td><td class=r>{agree[(False, False)]}</td></tr></tbody></table></div>
     <p class="prose">Patch coverage: of {len(passed_cov)} passing patches, {len(low_cov)} had less than 80% of their changed
-    statements run by the hidden tests. {len(broke)} passing patches broke the repository's own tests (the regression
-    check). No run, at any level, added tests of its own: the prompt never asks for tests ({tests_added} runs did).</p>
+    statements run by the hidden tests. The repository's own tests were broken by {len(broke)} passing patches (the
+    regression check). Tests of their own were added in almost no run, at any level: tests are never asked for in the
+    prompt ({tests_added} runs added any).</p>
   </section>
 
   <section>
     <div class="eyebrow">Examples</div>
-    <h2>How the model fails</h2>
+    <h2>How failures were observed</h2>
     <div class="gallery">
-      <div class="card"><h4>Trusted the documentation</h4><p class="small">trap-001: <code>format_weight</code> documents
-      "lb" but returns kg. The repository map showed only the signature and docstring; the patch called it with "lb".</p>
+      <div class="card"><h4>Documentation trusted</h4><p class="small">trap-001: "lb" is documented by <code>format_weight</code>,
+      but kg is returned. Only the signature and docstring were shown in the repository map; it was called with "lb" in the patch.</p>
       {link(find('trap-001', 'L6'), 'L6 · trap-001 · M')}</div>
-      <div class="card"><h4>Reused and fixed it</h4><p class="small">The agent read the helper, saw the missing branch,
-      fixed <code>packaging.py</code> and reused it from the label code.</p>{link(find('trap-001', 'L7 grep'), 'L7 grep · trap-001 · M')}</div>
-      <div class="card"><h4>Right fix, unrelated edit</h4><p class="small">Fixed the helper correctly, then gave a dataclass
-      field a default for no reason; the module no longer imports.</p>{link(find('trap-001', 'L3'), 'L3 · trap-001 · M')}</div>
-      <div class="card"><h4>Corrupted output</h4><p class="small">Correct fix, but duplicated tokens garbled a line
-      (<code>format_weight(weight_g(weight_g, …</code>): a syntax error. Seen in about 2% of final-round answers.</p>{link(find('trap-001', 'L7 rich'), 'L7 rich · trap-001 · M')}</div>
-      <div class="card"><h4>Passed, but broke the repo</h4><p class="small">Hidden tests pass, the repository's own tests
-      don't. {len(broke)} such runs in the final round.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in broke[:3])}</div>
-      <div class="card"><h4>Thought past the output limit</h4><p class="small">With no context at all, the model reasoned
-      until it hit the 32k output limit and never wrote the code.</p>{link(oot['run_id'], level_label(oot) + ' · ' + oot['task_id']) if oot else ''}</div>
-      <div class="card"><h4>Used dead code</h4><p class="small">The patch imports from the old, unused <code>common/</code>
-      package (named like the canonical place). {len(dead)} final-round runs.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in dead[:2])}</div>
+      <div class="card"><h4>Reused and fixed</h4><p class="small">The helper was read by the agent, the missing branch was spotted,
+      <code>packaging.py</code> was fixed, and the helper was reused from the label code.</p>{link(find('trap-001', 'L7 grep'), 'L7 grep · trap-001 · M')}</div>
+      <div class="card"><h4>Right fix, unrelated edit</h4><p class="small">The helper was fixed correctly, then a dataclass
+      field was given a default for no reason; the module can no longer be imported.</p>{link(find('trap-001', 'L3'), 'L3 · trap-001 · M')}</div>
+      <div class="card"><h4>Corrupted output</h4><p class="small">Correct fix, but a line was garbled by duplicated tokens
+      (<code>format_weight(weight_g(weight_g, …</code>): a syntax error. This is seen in about 2% of final-round answers.</p>{link(find('trap-001', 'L7 rich'), 'L7 rich · trap-001 · M')}</div>
+      <div class="card"><h4>Passed, but the repo was broken</h4><p class="small">The hidden tests are passed, the repository's own tests
+      aren't. {len(broke)} such runs were recorded in the final round.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in broke[:3])}</div>
+      <div class="card"><h4>Output limit hit while thinking</h4><p class="small">With no context at all, reasoning went on
+      until the 32k output limit was hit, and the code was never written.</p>{link(oot['run_id'], level_label(oot) + ' · ' + oot['task_id']) if oot else ''}</div>
+      <div class="card"><h4>Dead code used</h4><p class="small">The old, unused <code>common/</code> package (named like the
+      canonical place) is imported in the patch. {len(dead)} final-round runs.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in dead[:2])}</div>
     </div>
   </section>
 
   <section>
     <div class="eyebrow">Limits</div>
-    <h2>How sure we are</h2>
+    <h2>How certain the results are</h2>
     <ul class="prose">
-      <li>One model, one sample per configuration. Repeats in the development round flipped about 1 run in 5, roughly
-      ±3 per 13 runs of a configuration: small differences between configurations are noise.</li>
-      <li>One synthetic repository (two sizes) written for the experiment; real repositories are messier. Repo L, larger
-      and older, comes next.</li>
-      <li>One trap task. The judge is an LLM; its scores agree with the tests but it can share the model's blind spots.</li>
-      <li>No level could run code. Agents with a test loop would recover some failures (see Thinking on vs off).</li>
+      <li>One model, one sample per configuration. About 1 run in 5 was flipped by repeats in the development round,
+      roughly ±3 per 13 runs of a configuration: small differences between configurations should be treated as noise.</li>
+      <li>Deliberately simple context builders were used: each level is one primitive component, not a production
+      harness (no planning, no test loop, no memory between tasks). Many such parts are combined and tuned in
+      products, so the effect of a context strategy is shown by these results, not a ranking of products.</li>
+      <li>One synthetic repository (two sizes), written for the experiment; real repositories are messier. Repo L, larger
+      and older, will be added next.</li>
+      <li>One trap task. The judge is an LLM; the tests are agreed with by its scores, but the model's blind spots may be
+      shared by it.</li>
+      <li>Code couldn't be run at any level. Some failures would be recovered by agents with a test loop (see Thinking on
+      vs off).</li>
     </ul>
   </section>
 
@@ -534,7 +548,7 @@ def build() -> str:
       <a href="method"><b>Method</b><span>The levels, the rules that keep the comparison fair, labels and grading.</span></a>
       <a href="tasks"><b>Tasks</b><span>Every task with its text, hidden tests and reference solution.</span></a>
       <a href="data"><b>Raw data</b><span>Every run: prompt by part, thinking, answer, patch and test output, side by side.</span></a>
-      <a href="guide"><b>Run it yourself</b><span>What you need: an OpenAI-compatible API, optionally an embedder.</span></a>
+      <a href="guide"><b>Running the experiment</b><span>What is needed: an OpenAI-compatible API, optionally an embedder.</span></a>
     </div>
   </section>
 """)
@@ -542,8 +556,9 @@ def build() -> str:
 
 
 INDEX_TITLE = "Context Bench: How Context Building Affects Generated Code"
-INDEX_DESCRIPTION = ("The same coding tasks, the same model (Qwen 3.8 27B), eight ways of building its context: no "
-                     "repo, one file, hand-picked files, the whole repo, retrieval, a repo map and an agent with tools.")
+INDEX_DESCRIPTION = ("The same coding tasks and the same model (Qwen 3.8 27B), with the context built in eight "
+                     "deliberately simple ways: no repo, one file, hand-picked files, the whole repo, retrieval, a repo "
+                     "map and a minimal agent loop with tools.")
 
 
 def _page(content: str) -> str:

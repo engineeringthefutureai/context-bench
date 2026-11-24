@@ -14,10 +14,10 @@
   const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString("en-US"));
   const tok = (chars) => Math.round(chars / 3.6);
   const cache = new Map();
-  let runs = [], byId = new Map(), sortKey = "task_id", sortDir = 1;
+  let runs = [], byId = new Map(), tasks = new Map(), sortKey = "task_id", sortDir = 1;
 
   // ---------- state ----------
-  const state = { a: null, b: null, tab: "prompt", round: "final", task: "", level: "", label: "", q: "" };
+  const state = { view: "table", a: null, b: null, tab: "prompt", round: "final", task: "", level: "", label: "", q: "" };
   function readHash() {
     const h = new URLSearchParams(location.hash.slice(1));
     for (const k of Object.keys(state)) if (h.has(k)) state[k] = h.get(k);
@@ -60,6 +60,10 @@
   }
 
   function renderTable() {
+    document.querySelectorAll("#views [data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === state.view)));
+    $("#runs").classList.toggle("mx-mode", state.view === "matrix");
+    $("#mx-legend").hidden = state.view !== "matrix";
+    if (state.view === "matrix") return renderMatrix();
     const rows = filtered().sort((x, y) => {
       const a = x[sortKey], b = y[sortKey];
       return (a == null) - (b == null) || (a > b ? 1 : a < b ? -1 : 0) * sortDir;
@@ -70,6 +74,79 @@
       COLS.map(([k, , f]) => `<td class="${["tokens_in", "tokens_out", "latency_s", "tool_calls"].includes(k) ? "r" : ""}">${f(r)}</td>`).join("") +
       `<td><button class="pick" data-b="${r.run_id}" title="Open in the right pane to compare">B</button></td></tr>`).join("");
     $("#runs").innerHTML = `<table><thead><tr>${head}<th></th></tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+
+  // ---------- matrix view: tasks (rows) x harness levels (columns); each cell stacks the repos S, M, L ----------
+  // Outcome colours are the Results page's (.o-*); the tooltip and the table view carry the same facts as text.
+  const OCLS = {"PASS": "o-pass", "FAIL": "o-fail", "UNPARSABLE": "o-unparsable", "ASKED TO EXPLORE": "o-explore",
+    "NO ANSWER": "o-noanswer", "INVALID": "o-invalid", "OUT OF TOKENS": "o-oot", "NO FIT": "o-nofit"};
+  const REPOS = ["S", "M", "L"];
+  const CATS = ["control", "reuse", "convention", "cross_file", "trap", "long"];
+  const shortVariant = (label, level) => {
+    const v = label.slice(level.length).trim()
+      .replace("model_queries", "queries").replace("task_vs_code", "task").replace("qwen names", "qwen");
+    return v || "·";
+  };
+  const levelOrder = (a, b) => a.level.localeCompare(b.level, "en", {numeric: true}) || a.label.localeCompare(b.label);
+
+  function renderMatrix() {
+    const scope = runs.filter((r) =>
+      (!state.round || state.round === "all" || r.round === state.round) &&
+      (!state.task || r.task_id === state.task) && (!state.level || r.level_label === state.level));
+    const match = new Set(filtered().map((r) => r.run_id));   // outcome and search filters dim the rest
+    const rounds = state.round === "all" ? ["final", "nothink"] : [state.round || "final"];
+    const cols = [...new Map(scope.map((r) => [r.level_label, {label: r.level_label, level: r.level}])).values()].sort(levelOrder);
+    const cell = new Map(scope.map((r) => [`${r.task_id}|${r.level_label}|${r.repo_size}|${r.round}`, r]));
+    const taskIds = [...new Set(scope.map((r) => r.task_id))];
+    const meta = (id) => tasks.get(id) || {category: byTaskCat(id), tier: 0, repo_sizes: REPOS};
+    taskIds.sort((a, b) => CATS.indexOf(meta(a).category) - CATS.indexOf(meta(b).category) || meta(a).tier - meta(b).tier || a.localeCompare(b, "en", {numeric: true}));
+    $("#count").textContent = `${match.size} of ${runs.length} runs`;
+
+    // header: level groups, then variants (vertical)
+    const groups = [];
+    for (const c of cols) (groups.at(-1)?.level === c.level ? groups.at(-1).n++ : groups.push({level: c.level, n: 1}));
+    const head1 = `<tr><th class="mx-corner" rowspan="2">Task <span class="meta">repos S · M · L, top to bottom${rounds.length > 1 ? "; left think on, right off" : ""}</span></th>`
+      + groups.map((g) => `<th class="mx-lv" colspan="${g.n}">${esc(g.level)}</th>`).join("") + `<th class="mx-sum" rowspan="2">PASS</th></tr>`;
+    const head2 = `<tr>` + cols.map((c) => `<th class="mx-var" title="${esc(c.label)}"><span>${esc(shortVariant(c.label, c.level))}</span></th>`).join("") + `</tr>`;
+
+    const colPass = cols.map(() => [0, 0]);
+    let body = "", lastCat = null;
+    for (const id of taskIds) {
+      const m = meta(id);
+      if (m.category !== lastCat) {
+        lastCat = m.category;
+        body += `<tr class="mx-cat"><th colspan="${cols.length + 2}">${esc(m.category.replace("_", "-"))}</th></tr>`;
+      }
+      let pass = 0, n = 0;
+      const tds = cols.map((c, ci) => {
+        const stacks = rounds.map((rd) => `<span class="mx-stack">` + REPOS.map((rs) => {
+          const r = cell.get(`${id}|${c.label}|${rs}|${rd}`);
+          if (!r) return `<span class="mx-chip ${m.repo_sizes.includes(rs) ? "mx-none" : "mx-na"}" aria-hidden="true"></span>`;
+          n++; colPass[ci][1]++;
+          if (r.outcome === "PASS") { pass++; colPass[ci][0]++; }
+          const sel = r.run_id === state.a ? " sel-a" : r.run_id === state.b ? " sel-b" : "";
+          const tip = `${r.task_id} · ${r.level_label} · repo ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"}\n${r.outcome}`
+            + ` · tests ${frac(r.tests_passed, r.tests_total)}${r.reuse_passed == null ? "" : ` · reuse ${yn(r.reuse_passed)}`}`
+            + `\nin ${fmt(r.tokens_in)} · out ${fmt(r.tokens_out)} · ${r.latency_s == null ? "–" : Math.round(r.latency_s)} s${r.tool_calls ? ` · ${r.tool_calls} tools` : ""}`
+            + `\nopened by click · compared (B) by shift-click`;
+          return `<button class="mx-chip ${OCLS[r.outcome] || "o-invalid"}${sel}${match.has(r.run_id) ? "" : " mx-dim"}" data-run="${r.run_id}" title="${esc(tip)}" aria-label="${esc(tip.split("\n").slice(0, 2).join(", "))}"></button>`;
+        }).join("") + `</span>`).join("");
+        return `<td class="mx-cell">${stacks}</td>`;
+      }).join("");
+      body += `<tr><th class="mx-task" title="tier ${m.tier}">${esc(id)} <span class="mx-rl">${REPOS.map((rs) => `<i class="${m.repo_sizes.includes(rs) ? "" : "off"}">${rs}</i>`).join("")}</span></th>${tds}<td class="mx-sum">${n ? `${pass}/${n}` : "–"}</td></tr>`;
+    }
+    const foot = `<tr class="mx-foot"><th>PASS</th>` + colPass.map(([p, n]) => `<td class="mx-sum" title="${p} of ${n} runs">${n ? `${Math.round(100 * p / n)}%` : "–"}</td>`).join("") + `<td></td></tr>`;
+    $("#runs").innerHTML = taskIds.length
+      ? `<table class="mx"><thead>${head1}${head2}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`
+      : `<p class="empty">No runs are matched by the filters.</p>`;
+  }
+  const byTaskCat = (id) => (runs.find((r) => r.task_id === id) || {}).category || "control";
+
+  function renderMatrixLegend() {
+    $("#mx-legend").innerHTML = Object.entries(OCLS).map(([o, c]) => `<span><i class="mx-chip ${c}"></i>${esc(o)}</span>`).join("")
+      + `<span><i class="mx-chip mx-none"></i>no run</span><span><i class="mx-chip mx-na"></i>task not on this repo</span>`
+      + `<span class="meta">At L0–L2, each task is run once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
   }
 
   function fillFilters() {
@@ -252,7 +329,7 @@
 
   function transcriptHTML(run) {
     const t = run.transcript || [];
-    if (!t.length) return run.response ? answerHTML(run.response) : `<p class="empty">No answer saved.</p>`;
+    if (!t.length) return run.response ? answerHTML(run.response) : `<p class="empty">No answer was saved.</p>`;
     const names = {}, droppedIds = new Set();
     t.forEach((m) => (m.tool_calls || []).forEach((c) => (names[c.id] = c.name)));
     t.forEach((m) => (m.drop || []).forEach((id) => droppedIds.add(id)));
@@ -342,7 +419,7 @@
     let body;
     switch (state.tab) {
       case "prompt": body = promptHTML(run); break;
-      case "thinking": body = run.reasoning ? `<pre class="block">${esc(run.reasoning)}</pre>` : `<p class="empty">No thinking (thinking off, or none returned).</p>`; break;
+      case "thinking": body = run.reasoning ? `<pre class="block">${esc(run.reasoning)}</pre>` : `<p class="empty">No thinking (thinking was off, or none was returned).</p>`; break;
       case "answer": body = transcriptHTML(run); break;
       case "patch": body = diffHTML(run.patch); break;
       case "tests": body = (run.tests ? `<pre class="block">${esc(run.tests)}</pre>` : `<p class="empty">No test output.</p>`)
@@ -376,7 +453,7 @@
     $("#tabs").innerHTML = TABS.map(([k, t]) => `<button role="tab" data-tab="${k}" aria-selected="${state.tab === k}">${t}</button>`).join("");
     if (!state.a) {
       el.className = "panes";
-      el.innerHTML = `<p class="empty">Pick a run in the table to open it. Use <b>B</b> on another row, or the menu that appears, to compare two runs side by side.</p>`;
+      el.innerHTML = `<p class="empty">A run is opened by picking it in the table or the matrix. Two runs are compared side by side with <b>B</b> on another row, Shift-click in the matrix, or the menu that appears.</p>`;
       $("#twin-wrap").innerHTML = "";
       return;
     }
@@ -397,7 +474,17 @@
     on("#f-level", "change", (e) => { state.level = e.target.value; render(); });
     on("#f-label", "change", (e) => { state.label = e.target.value; render(); });
     on("#f-q", "input", (e) => { state.q = e.target.value; render(); });
+    on("#views", "click", (e) => { const b = e.target.closest("[data-view]"); if (b) { state.view = b.dataset.view; render(); } });
     on("#runs", "click", (e) => {
+      const chip = e.target.closest("[data-run]");
+      if (chip) {
+        const id = chip.dataset.run;
+        if (e.shiftKey && state.a && id !== state.a) state.b = id === state.b ? null : id;
+        else { state.a = id; if (state.b === id) state.b = null; }
+        render();
+        if (!e.shiftKey) $("#tabs").scrollIntoView({behavior: "smooth", block: "start"});
+        return;
+      }
       const th = e.target.closest("th[data-k]");
       if (th) { sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; return renderTable(); }
       const pb = e.target.closest("[data-b]");
@@ -416,7 +503,9 @@
   async function init() {
     readHash();
     $("#legend").innerHTML = Object.entries(KINDS).map(([k, t]) => `<span class="k-${k}"><i></i>${t}</span>`).join("");
-    runs = await fetch("raw/index.json").then((r) => r.json());
+    [runs] = await Promise.all([fetch("raw/index.json").then((r) => r.json()),
+      fetch("raw/tasks.json").then((r) => r.json()).then((ts) => { tasks = new Map(ts.map((x) => [x.id, x])); }).catch(() => {})]);
+    renderMatrixLegend();
     byId = new Map(runs.map((r) => [r.run_id, r]));
     if (state.a && !byId.has(state.a)) state.a = null;
     if (state.b && !byId.has(state.b)) state.b = null;
@@ -424,5 +513,5 @@
     wire();
     render();
   }
-  init().catch((e) => { $("#panes").innerHTML = `<p class="empty">Couldn't load the data: ${esc(e.message)}</p>`; });
+  init().catch((e) => { $("#panes").innerHTML = `<p class="empty">The data couldn't be loaded: ${esc(e.message)}</p>`; });
 })();

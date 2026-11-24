@@ -7,7 +7,7 @@ heading: Data and versions
 
 ## Rounds
 
-Each round is pinned to a git tag. Everything on this site comes from the round listed first.
+Each round is pinned to a git tag. Everything shown on this site is taken from the round listed first.
 
 <div class="table-wrap"><table>
   <thead><tr><th>Round</th><th>Code</th><th>Model</th><th>Embedder</th><th>Grading</th></tr></thead>
@@ -17,14 +17,14 @@ Each round is pinned to a git tag. Everything on this site comes from the round 
         <td>Qwen 3.8 27B, FP8 on vLLM (TP=2, MTP speculative decoding), 96k context, server-default temperature, seed 1</td>
         <td>qwen3-embedding:0.6b (Ollama)</td>
         <td>Comparison judge, rubric v2, agy</td></tr>
-    <tr><td>Prompt v4: adds repo L, the L7 file tree and L8 (experimental edit-tools agent); in progress</td><td>main</td><td>same</td><td>EmbeddingGemma 2 (Ollama, 8k window, never truncated)</td><td>Penalty grading (planned)</td></tr>
+    <tr><td>Prompt v4: repo L, the L7 file tree and L8 (experimental edit-tools agent) are added; in progress</td><td>main</td><td>same</td><td>EmbeddingGemma 2 (Ollama, 8k window, never truncated)</td><td>Penalty grading (planned)</td></tr>
   </tbody>
 </table></div>
 
-<div class="todo"><b>To come</b>results.jsonl and per-run bundle archives for each round.</div>
+<div class="todo"><b>To come</b>results.jsonl and per-run bundle archives will be added for each round.</div>
 
-## Already here
+## Available now
 
 - [raw/index.json](raw/index.json): one row per run shown in the raw-data viewer.
-- [raw/tasks.json](raw/tasks.json): every task with its hidden tests and solutions.
-- `raw/runs/<run_id>.json`: one run's prompt (by part), thinking, answer, transcript, patch and test output.
+- [raw/tasks.json](raw/tasks.json): every task, with its hidden tests and solutions.
+- `raw/runs/<run_id>.json`: one run's prompt (split by part), thinking, answer, transcript, patch and test output.

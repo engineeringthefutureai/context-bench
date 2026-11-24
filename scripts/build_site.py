@@ -46,10 +46,15 @@ def scrub(text: str | None) -> str | None:
 
 
 # ---- which runs ----------------------------------------------------------------------------------
-def config_key(r: dict) -> tuple:
+def pair_key(r: dict) -> tuple:
+    """One configuration, whatever the round: pairs its thinking-off and thinking-on runs."""
     return (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
-            r["repo_size"], bool(r.get("map_docs")), bool(r.get("thinking")),   # thinking off / on: two rounds
-            r.get("tool_names") or "harness")
+            r["repo_size"], bool(r.get("map_docs")), r.get("tool_names") or "harness")
+
+
+def config_key(r: dict) -> tuple:
+    """One configuration in one round (thinking off / on)."""
+    return pair_key(r) + (bool(r.get("thinking")),)
 
 
 def level_label(r: dict) -> str:
