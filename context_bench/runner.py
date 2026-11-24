@@ -38,7 +38,7 @@ from .apply import (UnsafePath, apply_files, changed_files, format_status, make_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
-from .levels.l7_agentic import (SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
+from .levels.l7_agentic import (FORMAT_RETRY, FORMAT_RETRY_EDIT, SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
                                 tool_schemas, turn_prompts)
 from .llm import ChatResult, OpenAICompatClient, env_value
 from .metrics import (dead_modules, legacy_ctx_share, legacy_used, relevant_files, tool_output_breakdown,
@@ -255,14 +255,14 @@ class Experiment:
                 # helper_in_context for L7: the definition appeared in any tool output
                 ctx_text_initial = ctx.text
                 ctx.text += "\n\n" + "\n\n".join(tools.transcript)
-                perf.update(tool_calls=agent.tool_calls, tool_errors=agent.tool_errors,
+                perf.update(tool_calls=agent.tool_calls, tool_errors=agent.tool_errors, format_retry=agent.format_retry,
                             failed_call_cost=rc.failed_call_cost, budget_used=agent.budget_used,
                             tokens_cached=agent.tokens_cached,
                             tokens_cacheable=agent.tokens_cacheable)
                 if agent.drops is not None:     # selective
                     at_answer = ContextBlock(text=ctx_text_initial + "\n\n" + agent.answer_tool_text)
                     perf.update(drops=agent.drops, drop_calls=agent.drop_calls,
-                                rereads_after_drop=agent.rereads_after_drop, hit_turn_cap=agent.hit_turn_cap, format_retry=agent.format_retry,
+                                rereads_after_drop=agent.rereads_after_drop, hit_turn_cap=agent.hit_turn_cap,
                                 dropped_tokens=agent.dropped_tokens, drop_saved_tokens=agent.drop_saved_tokens,
                                 drop_refunds=agent.drop_refunds, drop_refund_clawbacks=agent.drop_refund_clawbacks,
                                 helper_body_at_answer=_helper_body_visible(task, at_answer, ws),
@@ -312,7 +312,8 @@ class Experiment:
                                 **tests_added(before, files))
         if agent:
             perf.update(tool_output_breakdown(agent.transcript, relevant_files(files, list(ws.files))))
-        perf.update(self._protocol(task, rc.repo_size, chat.content, files))
+        perf.update(self._protocol(task, rc.repo_size, _answer_text(chat.content, agent.transcript if agent else None),
+                                   files))
         if rc.prompt_arm == "edit_tools":            # no reply format to check: the edits are the answer
             perf["format_status"] = "ok" if files else "no_code"
         if chat.tool_calls and not files:       # the server parsed pretend tool calls out of the text
@@ -385,7 +386,13 @@ class Experiment:
             if r.get("prompt_arm") == "edit_tools":     # L8: the changed files were saved with the run
                 saved = self.runs_dir / r["run_id"] / "files.json"
                 files = json.loads(saved.read_text()) if saved.is_file() else {}
-            r.update(self._protocol(task, r["repo_size"], text, files))
+            trans = self.runs_dir / r["run_id"] / "transcript.jsonl"
+            agent_msgs = ([json.loads(x) for x in trans.read_text().splitlines() if x.strip()]
+                          if r["level"] in AGENTIC_LEVELS and trans.is_file() else None)
+            r.update(self._protocol(task, r["repo_size"], _answer_text(text, agent_msgs), files))
+            if agent_msgs is not None:          # recorded for every agent variant (before: selective only)
+                r["format_retry"] = any(m.get("role") == "user" and m.get("content") in (FORMAT_RETRY, FORMAT_RETRY_EDIT)
+                                        for m in agent_msgs)
             if not files and _had_tool_calls(self.runs_dir / r["run_id"] / "transcript.jsonl", r["level"]):
                 r["format_status"] = "tool_request"     # as run_one decided from the raw message
             if (seen := _seen_text(self.runs_dir / r["run_id"])) is not None:
@@ -865,6 +872,18 @@ def _free_mb() -> int:
     except OSError:
         pass
     return 1 << 30
+
+
+def _answer_text(final: str, agent_msgs: list[dict] | None) -> str:
+    """The reply the output protocol is judged on: the final one, or for an agent whose final reply is empty
+    (e.g. it answered a format retry with nothing) its last non-empty reply, so a malformed answer before
+    the retry isn't hidden behind the empty one."""
+    if final.strip() or not agent_msgs:
+        return final
+    for m in reversed(agent_msgs):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            return m["content"]
+    return final
 
 
 def _had_tool_calls(transcript: Path, level: str) -> bool:

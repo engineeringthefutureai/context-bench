@@ -96,3 +96,22 @@ def test_report_has_embedder_section():
            "embed_texts": 10, "embed_cache_hits": 30, "embed_s": 2.0, "embed_tokens": 400}
     out = "\n".join(embedder_performance([row]))
     assert "| e | L5 embed task_vs_code | 1 | 10 | 75% | 2.00s | 200 | 5.0 |" in out
+
+
+def test_format_status_empty_and_code_inside_a_pretend_tool_call():
+    from context_bench.apply import format_status
+    assert format_status("", {}) == "empty" and format_status("  \n", {}) == "empty"
+    assert format_status("Let me check.\n<tool_call>\n<function=read_file>\n</tool_call>", {}) == "tool_request"
+    wrapped = ("I have everything I need.\n<tool_call>\n<function=write>\n<parameter=content>\n"
+               "from shopkit.x import y\n\ndef f():\n    return y()\n</parameter>\n</function>\n</tool_call>")
+    assert format_status(wrapped, {}) == "bad_format"      # the answer is there, in the wrong wrapper
+
+
+def test_agent_answer_text_falls_back_to_the_last_non_empty_reply():
+    from context_bench.runner import _answer_text
+    msgs = [{"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+            {"role": "assistant", "content": "I have everything I need. <tool_call>def f(): pass</tool_call>"},
+            {"role": "user", "content": "Your reply couldn't be used"},
+            {"role": "assistant", "content": ""}]
+    assert _answer_text("", msgs).startswith("I have everything")
+    assert _answer_text("final reply", msgs) == "final reply" and _answer_text("", None) == ""

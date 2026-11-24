@@ -31,11 +31,26 @@ At run time the harness parses the reply strictly: complete `<file path="...">` 
 Every run also records `format_status` (`apply.format_status`), checked in this order:
 
 1. `ok`: strict file blocks found.
-2. `tool_request`: a pretend tool call written as text (`<function_calls>`, `<invoke`, `<tool_call>`,
-   `<read_file` ...).
-3. `bad_format`: code is there but not in strict blocks (a fence, an unclosed or fenced `<file>` tag,
-   lines starting with `def` / `class` / `import`).
-4. `no_code`: prose only.
+2. `empty`: nothing at all.
+3. `tool_request`: a pretend tool call written as text (`<function_calls>`, `<invoke`, `<tool_call>`,
+   `<read_file` ...) **without code** in it.
+4. `bad_format`: code is there but not in strict blocks (a fence, an unclosed or fenced `<file>` tag,
+   lines starting with `def` / `class` / `import`), including code written inside a pretend tool call.
+5. `no_code`: prose only.
+
+For an agent run the status is judged on its last non-empty reply: when the final reply is empty (an
+agent that answered the format retry with nothing), the reply before it decides.
+
+**Why (2026-11-24, from reuse-L03 · L7 rich · L).** The agent wrote "I have everything I need..." and the
+complete code, wrapped in a pretend `<tool_call>` instead of a `<file>` block; the harness's format retry
+got an empty reply; the run was judged on that empty reply (`no_code`) and showed as ASKED TO EXPLORE,
+which it plainly wasn't. Two rule fixes: a pretend tool call that carries code is a malformed answer
+(UNPARSABLE), not a request to explore; an empty final reply never hides the answer before it, and an
+empty reply on its own is `empty` (INVALID, badge EMPTY REPLY). The dodge prototypes had it right all
+along: they score that reply as answer-like (-0.017), no WANTS TO EXPLORE badge. Same pattern elsewhere:
+2 single-shot replies with code in a pretend tool call and 1 empty agent reply in the v4 round, 7 empty
+agent replies in the earlier rounds. Found at the same time: `format_retry` was only recorded for the
+selective variant; now for every agent run, and `cbench rescore` backfills it from the transcripts.
 
 For `bad_format`, the leniently extracted code is also run against the hidden tests (`lenient_passed`,
 `lenient_total`, `lenient_reuse`), for learning only: it shows how often a format slip hid working code.
@@ -51,7 +66,7 @@ The label stays strict.
 | OUT OF TOKENS | error says `max_output_tokens` | the reply hit the output limit |
 | UNPARSABLE | `format_status = bad_format` | code is there, not in the required blocks |
 | ASKED TO EXPLORE | `format_status` is `no_code` or `tool_request` (not a tool error) | no code; the reply asks to look at the repository first, in prose or as a pretend tool call |
-| INVALID | anything else without an accepted answer (`tool_error`) | e.g. an agent's harness-side failure |
+| INVALID | anything else without an accepted answer (`empty`, `tool_error`) | an empty reply, or an agent's harness-side failure |
 | PASS | label `ok` | every hidden test passes |
 | FAIL | otherwise | a valid answer, a hidden test fails |
 

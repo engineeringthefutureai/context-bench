@@ -94,6 +94,8 @@ def exact_badges(row: dict, run_dir: Path) -> list[str]:
         out.append("PRETEND TOOL CALL")
     elif fs == "bad_format":
         out.append("BAD FORMAT")
+    elif fs == "empty":
+        out.append("EMPTY REPLY")
     if "max_output_tokens" in (row.get("error") or ""):
         out.append("OUT OF TOKENS")
     if row.get("format_retry"):

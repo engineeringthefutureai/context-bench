@@ -63,14 +63,18 @@ def parse_files_lenient(text: str, target_file: str) -> dict[str, str]:
 
 def format_status(text: str, strict_files: dict[str, str]) -> str:
     """How the reply relates to the output protocol:
-    "ok" (strict <file> blocks), "tool_request" (pretend tool calls: the model asked to explore),
-    "bad_format" (code present, tags missing or broken), "no_code" (prose only)."""
+    "ok" (strict <file> blocks), "bad_format" (code present, tags missing or broken, including code written
+    inside a pretend tool call), "tool_request" (a pretend tool call without code: the model asked to
+    explore), "no_code" (prose only), "empty" (nothing at all)."""
     if strict_files:
         return "ok"
     text = _THINK_RE.sub("", text)
-    if _TOOL_RE.search(text):
+    if not text.strip():
+        return "empty"
+    has_code = "```" in text or _OPEN_RE.search(text) or _CODE_HINT_RE.search(text)
+    if _TOOL_RE.search(text) and not has_code:
         return "tool_request"
-    if "```" in text or _OPEN_RE.search(text) or _CODE_HINT_RE.search(text):
+    if has_code:
         return "bad_format"
     return "no_code"
 
