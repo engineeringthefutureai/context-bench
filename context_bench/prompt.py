@@ -177,12 +177,14 @@ USER_TEMPLATES = {1: USER_TEMPLATE, 2: USER_TEMPLATE,
 
 
 def render(task: Task, context: ContextBlock, prompt_arm: str = "base",
-           prompt_version: int = PROMPT_VERSION) -> list[dict]:
+           prompt_version: int = PROMPT_VERSION, tool_names: str = "harness") -> list[dict]:
     """Return [system, user] chat messages. Empty context renders as "(none)".
 
     The reuse_hint arm appends REUSE_HINT to the system prompt; edit_tools (L8, experimental) replaces the
     output format section with EDIT_OUTPUT_FORMAT; nothing else differs between arms.
-    prompt_version picks the system prompt and user template (SYSTEM_PROMPTS, USER_TEMPLATES)."""
+    prompt_version picks the system prompt and user template (SYSTEM_PROMPTS, USER_TEMPLATES). tool_names
+    "qwen" (the native-names arm) only renames the tools edit_tools' format line mentions (create_file ->
+    write_file, Qwen Code's name)."""
     if prompt_arm not in ("base", "reuse_hint", "edit_tools"):
         raise ValueError(f"unknown prompt_arm {prompt_arm!r}")
     system = SYSTEM_PROMPTS[prompt_version] + ("\n" + REUSE_HINT if prompt_arm == "reuse_hint" else "")
@@ -192,4 +194,6 @@ def render(task: Task, context: ContextBlock, prompt_arm: str = "base",
         system = _edit_arm(system)
         user = user.replace("Reply with the <file> blocks of your change.",
                             "Make the change with the edit and create_file tools, then reply without tool calls.")
+        if tool_names == "qwen":
+            system, user = system.replace("create_file", "write_file"), user.replace("create_file", "write_file")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]

@@ -200,7 +200,8 @@ class Experiment:
                 cold_method = self.make_cold(rc.model, url, rc.level)
                 client, restarted = self._client(rc.model, url), True
             return client
-        perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version, repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
+        perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version,
+                    **({"tool_names": rc.tool_names} if rc.tool_names != "harness" else {}), repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
                     concurrency=concurrency)
         run_dir = self.runs_dir / rc.run_id
 
@@ -224,7 +225,7 @@ class Experiment:
             ctx = LEVELS[rc.level](task, ws, **options)
             if uses_embedder:
                 perf.update(embedder=self.embedder().name, **self.embedder().stats.snapshot())
-            messages = render(task, ctx, rc.prompt_arm, rc.prompt_version)
+            messages = render(task, ctx, rc.prompt_arm, rc.prompt_version, rc.tool_names)
             prompt_tokens = client.count_prompt_tokens(messages)
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
                         sampling=self._sampling[rc.model], ws=ws)
@@ -248,7 +249,8 @@ class Experiment:
                 agent = run_agent(model_client(), messages, tools, agent_variant=rc.agent_variant,
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking,
-                                  failed_call_cost=rc.failed_call_cost, prompt_version=rc.prompt_version)
+                                  failed_call_cost=rc.failed_call_cost, prompt_version=rc.prompt_version,
+                                  tool_names=rc.tool_names)
                 chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
                                   tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
@@ -464,7 +466,7 @@ class Experiment:
                 continue
             messages = json.loads((run / "prompt.json").read_text())
             transcript = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines()]
-            skey = (r["agent_variant"], r.get("prompt_version", 1))
+            skey = (r["agent_variant"], r.get("prompt_version", 1), r.get("tool_names") or "harness")
             if skey not in schema_cache:
                 schema_cache[skey] = client.count_tokens(json.dumps(tool_schemas(*skey)))
             total, prev, peak = 0, (0, None), 0
@@ -512,7 +514,8 @@ class Experiment:
                                                     c.get("thinking", self.config["generation"].get("thinking", True))),
                                           map_docs=c.get("map_docs", False),
                                           prompt_version=PROMPT_VERSION,
-                                          failed_call_cost=c.get("failed_call_cost"))
+                                          failed_call_cost=c.get("failed_call_cost"),
+                                          tool_names=c.get("tool_names", "harness"))
                                 for t in fitting]
         return out
 
@@ -563,7 +566,7 @@ class Experiment:
                   "runs": {rc.run_id: {**{k: v for k, v in asdict(rc).items()
                                           if k in ("task_id", "level", "retriever", "query_mode", "agent_variant",
                                                    "map_docs", "prompt_arm", "repo_size", "thinking",
-                                                   "failed_call_cost", "prompt_version")},
+                                                   "failed_call_cost", "prompt_version", "tool_names")},
                                        "state": "queued"} for rc in todo}}
 
         def set_state(run_id: str, state: str | None) -> None:
@@ -922,7 +925,8 @@ def _level_options(rc: RunConfig) -> dict:
     if rc.level == "L6":
         return {"docs": rc.map_docs}
     if rc.level in ("L7", "L8"):
-        return {"agent_variant": rc.agent_variant, "prompt_version": rc.prompt_version}
+        return {"agent_variant": rc.agent_variant, "prompt_version": rc.prompt_version,
+                **({"tool_names": rc.tool_names} if rc.tool_names != "harness" else {})}
     return {}
 
 

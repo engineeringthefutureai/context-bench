@@ -50,6 +50,7 @@ def config_label(r: dict) -> str:
     arm = {"base": "", "reuse_hint": "+hint", "edit_tools": "+edits"}.get(r["prompt_arm"], "+" + r["prompt_arm"])
     return (" ".join(parts) + arm
             + ("+docs" if r.get("map_docs") else "")
+            + (" qwen-names" if r.get("tool_names") == "qwen" else "")
             + (" nothink" if r.get("thinking") is False else "")
             + (f" @{r['repo_size']}" if r["repo_size"] != "S" else "")
             + (f" p{r.get('prompt_version', 1)}" if r.get("prompt_version", 1) != PROMPT_VERSION else "")

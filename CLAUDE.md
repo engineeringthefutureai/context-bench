@@ -87,6 +87,12 @@ spec only): target + definitions of referenced symbols + 1-hop callers, LSP-styl
 needed helper is never referenced from the target, so it adds little over L2; revisit once there are
 several cross-file / convention tasks. Results recorded as L8 were migrated to L7 (new run ids).
 
+Native-names arm (2026-11-24, `tool_names = "qwen"` on L7 selective and L8, all repos): the tools Qwen
+Code also has use its names and parameters (`read_file(file_path, offset, limit)`, `grep_search(pattern,
+glob, path)`, `edit(file_path, old_string, new_string)`, `write_file`), translated to the harness's tools at
+the boundary (same capabilities, results, budget); tests the native-tool-vocabulary hypothesis
+(docs/design.md). RunConfig.tool_names is left out of run ids at its default "harness".
+
 Prompt v4 (2026-11-23, `PROMPT_VERSION = 4`, the current rounds; v3 = the `round-v3` tag): the shared
 prompt no longer mentions a target file (no "Target file:" line, no "and the target file" in the system
 prompt). L1-L6 still show the target (their context starts with its `File:` block). L7 gets no target: it

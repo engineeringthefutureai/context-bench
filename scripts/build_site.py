@@ -48,7 +48,8 @@ def scrub(text: str | None) -> str | None:
 # ---- which runs ----------------------------------------------------------------------------------
 def config_key(r: dict) -> tuple:
     return (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
-            r["repo_size"], bool(r.get("map_docs")), bool(r.get("thinking")))   # thinking off / on: two rounds
+            r["repo_size"], bool(r.get("map_docs")), bool(r.get("thinking")),   # thinking off / on: two rounds
+            r.get("tool_names") or "harness")
 
 
 def level_label(r: dict) -> str:
@@ -61,6 +62,8 @@ def level_label(r: dict) -> str:
         s += " " + r["agent_variant"]
     if r["prompt_arm"] == "reuse_hint":
         s += " +hint"
+    if r.get("tool_names") == "qwen":                     # the native-names arm
+        s += " qwen names"
     return s
 
 

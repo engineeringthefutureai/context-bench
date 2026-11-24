@@ -72,9 +72,13 @@ class RunConfig:
                                      # and the loop goes on. None: the original harness (runs before
                                      # 2026-11-21): failures cost a full call, a text tool call ended the run.
 
+    tool_names: str = "harness"      # L7/L8 tool vocabulary: harness | qwen (Qwen Code's names and parameters
+                                     # for the tools it also has; the native-names arm, 2026-11-24)
+
     # Fields added after results existed: left out of run_id while at their default, so older runs
     # keep their ids.
-    _LATE_DEFAULTS = {"thinking": True, "map_docs": False, "prompt_version": 1, "failed_call_cost": None}
+    _LATE_DEFAULTS = {"thinking": True, "map_docs": False, "prompt_version": 1, "failed_call_cost": None,
+                      "tool_names": "harness"}
 
     @property
     def run_id(self) -> str:
@@ -187,6 +191,7 @@ class RunResult:
                                         #   tokens_in + drop_saved_tokens = the same run without drops
     hit_turn_cap: bool | None = None    # MAX_TURNS backstop reached
     format_retry: bool | None = None    # L7/L8: an unusable final answer got one more chance (FORMAT_RETRY)
+    tool_names: str | None = None       # L7/L8: the tool vocabulary (RunConfig.tool_names); None: harness
     helper_body_at_answer: bool | None = None   # helper_body_in_context, counting only what was still in
                                         #   the conversation at the final turn (stubs, not dropped bodies)
     legacy_share_at_answer: float | None = None # legacy_ctx_share, same basis

@@ -114,6 +114,17 @@ its error says what was wrong. After each turn's tool results you see how many p
 make several calls in one turn. When the change is complete, reply without tool calls; that reply ends
 the task."""
 
+def _qwen_note(note: str) -> str:
+    """TOOLS_NOTE_EDIT in Qwen Code's vocabulary (tool and parameter names only)."""
+    for a, b in (("- grep:", "- grep_search:"), ("read_symbol, grep, find_references", "read_symbol, grep_search, find_references"),
+                 ("(old must match exactly", "(old_string must match exactly"),
+                 ("an edit whose old text doesn't match", "an edit whose old_string doesn't match"),
+                 ("create_file", "write_file")):
+        assert a in note, a
+        note = note.replace(a, b)
+    return note
+
+
 # L8: the dropping note in points (selective's SELECTIVE_NOTE_V4 says "calls").
 SELECTIVE_NOTE_EDIT = """Every tool result stays in the conversation and is re-read with every later turn, so results you
 don't need make each turn longer and add noise. Each result has an ID like [#3]. With drop you can remove
@@ -320,18 +331,79 @@ def _spec(name: str, agent_variant: str, prompt_version: int = 3) -> tuple:
     return _TOOLS[name]
 
 
-def _usage(name: str, agent_variant: str, prompt_version: int = 3) -> str:
-    """What a failed call should have looked like: the tool's arguments, or the tools that exist."""
-    if name not in _variant_tools(agent_variant, prompt_version):
-        tools = ", ".join(_variant_tools(agent_variant, prompt_version))
+# Tool vocabulary (native-names arm, 2026-11-24; docs/design.md "Native tool vocabulary"). "harness": this
+# harness's names. "qwen": the tools Qwen Code (Qwen's own agent, 0.24.7) also has carry its names and
+# parameters: read_file(file_path, offset, limit), grep_search(pattern, glob, path), edit(file_path,
+# old_string, new_string), write_file(file_path, content). Same capabilities, results and budget: calls are
+# translated to the harness's tools at the boundary. Tools Qwen Code doesn't have keep their names. In "qwen"
+# mode the harness's own names for renamed tools (grep, create_file) are unknown tools.
+QWEN_NAMES = {"grep": "grep_search", "create_file": "write_file"}
+_QWEN_PARAMS = {"read_file": {"path": "file_path"}, "grep": {"path_glob": "glob"},
+                "edit": {"path": "file_path", "old": "old_string", "new": "new_string"},
+                "create_file": {"path": "file_path"}}
+
+
+def public_name(name: str, tool_names: str = "harness") -> str:
+    return QWEN_NAMES.get(name, name) if tool_names == "qwen" else name
+
+
+def _internal_name(pub: str, agent_variant: str, prompt_version: int, tool_names: str) -> str | None:
+    """The harness tool behind a name the model called (None: not a tool of this variant)."""
+    names = _variant_tools(agent_variant, prompt_version)
+    by_public = {public_name(n, tool_names): n for n in names}
+    return by_public.get(pub)
+
+
+def _internal_args(name: str, args: dict, tool_names: str) -> dict:
+    """Qwen Code arguments -> the harness tool's: renamed keys; read_file's 0-based offset and line count
+    become the harness's 1-based inclusive start and end."""
+    if tool_names != "qwen":
+        return args
+    back = {v: k for k, v in _QWEN_PARAMS.get(name, {}).items()}
+    out = {back.get(k, k): v for k, v in args.items()}
+    if name == "read_file" and ("offset" in out or "limit" in out):
+        offset, limit = out.pop("offset", None), out.pop("limit", None)
+        start = int(offset) + 1 if offset is not None else 1
+        out["start"] = start
+        if limit is not None:
+            out["end"] = start + int(limit) - 1
+    return out
+
+
+def _qwen_spec(name: str, desc: str, props: dict, required: list) -> tuple:
+    """The harness tool's definition in Qwen Code's vocabulary (names and parameters only)."""
+    ren = _QWEN_PARAMS.get(name, {})
+    props = {ren.get(k, k): v for k, v in props.items()}
+    required = [ren.get(k, k) for k in required]
+    if name == "read_file" and "start" in props:
+        del props["start"], props["end"]
+        props["offset"] = {"type": "integer", "description": "0-based line number to start reading from, default 0"}
+        props["limit"] = {"type": "integer", "description": "number of lines to read, default to the end of the file"}
+        desc = desc.replace("a range of its lines (1-based, inclusive)",
+                            "a range of its lines (offset: 0-based first line, limit: number of lines)")
+    if name == "grep" and "glob" not in props:   # Qwen Code's grep_search(pattern, glob, path); the harness's
+        props["glob"] = {"type": "string",          # grep takes a glob as path_glob, so it's the same capability
+                         "description": "glob pattern to filter files (e.g. \"*.py\", \"shopkit/**/*.py\")"}
+    if name == "edit":
+        desc = desc.replace("old must match", "old_string must match")
+    return desc, props, required
+
+
+def _usage(name: str, agent_variant: str, prompt_version: int = 3, tool_names: str = "harness") -> str:
+    """What a failed call should have looked like: the tool's arguments, or the tools that exist. name is
+    the tool name the model called (in the run's vocabulary)."""
+    schemas = {s["function"]["name"]: s["function"] for s in tool_schemas(agent_variant, prompt_version, tool_names)}
+    if name not in schemas:
+        tools = ", ".join(schemas)
         if agent_variant == "edit" and name in _MISSING_EDIT_TOOLS:
             return (f"There is no {name} tool in this harness. Read code with read_symbol: names from the list, "
                     f"or \"path:start-end\" for lines of a file. Available tools: {tools}.")
         if agent_variant == "edit" and name in _CHANGE_TOOLS:
             return (f"There is no {name} tool in this harness: change existing files with edit and add new ones "
-                    f"with create_file. Available tools: {tools}.")
+                    f"with {public_name('create_file', tool_names)}. Available tools: {tools}.")
         return "Available tools: " + tools + "."
-    _, props, required = _spec(name, agent_variant, prompt_version)
+    params = schemas[name]["parameters"]
+    props, required = params["properties"], params["required"]
     args = [f"{k} ({v['type']}, {'required' if k in required else 'optional'})" for k, v in props.items()]
     return f"{name} takes: " + (", ".join(args) if args else "no arguments") + "."
 
@@ -347,19 +419,21 @@ def _variant_tools(agent_variant: str, prompt_version: int = 3) -> list[str]:
     return [n for n in names if n != "list_files"] if prompt_version >= 4 else names
 
 
-def build_context(task: Task, ws: Workspace, agent_variant: str = "grep", prompt_version: int = 3) -> ContextBlock:
+def build_context(task: Task, ws: Workspace, agent_variant: str = "grep", prompt_version: int = 3,
+                  tool_names: str = "harness") -> ContextBlock:
     """Initial context only, then TOOLS_NOTE listing the variant's tools; the rest arrives through tools.
     prompt_version <= 3: the target file. 4: no target (the agent finds the file from the task), the
     repository's file tree instead (list_files of the root: saves the opening turn almost every run spent
     listing directories). selective v4: the symbol list instead of the tree (symbol_list)."""
-    names = _variant_tools(agent_variant, prompt_version)
+    names = [public_name(n, tool_names) for n in _variant_tools(agent_variant, prompt_version)]
     # v4: no target, except when the change creates a file that doesn't exist yet: its path can't be found
     # in the repo, and L1-L6 see it as "File: path / (This file does not exist yet.)", so L7/L8 get the same
     # two lines (2026-11-23; before, a new-file task's module name had to be guessed).
     new_file = (f"File: {task.target_file}\n(This file does not exist yet.)\n\n"
                 if prompt_version >= 4 and task.target_file and task.target_file not in ws.files else "")
     if agent_variant == "edit":
-        note = (TOOLS_NOTE_EDIT.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS) + "\n"
+        edit_note = TOOLS_NOTE_EDIT if tool_names != "qwen" else _qwen_note(TOOLS_NOTE_EDIT)
+        note = (edit_note.format(tools=", ".join(names), max_calls=MAX_TOOL_CALLS) + "\n"
                 + SELECTIVE_NOTE_EDIT.format(min_tokens=DROP_REFUND_MIN_TOKENS, cap=DROP_REFUND_CAP))
         symbols = RepoTools(ws.repo).symbol_list()
         return ContextBlock(text=f"{new_file}Repository files and names:\n{symbols}\n\n{note}", included=[])
@@ -380,13 +454,15 @@ def build_context(task: Task, ws: Workspace, agent_variant: str = "grep", prompt
     return ContextBlock(text=f"{target}\n\n{note}", included=[path])
 
 
-def tool_schemas(agent_variant: str, prompt_version: int = 3) -> list[dict]:
-    """OpenAI-style function tool definitions for the variant."""
+def tool_schemas(agent_variant: str, prompt_version: int = 3, tool_names: str = "harness") -> list[dict]:
+    """OpenAI-style function tool definitions for the variant, in the run's tool vocabulary."""
     out = []
     for name in _variant_tools(agent_variant, prompt_version):
         desc, props, required = _spec(name, agent_variant, prompt_version)
+        if tool_names == "qwen":
+            desc, props, required = _qwen_spec(name, desc, props, required)
         out.append({"type": "function", "function": {
-            "name": name, "description": desc,
+            "name": public_name(name, tool_names), "description": desc,
             "parameters": {"type": "object", "properties": props, "required": required}}})
     return out
 
@@ -1061,7 +1137,8 @@ def _assistant_message(chat) -> dict:
 def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: str,
               temperature: float | None, seed: int, max_tokens: int,
               context_window: int, thinking: bool = True,
-              failed_call_cost: float | None = None, prompt_version: int = 3) -> AgentResult:
+              failed_call_cost: float | None = None, prompt_version: int = 3,
+              tool_names: str = "harness") -> AgentResult:
     """Tool loop: call the model, execute tool calls, feed results back, stop on a final answer
     or when the budget is spent. Before every turn, check prompt tokens + max_tokens against the
     context window; if it no longer fits, stop and report no_fit (never let the server truncate).
@@ -1081,7 +1158,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     transcript keeps the original result and logs the drop (see turn_prompts). drop calls cost
     nothing; a bad drop (unknown, older or already dropped ID) is a failed call. The cacheable prefix
     of a request after a drop ends at the first changed message. Other variants: unchanged."""
-    schemas = tool_schemas(agent_variant, prompt_version)
+    schemas = tool_schemas(agent_variant, prompt_version, tool_names)
     schema_tokens = client.count_tokens(json.dumps(schemas))
     msgs = list(messages)
     log = list(messages)                 # the transcript: msgs, but original results + drop records
@@ -1204,7 +1281,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
         droppable, batch = set(tail), []
         for tc in chat.tool_calls:
             fn = tc.get("function", {})
-            name = fn.get("name", "")
+            name = pub = fn.get("name", "")
+            if tool_names == "qwen":            # the harness tool behind the Qwen Code name; unknown names stay unknown
+                name = _internal_name(pub, agent_variant, prompt_version, tool_names) or "\0" + pub
             if selective and name == "drop":
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
@@ -1283,7 +1362,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 except Exception as e:
                     out = f"error: {type(e).__name__}: {e}"
                     if feedback:
-                        out += f". {_usage(name, agent_variant, prompt_version)}"
+                        out += f". {_usage(pub, agent_variant, prompt_version, tool_names)}"
                     calls, errors, spent = calls + 1, errors + 1, spent + cost
                     add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
                 continue
@@ -1297,14 +1376,15 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
                     if name not in _variant_tools(agent_variant, prompt_version) or not isinstance(args, dict):
-                        raise ValueError(f"unknown tool {name!r}")
+                        raise ValueError(f"unknown tool {pub!r}")
+                    args = _internal_args(name, args, tool_names)
                     out = tools.call(name, args)
                     if not (edit and name in EDIT_TOOLS):      # L8: edits are free; failures still cost
                         spent += 1
                 except Exception as e:          # the model sees the error and can retry
                     out = f"error: {type(e).__name__}: {e}"
                     if feedback:
-                        out += f". {_usage(name, agent_variant, prompt_version)}"
+                        out += f". {_usage(pub, agent_variant, prompt_version, tool_names)}"
                     tools.transcript.append(out)
                     errors += 1
                     spent += cost
@@ -1312,9 +1392,12 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 add({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
                 continue
             parts = [] if out.startswith("error:") else list(getattr(tools, "last_segments", []) or [])
+            if pub != name:                     # result labels in the run's vocabulary ("grep_search ...")
+                parts = [{**p, "label": pub + p["label"][len(name):]} if p.get("label", "").startswith(name + " ")
+                         else p for p in parts]
             if not parts:
                 desc = _describe(name, args if isinstance(args, dict) else {})
-                parts = [{"kind": "result", "file": None, "label": f"{name} {desc}", "text": out}]
+                parts = [{"kind": "result", "file": None, "label": f"{pub} {desc}", "text": out}]
             index, ids_here = len(msgs), []
             for part in parts:
                 i = len(segs) + 1

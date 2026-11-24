@@ -72,7 +72,7 @@ for are Qwen Code's (Qwen's own agent, 0.24.7: `read_file`, `write_file`, `edit`
 | L8 offers no `read_file`; the model still calls `read_file_block`, `read_file=read_file`, `read_file<file_placeholder` | `read_file` |
 | `write_file` and `edit_file` called, never offered | `write_file`, `edit` |
 | `list_files` opened 97% of v3 agent runs | `list_directory` |
-| `path` written in grep calls whatever the schema said (grep now accepts it) | `grep_search(pattern, path, include)` |
+| `path` written in grep calls whatever the schema said (grep now accepts it) | `grep_search(pattern, glob, path)` |
 
 L8 stopped calling `read_file` only after the harness answered it with a specific "there is no read_file
 tool" error and the tool note said so. Caveat: Qwen Code is a fork of Gemini CLI, which uses the same
@@ -81,11 +81,16 @@ others) rather than to one lab's. The hypothesis holds either way; only "native"
 the model was trained on".
 
 **Test plan.**
-1. **Native-names arm (controlled, cheap).** L7 selective and L8, repos M and L: the same tools,
-   budget, results and tool note, with Qwen Code's names and parameters (`read_file(file_path, offset,
-   limit)`, `grep_search(pattern, path, include)`, `glob(pattern)`, `edit(file_path, old_string,
-   new_string)`, `write_file`). Only naming and schema change, so a difference is the affinity alone.
-   An ablation arm like `reuse_hint` (own run ids), about 50-100 runs, after the thinking-off sweep.
+1. **Native-names arm (controlled, cheap). Built 2026-11-24** (`tool_names = "qwen"`, a RunConfig field
+   left out of run ids at its default "harness"). L7 selective and L8 on S, M and L (114 runs thinking
+   off), after the thinking-off sweep. The tools Qwen Code also has carry its names and parameters
+   (checked against Qwen Code 0.24.7): `read_file(file_path, offset, limit)` (0-based offset and a line
+   count, translated to the harness's 1-based start/end), `grep_search(pattern, glob, path)`,
+   `edit(file_path, old_string, new_string)`, `write_file(file_path, content)`; the L8 tool note and
+   output-format line use the same names. Tools Qwen Code doesn't have (read_symbol, drop,
+   semantic_search, find_references) keep theirs. Calls are translated to the harness's tools at the
+   boundary, so capabilities, results and budget are identical; in this arm the harness's own names for
+   renamed tools (`grep`, `create_file`) are unknown tools, as in Qwen Code. Level label " qwen names".
    Watch: failed calls, unknown-tool errors, calls per run, PASS, and for L8 whether `read_file` still
    pulls the model away from reading by symbol.
 2. **The native harness itself (realistic, less controlled), only if 1 shows an effect.** Qwen Code
