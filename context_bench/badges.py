@@ -85,6 +85,24 @@ def sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if len(p.strip()) >= 12][:40]
 
 
+LOOP_REPEATS = 3
+
+
+def looped(transcript: Path) -> bool:
+    """An agent called the identical tool (same name, same arguments) at least LOOP_REPEATS times."""
+    seen: dict[str, int] = {}
+    for line in transcript.read_text().splitlines():
+        if not line.strip():
+            continue
+        for c in json.loads(line).get("tool_calls") or []:
+            fn = c.get("function", c)
+            key = f'{fn.get("name")}|{fn.get("arguments")}'
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] >= LOOP_REPEATS:
+                return True
+    return False
+
+
 def exact_badges(row: dict, run_dir: Path) -> list[str]:
     out = []
     fs = row.get("format_status")
@@ -103,6 +121,8 @@ def exact_badges(row: dict, run_dir: Path) -> list[str]:
     tr = run_dir / "transcript.jsonl"
     if tr.is_file() and "These files you changed don't parse" in tr.read_text():
         out.append("RETRIED: SYNTAX")
+    if tr.is_file() and row.get("level") in ("L7", "L8") and looped(tr):
+        out.append("LOOPED")
     tests = run_dir / "tests.txt"
     if tests.is_file() and re.search(r"\b(SyntaxError|IndentationError)\b", tests.read_text()):
         out.append("SYNTAX ERROR IN PATCH")

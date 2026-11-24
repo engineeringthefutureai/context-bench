@@ -228,7 +228,9 @@ def outcome(r: dict) -> str:
     - ASKED TO EXPLORE: no code; the reply asks to look at the repository first, in prose or as a pretend
       tool call (no_code, tool_request). Checked 2026-11-24 by embedding all 231 such replies of the
       thinking-off rounds: every one is "let me look first", none asks the user anything;
-    - INVALID: anything else (an empty reply, an agent's tool error).
+    - NO ANSWER: the reply was empty (format_status empty; for agents, nothing at all after their tool calls,
+      often after a loop of identical calls);
+    - INVALID: anything else (an agent's tool error).
     Infrastructure errors are never recorded; those runs are redone."""
     if r.get("label") == "no_fit":
         return "NO FIT"
@@ -239,6 +241,8 @@ def outcome(r: dict) -> str:
         return "UNPARSABLE"
     if fs in ("no_code", "tool_request") and r.get("label") != "tool_error":
         return "ASKED TO EXPLORE"
+    if fs == "empty" and r.get("label") != "tool_error":
+        return "NO ANSWER"
     if r.get("label") == "tool_error" or fs != "ok":
         return "INVALID"
     return "PASS" if r.get("label") == "ok" else "FAIL"

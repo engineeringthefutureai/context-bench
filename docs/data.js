@@ -29,7 +29,7 @@
   }
 
   // ---------- run list ----------
-  // report outcomes (stored labels stay ok/broken/...): PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, INVALID,
+  // report outcomes (stored labels stay ok/broken/...): PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER, INVALID,
   // OUT OF TOKENS, NO FIT
   const badge = (o) => `<span class="badge ${o === "PASS" ? "b-ok" : o === "FAIL" ? "b-broken" : "b-other"}">${esc(o)}</span>`;
   const yn = (v) => (v == null ? "–" : v ? "yes" : "no");

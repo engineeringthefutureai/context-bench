@@ -97,3 +97,19 @@ def test_dodge_prototypes_refuse_another_embedder(tmp_path):
         assert False, "should refuse"
     except ValueError:
         pass
+
+
+def test_looped_badge_and_no_answer_outcome(tmp_path):
+    call = {"function": {"name": "read_file", "arguments": "{\"path\": \"a.py\"}"}}
+    other = {"function": {"name": "read_file", "arguments": "{\"path\": \"b.py\"}"}}
+    (tmp_path / "transcript.jsonl").write_text("\n".join(json.dumps({"role": "assistant", "content": "", "tool_calls": c})
+                                                         for c in ([call], [other, call], [call])))
+    assert "LOOPED" in B.exact_badges({"level": "L7", "format_status": "empty"}, tmp_path)
+    assert "EMPTY REPLY" in B.exact_badges({"level": "L7", "format_status": "empty"}, tmp_path)
+    (tmp_path / "transcript.jsonl").write_text(json.dumps({"role": "assistant", "tool_calls": [call, other]}))
+    assert "LOOPED" not in B.exact_badges({"level": "L7", "format_status": "ok"}, tmp_path)
+    import sys
+    sys.path.insert(0, "scripts")
+    import build_site
+    assert build_site.outcome({"label": "broken", "format_status": "empty"}) == "NO ANSWER"
+    assert build_site.outcome({"label": "tool_error", "format_status": "empty"}) == "INVALID"

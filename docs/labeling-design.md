@@ -46,7 +46,7 @@ complete code, wrapped in a pretend `<tool_call>` instead of a `<file>` block; t
 got an empty reply; the run was judged on that empty reply (`no_code`) and showed as ASKED TO EXPLORE,
 which it plainly wasn't. Two rule fixes: a pretend tool call that carries code is a malformed answer
 (UNPARSABLE), not a request to explore; an empty final reply never hides the answer before it, and an
-empty reply on its own is `empty` (INVALID, badge EMPTY REPLY). The dodge prototypes had it right all
+empty reply on its own is `empty` (NO ANSWER, badge EMPTY REPLY). The dodge prototypes had it right all
 along: they score that reply as answer-like (-0.017), no WANTS TO EXPLORE badge. Same pattern elsewhere:
 2 single-shot replies with code in a pretend tool call and 1 empty agent reply in the v4 round, 7 empty
 agent replies in the earlier rounds. Found at the same time: `format_retry` was only recorded for the
@@ -66,7 +66,8 @@ The label stays strict.
 | OUT OF TOKENS | error says `max_output_tokens` | the reply hit the output limit |
 | UNPARSABLE | `format_status = bad_format` | code is there, not in the required blocks |
 | ASKED TO EXPLORE | `format_status` is `no_code` or `tool_request` (not a tool error) | no code; the reply asks to look at the repository first, in prose or as a pretend tool call |
-| INVALID | anything else without an accepted answer (`empty`, `tool_error`) | an empty reply, or an agent's harness-side failure |
+| NO ANSWER | `format_status = empty` (not a tool error) | the reply was empty: an agent that went silent |
+| INVALID | anything else without an accepted answer (`tool_error`) | an agent's harness-side failure |
 | PASS | label `ok` | every hidden test passes |
 | FAIL | otherwise | a valid answer, a hidden test fails |
 
@@ -84,11 +85,20 @@ tools can't explore, and the system prompt says so) rather than sloppiness. Both
 Checked with embeddings (below) and a pattern search: 0 of 231 address the user ("could you", "please
 provide", ...); all 231 announce that the model will look at the code itself.
 
+**Why NO ANSWER (2026-11-24, from control-001 · L7 selective · M).** That agent read
+`shopkit/utils/collections.py` six times (five in a row), spent its budget, then answered both "reply with
+your <file> blocks" prompts with nothing. Seven agent runs across the three rounds never wrote a word and
+ended silent; most first repeated one identical tool call 6 to 12 times. Not a refusal (nothing declines
+anything; a reply that says it can't do the task gets the CONCEDES badge) and not a request to explore: a
+session that degenerated. The user proposed REFUSED; NO ANSWER was chosen as more accurate. The exact
+badge LOOPED marks any agent run that repeats an identical tool call 3 or more times, whatever its outcome.
+
 ## Badges
 
 Badges add detail to a run without touching its outcome. `cbench badges` writes `results/badges.jsonl`.
 
-**Exact badges** come from stored fields: NO CODE, PRETEND TOOL CALL, BAD FORMAT (from `format_status`),
+**Exact badges** come from stored fields: NO CODE, PRETEND TOOL CALL, BAD FORMAT, EMPTY REPLY (from `format_status`),
+LOOPED (an identical tool call 3 or more times),
 OUT OF TOKENS, RETRIED: FORMAT, RETRIED: SYNTAX, SYNTAX ERROR IN PATCH, TESTS ADDED, USES DEAD CODE.
 
 **Intent badges** describe what the final answer's prose says: DECLARES COMPLETION, CLAIMS VERIFICATION,
