@@ -128,16 +128,43 @@ def test_export_queue_and_a_sidecar_reply(tmp_path):
     assert n == 2 and g["points"] == -20 and len(g["dropped"]) == 1 and g["session"] == "s1"
 
 
-def test_sidecar_guard_allows_reading_inside_the_judge_dir_only(tmp_path):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import agy_sidecar as sc
-    ws = tmp_path.resolve()
-    for ok in ["grep -rn def repo | head -5", "sed -n 1,40p repo/a.py", "find . -name '*.py' | xargs grep -l x",
-               "cat task.md 2>/dev/null"]:
-        assert sc.check_command(ok, ws) is None, ok
-    for bad in ["cat /etc/passwd", "cat ../../x", "sed -i s/a/b/ repo/a.py", "echo x > repo/a.py", "python3 -c 1",
-                "find . -delete", "cd / && ls", "ls $(pwd)/.."]:
-        assert sc.check_command(bad, ws), bad
-    assert sc.check_tool({"name": "view_file", "kind": "read", "rawInput": {"AbsolutePath": str(ws / "repo/a.py")}}, ws) is None
-    assert sc.check_tool({"name": "view_file", "kind": "read", "rawInput": {"AbsolutePath": "/home/x/docs/data.js"}}, ws)
-    assert sc.check_tool({"name": "write_to_file", "kind": "edit", "rawInput": {}}, ws)
+FAKE_AGY = r"""#!/usr/bin/env python3
+import json, re, subprocess, sys, uuid
+a = sys.argv[1:]
+if "/quota" in a:
+    print('{"command": {"data": {"groups": []}}}'); sys.exit()
+if a[1] == "get-conversation-metadata":
+    print("{}"); sys.exit()
+prompt = a[-1]
+out = re.search(r"to the file (/\S+?\.json)", prompt).group(1)
+patch = open(out.rsplit("/verdicts/", 1)[0] + "/patch.diff").read()
+if not ("silent" in patch and not prompt.startswith("Write the JSON")):
+    body = "no json" if "bad" in patch else '{"penalties": []}'
+    subprocess.Popen(["sh", "-c", f"sleep 0.2; printf '%s' '{body}' > {out}"])
+print(json.dumps({"conversationId": str(uuid.uuid4())}) if a[1] == "new-conversation" else "{}")
+"""
+
+
+def test_agy_grader_grades_steers_and_parks_with_a_fake_agentapi(tmp_path):
+    import os, subprocess
+    root = Path(__file__).resolve().parent.parent
+    agy = tmp_path / "agy"
+    agy.write_text(FAKE_AGY)
+    agy.chmod(0o755)
+    q = tmp_path / "q"
+    (q / "patches").mkdir(parents=True)
+    (q / "tasks").mkdir()
+    (q / "PENALTIES.md").write_text("catalogue")
+    (q / "tasks" / "reuse-001.md").write_text("task")
+    lines = []
+    for pid, body in [("a1", "+ok"), ("a2", "+silent"), ("a3", "+bad"), ("a4", "+ok 2")]:
+        (q / "patches" / f"{pid}.diff").write_text(body + "\n")
+        lines.append(json.dumps({"id": pid, "task": "reuse-001", "repo_size": "S", "patch_hash": "h" + pid}))
+    (q / "manifest.jsonl").write_text("\n".join(lines) + "\n")
+    subprocess.run([sys.executable, str(root / "scripts" / "agy_grader.py"), str(q), "--agy", str(agy), "--agentapi", f"{agy} agentapi",
+                    "--work-dir", str(tmp_path / "work"), "--turn-timeout", "2", "--poll", "0.1", "--min-quota", "0"],
+                   env={**os.environ, "ANTIGRAVITY_LS_ADDRESS": "x"}, check=True, timeout=120)
+    res = {json.loads(l)["id"]: json.loads(l) for l in (q / "results.jsonl").read_text().splitlines()}
+    parked = [json.loads(l) for l in (q / "parked.jsonl").read_text().splitlines()]
+    assert set(res) == {"a1", "a2", "a4"} and [p["id"] for p in parked] == ["a3"]
+    assert res["a2"]["steers"] and res["a1"]["session"] == res["a2"]["session"] != res["a4"]["session"]

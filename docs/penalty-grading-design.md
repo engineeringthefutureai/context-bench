@@ -72,29 +72,33 @@ viewer. The limits section says what the judge is and that its penalties are unv
   the viewer shows points and each penalty under Tests. The Results page section comes with the first data.
 - Tests: `tests/test_penalty.py` (validation, caps, the judge dir, resume and reuse, a fake judge).
 
-## One conversation per task: the agy sidecar (2026-11-24)
+## One conversation per task, in Antigravity (2026-11-24)
 A calibration pick of five patches (all five verdicts as expected, nothing dropped) used about 15% of the
 5-hour agy quota. agy bills quota by token cost, and a fresh headless call per patch makes the judge
 explore the repository again every time, which is most of those tokens. 485 thinking-off patches would
 have needed about twice the weekly quota.
 
-`scripts/agy_sidecar.py` grades the same patches in one agy conversation per task and repo (57 groups,
-1-17 patches each), through `agy acp` (Agent Client Protocol), on the machine that hosts Antigravity:
+`scripts/agy_grader.py` grades the same patches in one Antigravity conversation per task and repo (57
+groups, 1-17 patches each). agy runs the script (or Antigravity starts it as a sidecar), so it inherits
+the environment `agentapi` needs, and the graders are ordinary conversations in the app, where they can be
+watched and steered:
 - `cbench grade --mode penalty --judge agy --thinking off --export grading/queue/v4-off` writes the
   queue (patches by hash, task texts, the catalogue; no run ids, nothing about how a patch was made). It
-  goes to the other machine through the repository.
-- The sidecar copies the fixture into a judge dir outside the checkout and opens a conversation. Each
-  patch is one turn: `patch.diff` is rewritten, so only the current change is ever in the dir, and later
-  turns ask for the new change to be graded on its own. A fresh conversation starts every 10 patches.
-- Every tool call is checked as it starts. Reading inside the judge dir with read-only commands is
-  allowed; anything else cancels the turn, and the same conversation gets a neutral steer. A reply
-  without the JSON, or a turn over 15 minutes, gets "reply with the JSON only". After two steers the
-  patch is parked with its conversation id, which can be opened in Antigravity or with `agy -r`. Steers
-  never mention a verdict, and each grade records the steers it got.
-- The sidecar waits while the 5-hour or weekly quota is below 10%, and records tokens per patch.
+  goes to the Antigravity machine through the repository.
+- The script copies the fixture into a judge dir outside the checkout and starts a conversation
+  (`agentapi new-conversation`). Each patch is one message: `patch.diff` is rewritten first, so only the
+  current change is ever in the dir, and the grader writes its JSON to `verdicts/<id>.json` there, which
+  the script waits for. Later patches go to the same conversation (`agentapi send-message`) and ask for the
+  new change to be graded on its own. A fresh conversation starts every 10 patches.
+- No verdict within 15 minutes, or one without the JSON, gets a neutral message ("write the JSON for
+  patch.diff to <file>"). After two, the patch is parked with its conversation id; the conversation stays
+  open in the app. Messages never mention a verdict, and each grade records the ones it took.
+- The script waits while the 5-hour or weekly quota is below 10%.
 - `cbench grade --mode penalty --judge agy --import <queue>/results.jsonl` runs the usual quote check and
-  writes `results/penalties.jsonl`, with the conversation id, model, usage and steers on each grade.
+  writes `results/penalties.jsonl`, with the conversation id and messages on each grade.
 
+The graders run with the app's permissions rather than a read-only allow-list, so blindness rests on the
+judge dir being outside the checkout and on the prompt; the app shows every step for review.
 The trade-off: a judge that has seen earlier changes for the same task may grade the next one relative
 to them. The catalogue names absolute defects, which limits this. The five calibration patches, graded
 again in one conversation, show whether it matters.
