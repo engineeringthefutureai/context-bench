@@ -1,0 +1,114 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,111 @@
++"""What a discount code would save before it is applied.
++
++Mirrors the coupon step of pricing.cart.price_cart exactly (sale/gift-card exclusions, the
++minimum-order rule on the full basket, printed SAVE..-YYYY-XXXX codes) and reports only the
++saving in cents. Returns 0 when the code isn't valid, isn't active, doesn't meet the minimum
++order, or would take nothing off. Like price_cart, promotions=() by default: the preview is
++for the code the shopper typed, not for the automatic promotion."""
++from __future__ import annotations
++
++from datetime import datetime
++
++from shopkit.catalog.models import Product
++from shopkit.core.pricing import parseCouponCode
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import (
++    GIFT_CARD_TAX_CLASS,
++    MAX_CART_LINES,
++    MEMBER_PRICE_LIST_TIER,
++    CartError,
++    CartItem,
++    PricedLine,
++)
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import FIXED, PERCENT, Coupon, CouponRejected, coupon_is_active, normalize_code
++from shopkit.tax.rates import STANDARD, rate_for
++from shopkit.utils.numbers import apply_rate
++
++
++def _build_lines(items: list[CartItem], products: dict[str, Product], *, engine: PricingEngine, ship_to: Address,
++                 weight_g: int, at: datetime, tier: str = "standard", member: bool = False,
++                 currency: str | None = None) -> list[PricedLine]:
++    """Price the cart lines exactly as price_cart does (unit prices, member prices, then per-line
++    tax on the pre-coupon amount), so the coupon's basket and eligible subtotals are identical.
++    Reuses price_cart's line pricing: a priced cart with no coupon and no promotions IS the
++    pre-coupon state."""
++    from shopkit.pricing.cart import price_cart
++
++    if len(items) > MAX_CART_LINES:
++        raise CartError(f"a cart can hold at most {MAX_CART_LINES} different items", lines=len(items))
++    cart = price_cart(items, products, engine=engine, ship_to=ship_to, weight_g=weight_g, at=at,
++                      tier=tier, member=member, coupon_code=None, coupons={}, promotions=(),
++                      currency=currency)
++    return cart.lines
++
++
++def coupon_savings(items: list[CartItem], products: dict[str, Product], code: str, coupons: dict[str, Coupon],
++                   engine: PricingEngine, ship_to: Address, weight_g: int, at: datetime,
++                   tier: str = "standard", member: bool = False, promotions=(),
++                   currency: str | None = None) -> int:
++    """Saving in cents a code would give on this cart, or 0 if it wouldn't apply.
++
++    Computed the way the cart page computes it: the same line pricing and the same coupon
++    rules as price_cart, including its sale-item and gift-card exclusions."""
++    if not code or not normalize_code(code):
++        return 0
++    try:
++        lines = _build_lines(items, products, engine=engine, ship_to=ship_to, weight_g=weight_g,
++                             at=at, tier=tier, member=member, currency=currency)
++    except CartError:
++        return 0
++    if not lines:
++        return 0
++
++    # --- automatic promotions, the way price_cart applies them before the coupon -------------------------
++    if promotions:
++        from shopkit.orders.models import Order, OrderLine
++        cur = currency or engine.settings.default_currency
++        as_order = Order("cart",
++                         [OrderLine(l.sku, l.qty, l.unit_cents) for l in lines if l.tax_class != GIFT_CARD_TAX_CLASS],
++                         currency=cur)
++        from shopkit.promotions.rules import best_discount
++        rule, amount = best_discount(as_order, list(promotions))
++        if amount:
++            touched = [l for l in lines if l.tax_class != GIFT_CARD_TAX_CLASS]
++            base = sum(l.subtotal_cents for l in touched)
++            left = amount
++            for i, l in enumerate(touched):
++                share = amount * l.subtotal_cents // base if i < len(touched) - 1 else left
++                l.discount_cents += share
++                left -= share
++
++    code = normalize_code(code) if False else normalize_code(code)
++    coupon: Coupon | None = coupons.get(code)
++    printed_pct = None
++    if coupon is None:
++        printed_pct = parseCouponCode(code)
++        if printed_pct:
++            coupon = Coupon(code, PERCENT, printed_pct, at.date(), at.date())
++    if coupon is None:
++        return 0
++
++    not_gift = [l for l in lines if l.tax_class != GIFT_CARD_TAX_CLASS]
++    basket = sum(l.subtotal_cents - l.discount_cents for l in not_gift)          # counts sale items
++    if coupon.kind == PERCENT:
++        eligible = [l for l in not_gift if not l.on_sale]
++    else:
++        eligible = not_gift
++    eligible_base = sum(l.subtotal_cents - l.discount_cents for l in eligible)
++    try:
++        if not coupon_is_active(coupon, at.date()):
++            raise CouponRejected(f"coupon {coupon.code} is not active", code=coupon.code)
++        if printed_pct is None and basket < coupon.min_order_cents:
++            raise CouponRejected(f"coupon {coupon.code} needs a larger order", code=coupon.code,
++                                 min_order_cents=coupon.min_order_cents)
++        if coupon.kind == PERCENT:
++            total_off = apply_rate(eligible_base, coupon.value)
++        else:
++            total_off = min(coupon.value, eligible_base)
++    except CouponRejected:
++        return 0
++    return total_off

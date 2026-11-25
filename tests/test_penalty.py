@@ -102,3 +102,42 @@ def test_grade_patch_with_a_fake_judge(tmp_path):
     lines = [json.loads(l) for l in out.read_text().splitlines()]
     assert n == 2 and {l["run_id"] for l in lines} == {"a", "b"} and lines[0]["points"] == -5
     assert penalty.load(out)["a"]["penalties"][0]["code"] == "convention"
+
+
+def test_export_queue_and_a_sidecar_reply(tmp_path):
+    rows, runs = _rows(tmp_path)
+    cat = tmp_path / "p.md"
+    cat.write_text("catalogue")
+    task = type("T", (), {"id": "t", "prompt": "Add tax."})()
+    todo = penalty.pending(rows, runs, {}, "agy", "1")
+    q = tmp_path / "queue"
+    n = penalty.export_queue(todo, {r["task_id"]: task for r in rows}, {"M": "abc", "S": "def", "L": "ghi"},
+                             cat, "1", q)
+    manifest = [json.loads(l) for l in (q / "manifest.jsonl").read_text().splitlines()]
+    assert n == len(manifest) == len(todo)
+    assert all(set(m) == {"id", "task", "repo_size", "repo_hash", "patch_hash", "catalogue_version"} for m in manifest)
+    h = penalty.patch_hash(PATCH)
+    assert (q / "patches" / f"{h[:16]}.diff").read_text() == PATCH and (q / "tasks" / "t.md").exists()
+    out = tmp_path / "penalties.jsonl"
+    reply = {"patch_hash": h, "session": "s1", "steers": [], "penalties": [
+        {"code": "risk", "quote": 'print("customer email", items[0].email)', "why": "email in logs"},
+        {"code": "scope", "quote": "not in the patch", "why": "x"}]}
+    n = penalty.grade_patch(task, "M", todo[h], repo=Path(), catalogue=cat, version="1", judge="agy",
+                            judge_command=None, work_dir=Path(), out_path=out, reply=reply)
+    g = penalty.load(out)["a"]
+    assert n == 2 and g["points"] == -20 and len(g["dropped"]) == 1 and g["session"] == "s1"
+
+
+def test_sidecar_guard_allows_reading_inside_the_judge_dir_only(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import agy_sidecar as sc
+    ws = tmp_path.resolve()
+    for ok in ["grep -rn def repo | head -5", "sed -n 1,40p repo/a.py", "find . -name '*.py' | xargs grep -l x",
+               "cat task.md 2>/dev/null"]:
+        assert sc.check_command(ok, ws) is None, ok
+    for bad in ["cat /etc/passwd", "cat ../../x", "sed -i s/a/b/ repo/a.py", "echo x > repo/a.py", "python3 -c 1",
+                "find . -delete", "cd / && ls", "ls $(pwd)/.."]:
+        assert sc.check_command(bad, ws), bad
+    assert sc.check_tool({"name": "view_file", "kind": "read", "rawInput": {"AbsolutePath": str(ws / "repo/a.py")}}, ws) is None
+    assert sc.check_tool({"name": "view_file", "kind": "read", "rawInput": {"AbsolutePath": "/home/x/docs/data.js"}}, ws)
+    assert sc.check_tool({"name": "write_to_file", "kind": "edit", "rawInput": {}}, ws)

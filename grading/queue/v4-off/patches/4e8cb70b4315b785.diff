@@ -1,0 +1,71 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,68 @@
++"""Preview of what a discount code would save before the shopper applies it.
++
++The cart page re-prices the whole cart through `price_cart` to show the new total; this gives the
++same saving without committing to the code (the cart's `coupon_discount_cents`). The calculation is
++the cart's exactly: the same line pricing (engine, promotions) and the same coupon rules (gift cards
++excluded, percentage coupons skip items on sale, fixed coupons apply to the whole eligible subtotal,
++minimum basket check, printed-code handling), so the preview always matches what applying the code would do.
++"""
++from __future__ import annotations
++
++from datetime import datetime
++
++from shopkit.config import SETTINGS
++from shopkit.core.pricing import parseCouponCode
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import GIFT_CARD_TAX_CLASS, PricedLine, price_cart
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import FIXED, PERCENT, Coupon, coupon_is_active, normalize_code
++from shopkit.utils.numbers import apply_rate
++
++
++def coupon_savings(items, products, code, coupons, engine, ship_to, weight_g, at):
++    """Cents the code `code` would save on this cart (0 when it would not apply).
++
++    `items` are cart items (same shape as for `price_cart`), `products` maps sku -> Product,
++    `coupons` maps normalized code -> Coupon (printed codes are recognised without an entry),
++    `engine` prices the lines and `at` is the pricing moment. Standard pricing options are used
++    (default currency, standard tier, no member pricing, no automatic promotions), matching the
++    plain cart a shopper is looking at."""
++    if not code:
++        return 0
++    try:
++        cart = price_cart(list(items), products, engine=engine, ship_to=ship_to, weight_g=weight_g,
++                          at=at, coupons=coupons or None)
++    except Exception:
++        # an unpriced cart (too many lines, unknown product, missing exchange rate, ...) can't be
++        # previewed; there is no saving to show
++        return 0
++
++    not_gift = [l for l in cart.lines if l.tax_class != GIFT_CARD_TAX_CLASS]
++    if not not_gift:
++        return 0
++
++    code = normalize_code(code)
++    coupon = (coupons or {}).get(code)
++    printed_pct = None
++    if coupon is None:
++        printed_pct = parseCouponCode(code)
++        if printed_pct:
++            coupon = Coupon(code, PERCENT, printed_pct, at.date(), at.date())
++    if coupon is None:
++        return 0                                   # the code isn't valid
++    if not coupon_is_active(coupon, at.date()):
++        return 0                                   # expired, not started yet, or used up
++    if printed_pct is None:
++        # on-sale items count towards the minimum, as on the cart page
++        basket = sum(l.subtotal_cents - l.discount_cents for l in not_gift)
++        if basket < coupon.min_order_cents:
++            return 0
++
++    # the cart's eligibility: percentage coupons skip items on sale, fixed ones take the whole subtotal
++    eligible = [l for l in not_gift if not l.on_sale] if coupon.kind == PERCENT else not_gift
++    eligible_base = sum(l.subtotal_cents - l.discount_cents for l in eligible)
++    if eligible_base <= 0:
++        return 0                                   # nothing left to discount (a promo used it up)
++    if coupon.kind == PERCENT:
++        return apply_rate(eligible_base, coupon.value)
++    return min(coupon.value, eligible_base)

@@ -1,0 +1,114 @@
+--- /dev/null
++++ b/shopkit/payouts/preview.py
+@@ -0,0 +1,111 @@
++"""Read-only preview of a seller's next payout: the same status and net amount the weekly batch
++would produce for the period, without changing any held amount or carried balance."""
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from datetime import date, timedelta
++
++from shopkit.config import SETTINGS, Settings
++from shopkit.payouts.batching import (BACKUP_WITHHOLDING_BP, FX_FEE_BP, MIN_PAYOUT_CENTS, Rollover, _commission)
++from shopkit.payouts.holds import RETURN_WINDOW_DAYS, HoldBook
++from shopkit.payouts.models import (CLOSED, CLOSING, DRAFT, ROLLED_OVER, SUSPENDED, Adjustment, Earning, Payout,
++                                    PayoutLine, Seller)
++from shopkit.pricing.currency import RateTable
++from shopkit.utils.numbers import apply_rate
++
++
++@dataclass
++class _PreviewBook:
++    """Standalone tally of holds due at `period_end`, used so the preview never places holds on the
++    shared HoldBook (which would change the seller's held amounts)."""
++    released: int = 0
++    held: int = 0
++
++
++def preview_payout(seller, earnings, adjustments, period_start, period_end,
++                   holds=None, rollover=None, *, rates=None, settings: Settings = SETTINGS,
++                   seller_country: dict[str, str] | None = None):
++    """What the seller's payout would be for [period_start, period_end] if the weekly batch ran now.
++
++    Returns (status, net_cents): the status and net amount exactly as the batch would treat this
++    seller for the period, applying the same rules as build_payout_batch (commission, refunds, holds
++    for orders still inside the return window, released holds, adjustments, reserve, backup
++    withholding, the minimum payout and negative-balance rollover, and currency conversion).
++
++    The preview is read-only: `holds` and `rollover` are left exactly as they were, so running it
++    does not consume carried balances or mark holds as released. A preview therefore cannot
++    simulate a missing FX rate; without `rates` a payout in another currency than the shop's is
++    reported at the shop-currency net (the same amount the batch would compute before converting).
++    """
++    # --- input checks: the same rejections the batch applies ------------------------------------------
++    valid = []
++    seen: set[tuple[str, str, str]] = set()
++    for e in earnings:
++        if e.seller_id != seller.id:
++            continue
++        if e.gross_cents < 0 or e.refunded_cents < 0:
++            continue
++        if e.refunded_cents > e.gross_cents:
++            continue
++        key = (e.seller_id, e.order_id, e.sku)
++        if key in seen:
++            continue
++        seen.add(key)
++        valid.append(e)
++
++    if seller.status in (SUSPENDED, CLOSED):
++        return (seller.status, 0)
++
++    payout = Payout(f"po_{seller.id}_{period_end:%Y%m%d}", seller.id, period_start, period_end, seller.payout_currency)
++    in_period = [e for e in valid if e.delivered_on is None
++                 or period_start - timedelta(days=366) <= e.delivered_on <= period_end]
++
++    # --- lines, and what the batch would release/hold in this period -----------------------------------
++    book = _PreviewBook()
++    if holds is not None:
++        book.released = sum(h.amount_cents for h in holds.releasable(seller.id, period_end))
++    for e in sorted(in_period, key=lambda e: (e.order_id, e.sku)):
++        commission = _commission(e.gross_cents, seller.commission_bp)
++        net = e.gross_cents - commission - e.refunded_cents
++        if e.refunded_cents and e.refunded_cents == e.gross_cents:
++            net = 0
++            commission = 0
++        payout.lines.append(PayoutLine(e.order_id, e.gross_cents, commission, e.refunded_cents, net))
++        within_window = e.delivered_on is None or e.delivered_on + timedelta(days=RETURN_WINDOW_DAYS) > period_end
++        if within_window and net > 0:
++            book.held += net
++    payout.held_cents = book.held
++
++    # --- released holds, adjustments, reserve, and carried balance -----------------------------------------
++    payout.adjustments_cents = sum(a.amount_cents for a in adjustments if a.seller_id == seller.id) + book.released
++    if seller.reserve_bp:
++        payout.reserve_cents = apply_rate(payout.gross_cents, seller.reserve_bp / 100)
++    if rollover is not None:
++        payout.carried_in_cents = rollover.balances.get(seller.id, 0)
++
++    # --- backup withholding, exactly as the batch computes it ------------------------------------------
++    country = (seller_country or {}).get(seller.id, "US")
++    if country == "US" and not seller.tax_id.strip():
++        line_net = sum(l.net_cents for l in payout.lines) - payout.held_cents
++        if line_net > 0:
++            payout.adjustments_cents -= apply_rate(line_net, BACKUP_WITHHOLDING_BP / 100)
++
++    # --- minimum payout and negative balances ---------------------------------------------------------
++    net = payout.net_cents
++    if net < 0:
++        status = ROLLED_OVER
++    elif net < MIN_PAYOUT_CENTS and seller.status != CLOSING:
++        status = ROLLED_OVER
++    else:
++        status = DRAFT
++    return (status, net)
++
++
++def preview_statement(seller, earnings, adjustments, period_start, period_end,
++                      holds=None, rollover=None, *, rates=None, settings: Settings = SETTINGS,
++                      seller_country: dict[str, str] | None = None):
++    """(status, net_cents) from :func:`preview_payout`, kept apart so the preview function stays a
++    single-purpose tuple returner."""
++    return preview_payout(seller, earnings, adjustments, period_start, period_end,
++                          holds=holds, rollover=rollover, rates=rates, settings=settings,
++                          seller_country=seller_country)

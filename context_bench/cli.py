@@ -59,7 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--mode", choices=["compare", "penalty"], default="compare",
                     help="compare: rank all patches per task (rounds up to v3); penalty: one call per passing patch")
     gr.add_argument("--judge", help="penalty mode: a name from [grading.judges] (agy, claude)")
+    gr.add_argument("--export", metavar="DIR", help="penalty mode: write the patches still to grade for the agy sidecar")
+    gr.add_argument("--import", dest="import_", metavar="FILE", action="append",
+                    help="penalty mode: grades from the agy sidecar's replies (repeatable)")
     gr.add_argument("--sample", type=int, help="penalty mode: grade at most N patches (random, seed 1), for calibration")
+    gr.add_argument("--thinking", choices=["on", "off"], help="penalty mode: only runs of this round (default both)")
+    gr.add_argument("--jobs", type=int, default=1, help="penalty mode: judge calls run at once (default 1)")
 
     bd = sub.add_parser("badges", help="exact and intent badges per run (results/badges.jsonl)")
     bd.add_argument("--results-dir", help="another results folder, e.g. results/archive-v4-qwen3emb")
@@ -125,8 +130,17 @@ def main(argv: list[str] | None = None) -> None:
         if args.mode == "penalty":
             if not args.judge:
                 raise SystemExit("--mode penalty needs --judge (see [grading.judges])")
+            filters = dict(task_ids=args.task, repo_sizes=args.repo_size, sample=args.sample, thinking=args.thinking)
+            if args.export:
+                n = exp.export_penalty(Path(args.export), args.judge, **filters)
+                print(f"{n} patches written to {args.export}")
+                return
+            if args.import_:
+                n = exp.import_penalty([Path(f) for f in args.import_], args.judge, **filters)
+                print(f"graded {n} runs")
+                return
             n = exp.grade_penalty(args.judge, args.task, dry_run=args.dry_run, repo_sizes=args.repo_size,
-                                  sample=args.sample)
+                                  sample=args.sample, thinking=args.thinking, jobs=args.jobs)
         else:
             n = exp.grade(args.task, dry_run=args.dry_run, repo_sizes=args.repo_size)
         print(f"judge dirs written to {exp.config['grading']['work_dir']}" if args.dry_run else f"graded {n} runs")

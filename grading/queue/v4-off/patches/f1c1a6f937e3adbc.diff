@@ -1,0 +1,118 @@
+--- /dev/null
++++ b/shopkit/payouts/preview.py
+@@ -0,0 +1,115 @@
++"""Preview of the next payout for a single seller, shown to sellers before finance runs the weekly
++batch. It reproduces exactly what build_payout_batch would compute for that seller over the period
++-- same holds, reserves, backup withholding, minimum payout and currency conversion -- but it is a
++pure read: no holds are placed or released and no rollover balance is taken or returned, so running
++a preview changes nothing (the real batch later behaves identically)."""
++from __future__ import annotations
++
++from collections import defaultdict
++from datetime import date, timedelta
++
++from shopkit.config import SETTINGS, Settings
++from shopkit.payouts.batching import (BACKUP_WITHHOLDING_BP, FX_FEE_BP, MIN_PAYOUT_CENTS, _commission)
++from shopkit.payouts.holds import RETURN_WINDOW_DAYS, HoldBook
++from shopkit.payouts.models import (CLOSED, CLOSING, DRAFT, ROLLED_OVER, SUSPENDED, Adjustment, Earning, Payout,
++                                    PayoutLine, Seller)
++from shopkit.pricing.currency import RateTable, RateUnavailable
++from shopkit.utils.numbers import apply_rate
++
++
++def preview_payout(seller, earnings, adjustments, period_start, period_end, holds, rollover,
++                   *, rates: RateTable | None = None, settings: Settings = SETTINGS,
++                   seller_country: dict[str, str] | None = None) -> tuple[str, int]:
++    """What this seller's payout would be for [period_start, period_end] (inclusive), as the weekly
++    batch would treat it.
++
++    Returns (status, net_cents): DRAFT with the amount that would be sent, or ROLLED_OVER with the
++    amount that would carry into the next period (negative balances and sub-MIN_PAYOUT_CENTS
++    amounts, closing sellers excepted). The seller's status, the hold book and the rollover balance
++    are read, never changed.
++
++    The per-seller arithmetic mirrors build_payout_batch line for line: the same earnings filters,
++    the same holds (which are only counted here, not placed), the same released holds, adjustments,
++    reserve, backup withholding and currency conversion. seller_country: seller id -> country, for
++    US sellers without a tax id on file."""
++    shop_currency = settings.default_currency
++
++    # --- skip, exactly as the batch does ---------------------------------------------------------------------
++    if seller.status in (SUSPENDED, CLOSED):
++        return (seller.status, 0)
++
++    # --- earnings for this seller in the period (same filters as the batch) ---------------------------------
++    mine = [e for e in earnings if e.seller_id == seller.id and
++            (e.gross_cents >= 0 and e.refunded_cents >= 0 and e.refunded_cents <= e.gross_cents) and
++            (e.delivered_on is None or period_start - timedelta(days=366) <= e.delivered_on <= period_end)]
++    # A preview of one seller sees only that seller's lines, so there are no cross-seller duplicates
++    # and none of the lines can already have been paid (the batch would not have paid this seller
++    # before it was previewed). Deduping within the period is a no-op in practice, kept to match the
++    # batch: a repeated (order, sku) would be double-counted if left in.
++    mine = _dedupe(mine)
++
++    # --- lines: gross, commission, refunds, net; count (never place) the holds -------------------------------
++    lines: list[PayoutLine] = []
++    held_now = 0
++    for e in sorted(mine, key=lambda e: (e.order_id, e.sku)):
++        commission = _commission(e.gross_cents, seller.commission_bp)
++        net = e.gross_cents - commission - e.refunded_cents
++        if e.refunded_cents and e.refunded_cents == e.gross_cents:
++            # full refund: the commission is given back to the seller too (marketplace terms §7.2)
++            net = 0
++            commission = 0
++        lines.append(PayoutLine(e.order_id, e.gross_cents, commission, e.refunded_cents, net))
++        # read-only: hold book is only consulted, never written
++        within_window = e.delivered_on is None or e.delivered_on + timedelta(days=RETURN_WINDOW_DAYS) > period_end
++        if within_window and net > 0:
++            held_now += net
++    gross = sum(l.gross_cents for l in lines)
++
++    # --- released holds: what the batch would release by period_end, without releasing them --------------------
++    released = sum(h.amount_cents for h in holds.releasable(seller.id, period_end))
++    reserve = apply_rate(gross, seller.reserve_bp / 100) if seller.reserve_bp else 0
++    carried_in = rollover.balances.get(seller.id, 0)
++
++    # --- backup withholding (US sellers without a tax id) ----------------------------------------------------
++    country = (seller_country or {}).get(seller.id, "US")
++    line_net = sum(l.net_cents for l in lines) - held_now
++    if country == "US" and not seller.tax_id.strip() and line_net > 0:
++        withheld = apply_rate(line_net, BACKUP_WITHHOLDING_BP / 100)
++    else:
++        withheld = 0
++
++    # --- net in the shop currency -----------------------------------------------------------------------------
++    net = sum(l.net_cents for l in lines) + (released + sum(a.amount_cents for a in adjustments
++                                                           if a.seller_id == seller.id) - withheld) \
++        + carried_in - held_now - reserve
++
++    # --- minimum payout and negative balances (as the batch decides the status) --------------------------------
++    if net < 0 or (net < MIN_PAYOUT_CENTS and seller.status != CLOSING):
++        return (ROLLED_OVER, net)
++
++    # --- currency conversion: same as the batch, so the amount matches what would actually be sent -------------
++    if seller.payout_currency != shop_currency:
++        if rates is None:
++            # the batch skips the payout and rolls it over when it has no rates: a preview can't price it
++            return (ROLLED_OVER, net)
++        try:
++            converted = rates.convert(net, shop_currency, seller.payout_currency, period_end)
++        except RateUnavailable:
++            return (ROLLED_OVER, net)
++        net = converted - apply_rate(converted, FX_FEE_BP / 100)
++
++    return (DRAFT, net)
++
++
++def _dedupe(earnings):
++    """First occurrence of each (order_id, sku) wins; mirrors the batch's INC-2377 dedupe (order only,
++    which would wrongly drop a second seller on a multi-seller order)."""
++    seen: set[tuple[str, str]] = set()
++    out = []
++    for e in earnings:
++        key = (e.order_id, e.sku)
++        if key in seen:
++            continue
++        seen.add(key)
++        out.append(e)
++    return out

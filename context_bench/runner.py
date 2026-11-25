@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import subprocess
 import tempfile
@@ -730,15 +731,11 @@ class Experiment:
                 graded += n
         return graded
 
-    def grade_penalty(self, judge: str, task_ids: list[str] | None = None, dry_run: bool = False,
-                      repo_sizes: list[str] | None = None, sample: int | None = None) -> int:
-        """cbench grade --mode penalty: one judge call per distinct passing patch of the current prompt
-        version on the fixture as it is now (penalty.py). Returns the number of runs graded."""
+    def _penalty_todo(self, judge: str, task_ids=None, repo_sizes=None, sample=None, thinking=None):
+        """Distinct passing patches still to grade by this judge (penalty.pending), with the catalogue,
+        its version and the output path."""
         from . import penalty
         grading = self.config["grading"]
-        judges = grading.get("judges", {})
-        if judge not in judges:
-            raise SystemExit(f"unknown judge {judge!r}; [grading.judges] has: {', '.join(judges) or 'none'}")
         catalogue = self._path(grading["penalty_catalogue"])
         version = (re.search(r"catalogue_version:\s*(\S+)", catalogue.read_text()) or [None, "?"])[1]
         out_path = self._path(self.config["paths"].get("penalties", "results/penalties.jsonl"))
@@ -746,25 +743,82 @@ class Experiment:
                 if r.get("prompt_version", 1) == PROMPT_VERSION and r["task_id"] in self.tasks
                 and (not task_ids or r["task_id"] in task_ids) and (not repo_sizes or r["repo_size"] in repo_sizes)
                 and r.get("repo_hash") == self.repo_hash(r["repo_size"])
-                and not (r["level"] == "L7" and r.get("failed_call_cost") is None)]
+                and not (r["level"] == "L7" and r.get("failed_call_cost") is None)
+                and (thinking is None or bool(r.get("thinking")) == (thinking == "on"))]
         latest = {r["run_id"]: r for r in rows}
         todo = penalty.pending(list(latest.values()), self.runs_dir, penalty.load(out_path), judge, version, sample)
-        work = Path(grading["work_dir"]) / "penalty"
+        return todo, catalogue, version, out_path
+
+    def export_penalty(self, out_dir: Path, judge: str = "agy", **filters) -> int:
+        """cbench grade --mode penalty --export DIR: the patches still to grade, for the agy sidecar on
+        another machine (penalty.export_queue). Returns the number of patches written."""
+        from . import penalty
+        todo, catalogue, version, _ = self._penalty_todo(judge, **filters)
+        hashes = {s: self.repo_hash(s) for s in self.config["repos"]}
+        return penalty.export_queue(todo, self.tasks, hashes, catalogue, version, out_dir)
+
+    def import_penalty(self, replies: list[Path], judge: str = "agy", **filters) -> int:
+        """cbench grade --mode penalty --import FILE: grades from the sidecar's replies (one JSON line per
+        patch: patch_hash, penalties, session, ...), checked as usual (penalty.validate), plus patches
+        that reuse an earlier grade. Returns the number of runs graded."""
+        from . import penalty
+        got = {}
+        for f in replies:
+            for line in f.read_text().splitlines():
+                if line.strip():
+                    d = json.loads(line)
+                    if isinstance(d.get("penalties"), list):
+                        got[d["patch_hash"]] = d
+        todo, catalogue, version, out_path = self._penalty_todo(judge, **filters)
         graded = 0
-        for i, (h, item) in enumerate(sorted(todo.items(), key=lambda kv: kv[1]["rows"][0]["task_id"]), 1):
-            r0 = item["rows"][0]
-            try:
-                n = penalty.grade_patch(self.tasks[r0["task_id"]], r0["repo_size"], item,
-                                        repo=self._path(self.config["repos"][r0["repo_size"]]), catalogue=catalogue,
-                                        version=version, judge=judge, judge_command=judges[judge],
-                                        work_dir=work, out_path=out_path, dry_run=dry_run)
-            except (RuntimeError, subprocess.SubprocessError) as e:
-                print(f"({i}/{len(todo)}) {r0['task_id']} @{r0['repo_size']} {h[:12]}: judge failed, skipped: {e}",
-                      file=sys.stderr)
+        for h, item in sorted(todo.items()):
+            if not item.get("reuse") and h not in got:
                 continue
-            print(f"({i}/{len(todo)}) {r0['task_id']} @{r0['repo_size']} {h[:12]}: {len(item['rows'])} runs"
-                  + (" (earlier grade reused)" if item.get("reuse") else ""), file=sys.stderr)
-            graded += n
+            r0 = item["rows"][0]
+            graded += penalty.grade_patch(self.tasks[r0["task_id"]], r0["repo_size"], item, repo=Path(),
+                                          catalogue=catalogue, version=version, judge=judge, judge_command=None,
+                                          work_dir=Path(), out_path=out_path, reply=got.get(h))
+        return graded
+
+    def grade_penalty(self, judge: str, task_ids: list[str] | None = None, dry_run: bool = False,
+                      repo_sizes: list[str] | None = None, sample: int | None = None,
+                      thinking: str | None = None, jobs: int = 1) -> int:
+        """cbench grade --mode penalty: one judge call per distinct passing patch of the current prompt
+        version on the fixture as it is now (penalty.py); thinking "on"/"off" limits it to one round, jobs
+        runs that many judge calls at once (each patch has its own judge dir). Returns the number of runs
+        graded."""
+        from . import penalty
+        grading = self.config["grading"]
+        judges = grading.get("judges", {})
+        if judge not in judges:
+            raise SystemExit(f"unknown judge {judge!r}; [grading.judges] has: {', '.join(judges) or 'none'}")
+        todo, catalogue, version, out_path = self._penalty_todo(judge, task_ids, repo_sizes, sample, thinking)
+        work = Path(grading["work_dir"]) / "penalty"
+        items = sorted(todo.items(), key=lambda kv: kv[1]["rows"][0]["task_id"])
+
+        def one(h: str, item: dict) -> int:
+            r0 = item["rows"][0]
+            return penalty.grade_patch(self.tasks[r0["task_id"]], r0["repo_size"], item,
+                                       repo=self._path(self.config["repos"][r0["repo_size"]]), catalogue=catalogue,
+                                       version=version, judge=judge, judge_command=judges[judge],
+                                       work_dir=work, out_path=out_path, dry_run=dry_run)
+
+        graded = done = 0
+        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            futures = {pool.submit(one, h, item): (h, item) for h, item in items}
+            for fut in as_completed(futures):
+                h, item = futures[fut]
+                r0 = item["rows"][0]
+                done += 1
+                try:
+                    n = fut.result()
+                except (RuntimeError, subprocess.SubprocessError) as e:
+                    print(f"({done}/{len(items)}) {r0['task_id']} @{r0['repo_size']} {h[:12]}: judge failed, skipped: {e}",
+                          file=sys.stderr, flush=True)
+                    continue
+                print(f"({done}/{len(items)}) {r0['task_id']} @{r0['repo_size']} {h[:12]}: {len(item['rows'])} runs"
+                      + (" (earlier grade reused)" if item.get("reuse") else ""), file=sys.stderr, flush=True)
+                graded += n
         return graded
 
     def badges(self, results_dir: Path | None = None) -> int:

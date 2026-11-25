@@ -195,6 +195,10 @@ sandbox, a session-only read-only command allow-list) since 2026-11-22, the Clau
 Penalty grading (from the v4 round, `docs/penalty-grading-design.md`): `cbench grade --mode penalty
 --judge agy|claude`, one call per distinct passing patch, catalogue `grading/penalties.md`; the harness
 keeps a penalty only if its code is known and its quote is a changed line; `results/penalties.jsonl`.
+agy sidecar (2026-11-24): `--export DIR` writes the patches still to grade (no run ids);
+`scripts/agy_sidecar.py DIR` grades them on the Antigravity host through `agy acp`, one conversation per
+task@repo (patch.diff rewritten per turn), a read-only guard on every tool call, neutral steers, parking
+with the conversation id; `--import DIR/results.jsonl` validates and records them.
 
 ## Retrieval
 Everything goes through the `Retriever` protocol (`context_bench/retrieval/base.py`). Reference

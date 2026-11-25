@@ -1,0 +1,82 @@
+--- /dev/null
++++ b/shopkit/support/refund_info.py
+@@ -0,0 +1,79 @@
++from __future__ import annotations
++
++from datetime import date
++
++from shopkit.errors import ShopError
++from shopkit.payments.models import CAPTURED, Payment
++from shopkit.payments.refunds import RefundTooLarge
++from shopkit.payments.settlement import CARD_REFUND_MAX_AGE_DAYS
++from shopkit.utils.dates import utc_now
++
++__all__ = ["plan_refund_split", "refund_destinations"]
++
++
++def plan_refund_split(order_id: str, amount_cents: int, payments: list[Payment],
++                      today: date | None = None) -> list[tuple[Payment, int, str]]:
++    """Preview of settle_refund's plan: for each captured payment of the order, the cents it would
++    absorb and the destination those cents would go to ("card", "store_credit" or "gift_card").
++
++    Applies the same rules as shopkit.payments.settlement.settle_refund: the amount is split across
++    captured payments in proportion to what is still refundable on each, with the leftover cents
++    going to card payments first; a gift card payment comes back as a gift card, a card payment
++    older than CARD_REFUND_MAX_AGE_DAYS as store credit, a younger one back to the card.
++    Nothing is refunded: no payment is modified and no provider is called.
++
++    Raises ShopError if the amount is not positive or the order has no captured payment, and
++    RefundTooLarge if it exceeds what is still refundable.
++    """
++    if amount_cents <= 0:
++        raise ShopError("refund amount must be positive", order_id=order_id)
++    captured = [p for p in payments if p.order_id == order_id and p.status == CAPTURED]
++    if not captured:
++        raise ShopError(f"order {order_id} has no captured payment", order_id=order_id)
++    refundable = sum(p.refundable_cents for p in captured)
++    if amount_cents > refundable:
++        raise RefundTooLarge(
++            f"refund {amount_cents} exceeds refundable {refundable}",
++            order_id=order_id, requested=amount_cents, refundable=refundable)
++    today = today or utc_now().date()
++    # cards first, so leftover cents land on cards, never on gift cards
++    ordered = sorted(captured, key=lambda p: (p.method == "gift_card", p.created))
++    weights = [p.refundable_cents for p in ordered]
++    total_weight = sum(weights)
++    # > 0, each captured payment refundable_cents >= 0 and sum > 0
++    shares = [amount_cents * w // total_weight for w in weights]
++    leftover = amount_cents - sum(shares)
++    for i, p in enumerate(ordered):
++        if leftover <= 0:
++            break
++        room = p.refundable_cents - shares[i]
++        give = min(room, leftover)
++        shares[i] += give
++        leftover -= give
++    plan: list[tuple[Payment, int, str]] = []
++    for p, share in zip(ordered, shares):
++        if share <= 0:
++            continue
++        if p.method == "gift_card":
++            plan.append((p, share, "gift_card"))
++        elif (today - p.created.date()).days > CARD_REFUND_MAX_AGE_DAYS:
++            plan.append((p, share, "store_credit"))
++        else:
++            plan.append((p, share, "card"))
++    return plan
++
++
++def refund_destinations(order_id: str, amount_cents: int, payments: list[Payment],
++                        today: date | None = None) -> dict[str, int]:
++    """How a refund of ``amount_cents`` for ``order_id`` would be settled, without settling it.
++
++    Returns {"card": ..., "store_credit": ..., "gift_card": ...} with the cents that would go back
++    to the card, to store credit on the customer's account and to a gift card, split exactly the
++    way settle_refund settles a refund of that amount for that order (see plan_refund_split).
++    Nothing is refunded: payments are not modified, no provider is called and no ledger state
++    changes.
++    """
++    totals = {"card": 0, "store_credit": 0, "gift_card": 0}
++    for _payment, cents, dest in plan_refund_split(order_id, amount_cents, payments, today):
++        totals[dest] += cents
++    return totals

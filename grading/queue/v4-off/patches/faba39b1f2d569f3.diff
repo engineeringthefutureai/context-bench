@@ -1,0 +1,111 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,108 @@
++"""Preview how much a discount code would save on a cart, before the shopper applies it.
++
++The calculation is the same one price_cart uses: unit prices come from the pricing engine
++(sales, price lists, floor), items that are already on sale are excluded from percentage
++coupons but still count towards the coupon's minimum order value, and fixed-amount coupons
++never discount more than the eligible subtotal.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from datetime import datetime
++
++from shopkit.catalog.models import Product
++from shopkit.config import SETTINGS
++from shopkit.core.pricing import parseCouponCode
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import GIFT_CARD_TAX_CLASS, CartItem
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import PERCENT, Coupon, coupon_is_active, normalize_code
++from shopkit.tax.rates import STANDARD
++from shopkit.utils.numbers import apply_rate
++
++
++@dataclass
++class _Line:
++    """The fields of a priced cart line the coupon calculation reads."""
++    sku: str
++    qty: int
++    unit_cents: int
++    on_sale: bool = False
++    discount_cents: int = 0
++    tax_class: str = STANDARD
++    notes: list[str] = field(default_factory=list)
++
++    @property
++    def subtotal_cents(self) -> int:
++        return self.unit_cents * self.qty
++
++
++def coupon_savings(items: list[CartItem], products: dict[str, Product], code: str,
++                   coupons: dict[str, Coupon], engine: PricingEngine, ship_to: Address,
++                   weight_g: int, at: datetime) -> int:
++    """Saving in cents that code would give on this cart, exactly as price_cart computes it.
++
++    Returns 0 when the code wouldn't apply (unknown, expired, used up, or the cart doesn't
++    meet the coupon's minimum order value).
++    """
++    currency = SETTINGS.default_currency
++    lines = _price_lines(items, products, engine, currency, at)
++    if not lines:
++        return 0
++
++    if not code:
++        return 0
++    code = normalize_code(code)
++    coupon = coupons.get(code)
++    printed_pct = None
++    if coupon is None:
++        # printed coupon codes (SAVEnn-YYYY-XXXX) are honoured as percentage coupons with the
++        # same exclusions and no minimum
++        printed_pct = parseCouponCode(code)
++        if printed_pct:
++            coupon = Coupon(code, PERCENT, printed_pct, at.date(), at.date())
++    if coupon is None:
++        return 0
++
++    not_gift = [l for l in lines if l.tax_class != GIFT_CARD_TAX_CLASS]
++    basket = sum(l.subtotal_cents - l.discount_cents for l in not_gift)          # counts sale items
++    if coupon.kind == PERCENT:
++        eligible = [l for l in not_gift if not l.on_sale]
++    else:
++        eligible = not_gift
++    eligible_base = sum(l.subtotal_cents - l.discount_cents for l in eligible)
++
++    # the rejections: the cart page would show a message and price the cart without the coupon
++    if not coupon_is_active(coupon, at.date()):
++        return 0
++    if printed_pct is None and basket < coupon.min_order_cents:
++        return 0
++
++    if coupon.kind == PERCENT:
++        return apply_rate(eligible_base, coupon.value)
++    return min(coupon.value, eligible_base)
++
++
++def _price_lines(items: list[CartItem], products: dict[str, Product], engine: PricingEngine,
++                 currency: str, at: datetime) -> list[_Line]:
++    """Priced, purchasable lines of the cart, unit for unit with price_cart's line pricing."""
++    merged: dict[str, CartItem] = {}
++    for it in items:
++        if it.sku in merged:
++            merged[it.sku].qty += it.qty
++        else:
++            merged[it.sku] = CartItem(it.sku, it.qty, it.added_unit_cents, it.gift_card)
++    lines: list[_Line] = []
++    for it in merged.values():
++        if it.qty < 1:
++            continue
++        product = products.get(it.sku)
++        if product is None or not product.is_purchasable():
++            continue
++        if it.gift_card:
++            lines.append(_Line(it.sku, it.qty, product.price_cents, tax_class=GIFT_CARD_TAX_CLASS))
++            continue
++        point = engine.price(product, it.qty, currency=currency, at=at)
++        lines.append(_Line(it.sku, it.qty, point.unit_cents, point.compare_at_cents is not None,
++                           tax_class=STANDARD))
++    return lines

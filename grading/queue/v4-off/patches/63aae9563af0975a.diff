@@ -1,0 +1,76 @@
+--- /dev/null
++++ b/migrations/0025_order_delivery_note.sql
+@@ -0,0 +1,2 @@
++-- requires: 0011
++ALTER TABLE orders ADD COLUMN delivery_note TEXT NOT NULL DEFAULT '';
+--- a/shopkit/api/serializers.py
++++ b/shopkit/api/serializers.py
+@@ -22,6 +22,7 @@
+         "lines": [{"sku": l.sku, "qty": l.qty, "unit": money(l.unit_cents, o.currency),
+                    "total": money(l.total_cents, o.currency)} for l in o.lines],
+         "total": money(o.total_cents, o.currency),
++        "delivery_note": o.delivery_note,
+     }
+ 
+ 
+--- a/shopkit/db/repositories.py
++++ b/shopkit/db/repositories.py
+@@ -116,19 +116,19 @@
+             self.db.execute(*insert("orders", {
+                 "id": order.id, "customer_id": customer_id, "currency": order.currency, "status": status,
+                 "created_at": (created_at or utc_now()).isoformat(), "subtotal_cents": order.total_cents,
+-                "total_cents": order.total_cents, "channel": channel}))
++                "total_cents": order.total_cents, "channel": channel, "delivery_note": order.delivery_note}))
+             for no, line in enumerate(order.lines, 1):
+                 self.db.execute(*insert("order_lines", {"order_id": order.id, "line_no": no, "sku": line.sku,
+                                                         "qty": line.qty, "unit_cents": line.unit_cents}))
+             self._history(order.id, status)
+ 
+     def get(self, order_id: str) -> Order:
+-        head = self.db.query_one("SELECT id, currency FROM orders WHERE id = ?", (order_id,))
++        head = self.db.query_one("SELECT id, currency, delivery_note FROM orders WHERE id = ?", (order_id,))
+         if head is None:
+             raise OrderNotFound(f"no order {order_id}", order_id=order_id)
+         lines = self.db.query("SELECT sku, qty, unit_cents FROM order_lines WHERE order_id = ? ORDER BY line_no",
+                               (order_id,))
+-        return Order(id=head["id"], currency=head["currency"],
++        return Order(id=head["id"], currency=head["currency"], delivery_note=head["delivery_note"],
+                      lines=[OrderLine(r["sku"], r["qty"], r["unit_cents"]) for r in lines])
+ 
+     def status(self, order_id: str) -> str:
+--- a/shopkit/orders/models.py
++++ b/shopkit/orders/models.py
+@@ -1,4 +1,7 @@
+ from dataclasses import dataclass, field
++
++
++MAX_DELIVERY_NOTE_LEN = 200
+ 
+ 
+ @dataclass
+@@ -17,6 +20,11 @@
+     id: str
+     lines: list[OrderLine] = field(default_factory=list)
+     currency: str = "USD"
++    delivery_note: str = ""
++
++    def __post_init__(self):
++        if len(self.delivery_note) > MAX_DELIVERY_NOTE_LEN:
++            raise ValueError(f"delivery_note must be at most {MAX_DELIVERY_NOTE_LEN} characters")
+ 
+     @property
+     def total_cents(self) -> int:
+--- a/templates/orders/detail.html
++++ b/templates/orders/detail.html
+@@ -11,6 +11,11 @@
+   {% if ship_to %}
+   <h2>Shipping to</h2>
+   {% include "partials/address.html" %}
++  {% endif %}
++
++  {% if order.delivery_note %}
++  <h2>Delivery note</h2>
++  <p class="delivery-note">{{ order.delivery_note }}</p>
+   {% endif %}
+ 
+   {% if tracking %}

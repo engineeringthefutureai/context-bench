@@ -1,0 +1,72 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,69 @@
++"""Coupon preview: how much a code would save on the current cart, before it is applied.
++
++The number must match what the cart page (price_cart) shows for the same coupon on the same
++items, so line prices come from the same engine and the coupon step below is the cart's own:
++percentage coupons skip items already on sale and gift cards (sale items still count towards
++the minimum), fixed coupons apply to the whole eligible subtotal and never exceed it, printed
++codes (SAVEnn-YYYY-XXXX) are honoured as percentage coupons with no minimum, and anything that
++wouldn't apply (unknown, inactive, below the minimum) is a 0 saving."""
++from __future__ import annotations
++
++from datetime import datetime
++
++from shopkit.catalog.models import Product
++from shopkit.core.pricing import parseCouponCode
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import GIFT_CARD_TAX_CLASS, price_cart
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import (
++    PERCENT,
++    Coupon,
++    CouponRejected,
++    coupon_is_active,
++    normalize_code,
++)
++from shopkit.utils.numbers import apply_rate
++
++
++def coupon_savings(items, products: dict[str, Product], code: str | None,
++                   coupons: dict[str, Coupon] | None, engine: PricingEngine,
++                   ship_to: Address, weight_g: int, at: datetime) -> int:
++    """Saving in cents that ``code`` would give on ``items``, exactly as the cart page would
++    price it; 0 when the code wouldn't apply. ``items`` and ``coupons`` may be empty; ``code``
++    may be None."""
++    # Same defaults as the cart page (standard tier, no member pricing, no auto promotions) so
++    # the lines here are the lines the shopper is looking at.
++    cart = price_cart(items, products, engine=engine, ship_to=ship_to, weight_g=weight_g, at=at,
++                      coupons=coupons)
++    if not code or not cart.lines:
++        return 0
++    code = normalize_code(code)
++    coupon = (coupons or {}).get(code)
++    printed_pct = None
++    if coupon is None:
++        printed_pct = parseCouponCode(code)
++        if printed_pct:
++            coupon = Coupon(code, PERCENT, printed_pct, at.date(), at.date())
++    if coupon is None:
++        return 0
++    try:
++        if not coupon_is_active(coupon, at.date()):
++            raise CouponRejected(f"coupon {coupon.code} is not active", code=coupon.code)
++        # The cart's coupon step (cart.price_cart), kept in lockstep: the minimum counts the
++        # whole non-gift-card basket including sale items, but a percentage coupon only
++        # discounts what is not on sale; a fixed coupon caps at the eligible subtotal.
++        not_gift = [l for l in cart.lines if l.tax_class != GIFT_CARD_TAX_CLASS]
++        basket = sum(l.subtotal_cents - l.discount_cents for l in not_gift)
++        if coupon.kind == PERCENT:
++            eligible = [l for l in not_gift if not l.on_sale]
++        else:
++            eligible = not_gift
++        eligible_base = sum(l.subtotal_cents - l.discount_cents for l in eligible)
++        if printed_pct is None and basket < coupon.min_order_cents:
++            raise CouponRejected(f"coupon {coupon.code} needs a larger order", code=coupon.code,
++                                 min_order_cents=coupon.min_order_cents)
++        if coupon.kind == PERCENT:
++            return apply_rate(eligible_base, coupon.value)
++        return min(coupon.value, eligible_base)
++    except CouponRejected:
++        return 0

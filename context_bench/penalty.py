@@ -21,12 +21,14 @@ import random
 import re
 import shutil
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 POINTS = {"scope": -10, "reimplemented": -10, "convention": -5, "api": -15, "wrong_untested": -15, "risk": -20}
 CODE_CAP = {"convention": -10}
 TOTAL_CAP = -40
+_WRITE = threading.Lock()     # judge calls may run in parallel (--jobs); one patch's lines go out together
 JUDGE_PROMPT = ("Follow PENALTIES.md in the current directory: read task.md and patch.diff, look at repo/ "
                 "as needed, and reply with the JSON it asks for, nothing else.")
 
@@ -77,12 +79,25 @@ def validate(raw: list, patch: str) -> tuple[list[dict], list[dict], int]:
 
 
 def parse_reply(text: str) -> list:
-    """The judge's penalty list (a ```json fence is tolerated). Raises ValueError on anything else."""
+    """The judge's penalty list. Tolerated: a ```json fence, and status text before the JSON object (agy
+    prints lines such as "Waiting for codebase exploration to finish."); the last object with a
+    penalties list wins. Raises ValueError on anything else."""
     m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.S)
-    data = json.loads(m.group(1) if m else text.strip())
-    if not isinstance(data, dict) or not isinstance(data.get("penalties"), list):
-        raise ValueError("reply has no penalties list")
-    return data["penalties"]
+    body = m.group(1) if m else text.strip()
+    candidates = []
+    try:
+        candidates.append(json.loads(body))
+    except ValueError:
+        dec = json.JSONDecoder()
+        for i in (k for k, ch in enumerate(body) if ch == "{"):
+            try:
+                candidates.append(dec.raw_decode(body, i)[0])
+            except ValueError:
+                continue
+    for data in reversed(candidates):
+        if isinstance(data, dict) and isinstance(data.get("penalties"), list):
+            return data["penalties"]
+    raise ValueError("reply has no penalties list")
 
 
 def write_judge_dir(task_prompt: str, repo: Path, patch: str, catalogue: Path, dst: Path) -> Path:
@@ -149,11 +164,17 @@ def pending(rows: list[dict], runs_dir: Path, done: dict[str, dict], judge: str,
 
 
 def grade_patch(task, size: str, item: dict, *, repo: Path, catalogue: Path, version: str, judge: str,
-                judge_command: list[str], work_dir: Path, out_path: Path, dry_run: bool = False) -> int:
+                judge_command: list[str] | None, work_dir: Path, out_path: Path, dry_run: bool = False,
+                reply: dict | None = None) -> int:
     """Grade one distinct patch (or reuse its earlier grade) and append one line per run. Returns the
-    number of runs graded (0 on dry run)."""
+    number of runs graded (0 on dry run). reply: a judge reply collected elsewhere (the agy sidecar,
+    scripts/agy_sidecar.py), {"penalties": [...], "session": ..., ...}; no judge call then."""
     h = patch_hash(item["patch"])
-    if item.get("reuse"):
+    extra = {}
+    if reply is not None and not item.get("reuse"):
+        accepted, dropped, points = validate(reply["penalties"], item["patch"])
+        extra = {k: reply[k] for k in ("session", "model", "usage", "steers") if k in reply}
+    elif item.get("reuse"):
         prev = item["reuse"]
         accepted, dropped, points = prev["penalties"], prev["dropped"], prev["points"]
     else:
@@ -163,12 +184,41 @@ def grade_patch(task, size: str, item: dict, *, repo: Path, catalogue: Path, ver
         accepted, dropped, points = validate(run_judge(dst, judge_command), item["patch"])
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("a") as f:
+    with _WRITE, out_path.open("a") as f:
         for r in item["rows"]:
             f.write(json.dumps({"run_id": r["run_id"], "task_id": task.id, "repo_size": size, "patch_hash": h,
                                 "judge": judge, "catalogue_version": version, "penalties": accepted,
-                                "dropped": dropped, "points": points, "graded_at": now}) + "\n")
+                                "dropped": dropped, "points": points, "graded_at": now, **extra}) + "\n")
     return len(item["rows"])
+
+
+def export_queue(items: dict[str, dict], tasks: dict, repo_hashes: dict[str, str], catalogue: Path,
+                 version: str, out_dir: Path) -> int:
+    """Write the patches still to grade for the agy sidecar (scripts/agy_sidecar.py), which runs on
+    another machine from a checkout of this repository:
+        manifest.jsonl     one line per patch: id, task, repo_size, repo_hash, patch_hash
+        patches/<id>.diff  the change
+        tasks/<task>.md    the task text as the models saw it
+        PENALTIES.md       the catalogue
+    Like a judge dir, nothing here says how a patch was made: run ids stay on this machine and the
+    patch hash maps the reply back on import. Patches with an earlier grade are left out (they are reused
+    on import). Returns the number of patches written."""
+    (out_dir / "patches").mkdir(parents=True, exist_ok=True)
+    (out_dir / "tasks").mkdir(exist_ok=True)
+    shutil.copyfile(catalogue, out_dir / "PENALTIES.md")
+    lines = []
+    for h, item in sorted(items.items(), key=lambda kv: (kv[1]["rows"][0]["task_id"], kv[1]["rows"][0]["repo_size"], kv[0])):
+        if item.get("reuse"):
+            continue
+        r0 = item["rows"][0]
+        task = tasks[r0["task_id"]]
+        (out_dir / "patches" / f"{h[:16]}.diff").write_text(item["patch"])
+        (out_dir / "tasks" / f"{task.id}.md").write_text(task.prompt.strip() + "\n")
+        lines.append(json.dumps({"id": h[:16], "task": task.id, "repo_size": r0["repo_size"],
+                                 "repo_hash": repo_hashes[r0["repo_size"]], "patch_hash": h,
+                                 "catalogue_version": version}))
+    (out_dir / "manifest.jsonl").write_text("".join(l + "\n" for l in lines))
+    return len(lines)
 
 
 def hard_pass(r: dict) -> bool:

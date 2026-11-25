@@ -1,0 +1,109 @@
+--- a/shopkit/orders/fulfillment.py
++++ b/shopkit/orders/fulfillment.py
+@@ -1,42 +1,27 @@
+-"""Picking and packing. Builds pick lists for the warehouse and splits orders into parcels."""
++"""Fulfillment of orders into parcels ready for the carrier."""
+ from dataclasses import dataclass, field
+ 
+-from shopkit.orders.models import Order
+-from shopkit.shipping.packaging import format_weight
+-from shopkit.utils.collections import chunked, group_by
+-
+-MAX_ITEMS_PER_PARCEL = 10
++from shopkit.shipping.packaging import weight_line
+ 
+ 
+-@dataclass
++@dataclass(frozen=True)
++class Item:
++    sku: str
++    qty: int
++
++
++@dataclass(frozen=True)
+ class Parcel:
+     order_id: str
+     number: int
+-    items: list[tuple[str, int]] = field(default_factory=list)    # (sku, qty)
+-
+-    @property
+-    def item_count(self) -> int:
+-        return sum(q for _, q in self.items)
++    items: tuple[tuple[str, int], ...] = field(default_factory=tuple)
++    weight_g: int | None = None
+ 
+ 
+-def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+-    """Total quantity per SKU across orders, sorted by SKU (the order pickers walk the aisles)."""
+-    by_sku = group_by((line for o in orders for line in o.lines), key=lambda l: l.sku)
+-    return sorted((sku, sum(l.qty for l in lines)) for sku, lines in by_sku.items())
+-
+-
+-def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+-    """One unit per slot, at most `max_items` units per parcel, lines kept together where possible."""
+-    units = [line.sku for line in order.lines for _ in range(line.qty)]
+-    parcels = []
+-    for n, batch in enumerate(chunked(units, max_items), start=1):
+-        counts = group_by(batch, key=lambda s: s)
+-        parcels.append(Parcel(order.id, n, [(sku, len(v)) for sku, v in counts.items()]))
+-    return parcels
+-
+-
+-def packing_slip(parcel: Parcel, weight_g: int) -> str:
+-    """Slip packed inside each parcel: order, parcel number, contents and weight."""
+-    lines = [f"Order {parcel.order_id} - parcel {parcel.number}", f"Weight: {format_weight(weight_g)}"]
++def packing_slip(parcel: Parcel, chargeable_weight_g: int | None = None) -> str:
++    lines = [f"Order {parcel.order_id} - parcel {parcel.number}"]
++    weight = chargeable_weight_g if chargeable_weight_g is not None else parcel.weight_g
++    if weight is not None:
++        lines.append(weight_line(weight))
+     lines += [f"  {qty} x {sku}" for sku, qty in parcel.items]
+     return "\n".join(lines)
+--- a/shopkit/shipping/labels.py
++++ b/shopkit/shipping/labels.py
+@@ -2,6 +2,7 @@
+ from shopkit.customers.addresses import format_address
+ from shopkit.customers.models import Address
+ from shopkit.orders.fulfillment import Parcel
++from shopkit.shipping.packaging import weight_line
+ 
+ 
+ def label_code(sku: str) -> str:
+@@ -9,7 +10,10 @@
+     return sku.replace(" ", "").replace("-", "").upper()
+ 
+ 
+-def label_text(parcel: Parcel, to: Address, parcels_total: int) -> str:
++def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+     lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
++    if weight_g is not None:
++        unit = "lb" if to.country == "US" else "kg"
++        lines.append(weight_line(weight_g, unit))
+     lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+     return "\n".join(lines)
+--- a/shopkit/shipping/packaging.py
++++ b/shopkit/shipping/packaging.py
+@@ -2,6 +2,8 @@
+ from dataclasses import dataclass
+ 
+ VOLUMETRIC_DIVISOR = 5000          # cm^3 per kg, the common courier convention
++
++_LB_PER_KG = 2.20462               # avoirdupois pounds per kilogram, for US labels
+ 
+ 
+ @dataclass(frozen=True)
+@@ -33,7 +35,14 @@
+     (1500 -> "3.31 lb")."""
+     if unit == "g":
+         return f"{grams} g"
++    if unit == "lb":
++        return f"{grams / 1000 * _LB_PER_KG:.2f} lb"
+     return f"{round(grams / 1000, 2):g} kg"
++
++
++def weight_line(grams: int, unit: str = "kg") -> str:
++    """The "Weight: ..." line shared by packing slips and shipping labels."""
++    return f"Weight: {format_weight(grams, unit)}"
+ 
+ 
+ def chargeable_weight_g(box: Box, contents_g: int) -> int:

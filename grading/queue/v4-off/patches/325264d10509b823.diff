@@ -1,0 +1,57 @@
+--- a/shopkit/inventory/transfers.py
++++ b/shopkit/inventory/transfers.py
+@@ -3,6 +3,7 @@
+ from datetime import datetime
+ 
+ from shopkit.errors import Conflict
++from shopkit.events import BUS, EventBus
+ from shopkit.inventory.warehouses import Network
+ from shopkit.utils.dates import utc_now
+ 
+@@ -20,7 +21,8 @@
+     at: datetime = field(default_factory=utc_now)
+ 
+ 
+-def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
++def transfer(network: Network, sku: str, qty: int, source: str, destination: str,
++             bus: EventBus = BUS) -> Transfer:
+     if qty < 1:
+         raise ValueError("qty must be >= 1")
+     src = network.get(source)
+@@ -30,4 +32,7 @@
+     # Stock has no public removal API; transfers adjust the ledger directly.
+     src.stock._on_hand[sku] -= qty
+     network.get(destination).stock.receive(sku, qty)
+-    return Transfer(sku, qty, source, destination)
++    t = Transfer(sku, qty, source, destination)
++    bus.publish("stock.transfer", sku=sku, qty=qty, source=source, destination=destination,
++                at=t.at)
++    return t
+--- a/shopkit/notifications/subscribers.py
++++ b/shopkit/notifications/subscribers.py
+@@ -14,6 +14,7 @@
+     def attach(self, bus: EventBus) -> None:
+         bus.subscribe("order.paid", self.on_paid)
+         bus.subscribe("stock.low", self.on_low_stock)
++        bus.subscribe("stock.transfer", self.on_transfer)
+ 
+     def on_paid(self, event: Event) -> None:
+         email, first_name = self._email_for(event.payload["order_id"])
+@@ -24,3 +25,8 @@
+     def on_low_stock(self, event: Event) -> None:
+         self.outbox.send(STAFF_EMAIL, "low_stock", sku=event.payload["sku"],
+                          available=event.payload["available"])
++
++    def on_transfer(self, event: Event) -> None:
++        p = event.payload
++        self.outbox.send(STAFF_EMAIL, "stock_transfer", sku=p["sku"], qty=p["qty"],
++                         source=p["source"], destination=p["destination"])
+--- a/shopkit/notifications/templates.py
++++ b/shopkit/notifications/templates.py
+@@ -29,4 +29,6 @@
+                 "Hi {{ first_name }},\n\nYour order shipped with {{ carrier }}. "
+                 "Track it here: {{ tracking_url }}"),
+     "low_stock": ("Low stock: {{ sku }}", "{{ sku }} is down to {{ available }} units."),
++    "stock_transfer": ("Stock transfer: {{ qty }} x {{ sku }}",
++                       "Moved {{ qty }} x {{ sku }} from {{ source }} to {{ destination }}."),
+ }

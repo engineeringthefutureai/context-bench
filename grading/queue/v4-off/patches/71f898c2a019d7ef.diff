@@ -1,0 +1,87 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,84 @@
++"""Preview the saving a coupon code would give on a cart without applying it."""
++from __future__ import annotations
++
++from datetime import datetime
++
++from shopkit.catalog.models import Product
++from shopkit.config import SETTINGS
++from shopkit.core.pricing import parseCouponCode
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import GIFT_CARD_TAX_CLASS, CartItem, PricedLine
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import FIXED, PERCENT, Coupon, CouponRejected, coupon_is_active, normalize_code
++from shopkit.utils.numbers import apply_rate
++
++
++def coupon_savings(items: list[CartItem], products: dict[str, Product], code: str | None,
++                   coupons: dict[str, Coupon], engine: PricingEngine, ship_to: Address,
++                   weight_g: int, at: datetime, tier: str = "standard", member: bool = False) -> int:
++    """Return the saving in cents that `code` would give on this cart, calculated exactly as the
++    cart page calculates it. Returns 0 when the code wouldn't apply (unknown, expired, below
++    minimum, no eligible items)."""
++    if not code:
++        return 0
++    code = normalize_code(code)
++    coupon = (coupons or {}).get(code)
++    printed_pct = None
++    if coupon is None:
++        printed_pct = parseCouponCode(code)
++        if printed_pct:
++            coupon = Coupon(code, PERCENT, printed_pct, at.date(), at.date())
++    if coupon is None:
++        return 0
++    if not coupon_is_active(coupon, at.date()):
++        return 0
++
++    # Price the cart lines the same way price_cart does, to know unit prices and on-sale status
++    lines: list[PricedLine] = []
++    for it in items:
++        if it.qty < 1:
++            continue
++        product = products.get(it.sku)
++        if product is None or not product.is_purchasable():
++            continue
++        if it.gift_card:
++            lines.append(PricedLine(it.sku, it.qty, product.price_cents, product.price_cents,
++                                    "gift_card", False, tax_class=GIFT_CARD_TAX_CLASS))
++        else:
++            point = engine.price(product, it.qty, currency=engine.settings.default_currency,
++                                 tier=tier, at=at)
++            unit, source = point.unit_cents, point.source
++            on_sale = point.compare_at_cents is not None
++            if member:
++                from shopkit.pricing.cart import MEMBER_PRICE_LIST_TIER
++                try:
++                    member_point = engine.price(product, it.qty,
++                                                currency=engine.settings.default_currency,
++                                                tier=MEMBER_PRICE_LIST_TIER, at=at)
++                    if member_point.source.startswith("list:") and member_point.unit_cents < unit:
++                        unit, source = member_point.unit_cents, member_point.source
++                        on_sale = False
++                except Exception:
++                    pass
++            lines.append(PricedLine(it.sku, it.qty, unit, 0, source, on_sale))
++
++    if not lines:
++        return 0
++
++    # Calculate the coupon discount exactly as price_cart does
++    not_gift = [l for l in lines if l.tax_class != GIFT_CARD_TAX_CLASS]
++    basket = sum(l.subtotal_cents - l.discount_cents for l in not_gift)
++    if coupon.kind == PERCENT:
++        eligible = [l for l in not_gift if not l.on_sale]
++    else:
++        eligible = not_gift
++    eligible_base = sum(l.subtotal_cents - l.discount_cents for l in eligible)
++
++    if printed_pct is None and basket < coupon.min_order_cents:
++        return 0
++
++    if coupon.kind == PERCENT:
++        total_off = apply_rate(eligible_base, coupon.value)
++    else:
++        total_off = min(coupon.value, eligible_base)
++    return total_off
