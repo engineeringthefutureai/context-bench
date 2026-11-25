@@ -13,7 +13,7 @@ unreachable (`agentapi new-conversation` prints {"response": {"newConversation":
 
 For every task@repo group it builds one judge dir in .cache/cbench-judge (gitignored; inside the
 workspace, so agy doesn't ask about each step there) with repo/ copied from fixtures/,
-task.md, PENALTIES.md) and starts one conversation (`agentapi new-conversation`). Each patch of the group
+task.md and PENALTIES.md, and starts one conversation (`agentapi new-conversation`). Each patch of the group
 is one message: patch.diff is rewritten first, so only the current change is ever in the dir, and the
 grader writes its JSON reply to verdicts/<id>.json in that dir, which this script waits for. The next
 patch goes to the same conversation (`agentapi send-message`), so the repository is read once per
