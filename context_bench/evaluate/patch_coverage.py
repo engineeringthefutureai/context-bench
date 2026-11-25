@@ -56,16 +56,20 @@ def changed_statements(before: dict[str, str | None], files: dict[str, str]) -> 
     return out
 
 
-def run_hidden_traced(sandbox: Path, tests_dir: Path, shared_dir: Path, timeout: int = 180) -> dict[str, set[int]]:
+def run_hidden_traced(sandbox: Path, tests_dir: Path, shared_dir: Path, timeout: int = 180) -> dict[str, set[int]] | None:
     """Run every hidden test (correctness and reuse) once, recording executed lines under the sandbox:
-    realpath -> line numbers. Empty if the run failed to produce a trace."""
+    realpath -> line numbers. None if the run produced no trace (e.g. the tracer plugin didn't load)."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "trace.json"
-        env = {"CBENCH_TRACE_ROOT": str(sandbox), "CBENCH_TRACE_OUT": str(out)}
+        # the tracer plugin is context_bench.evaluate._linetrace: make it importable without an install
+        # (the sandbox stays first on the path, so nothing here shadows the fixture's own modules)
+        pkg_root = str(Path(__file__).resolve().parents[2])
+        env = {"CBENCH_TRACE_ROOT": str(sandbox), "CBENCH_TRACE_OUT": str(out),
+               "PYTHONPATH": os.pathsep.join([str(sandbox), str(shared_dir), pkg_root])}
         _pytest(sandbox, shared_dir, timeout, ["-p", "context_bench.evaluate._linetrace", str(tests_dir)],
                 extra_env=env)
         if not out.exists():
-            return {}
+            return None
         return {k: set(v) for k, v in json.loads(out.read_text()).items()}
 
 
@@ -78,6 +82,8 @@ def patch_coverage(sandbox: Path, tests_dir: Path, shared_dir: Path, before: dic
     if not total:
         return {"patch_stmts": 0, "patch_stmts_covered": 0, "patch_coverage": None}
     hits = run_hidden_traced(sandbox, tests_dir, shared_dir)
+    if hits is None:                 # no trace: unknown, never a silent 0% coverage
+        return {"patch_stmts": total, "patch_stmts_covered": None, "patch_coverage": None}
     root = os.path.realpath(sandbox)
     covered = sum(len(lines & hits.get(os.path.join(root, rel), set())) for rel, lines in changed.items())
     return {"patch_stmts": total, "patch_stmts_covered": covered, "patch_coverage": round(covered / total, 3)}

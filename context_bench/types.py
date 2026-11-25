@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7"]
+Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
 Label = Literal["ok", "broken", "tool_error", "no_fit"]
 Category = Literal["reuse", "cross_file", "convention", "control", "trap", "long"]   # long: a rule buried in a long function (repo L)
 

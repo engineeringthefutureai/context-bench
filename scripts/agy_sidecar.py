@@ -109,7 +109,8 @@ def check_command(cmd: str, ws: Path) -> str | None:
             return f"command not on the read-only list: {words[0]}"
         if words[0] == "sed" and any(w.startswith("-i") or w == "--in-place" for w in words[1:]):
             return "sed -i"
-        if words[0] == "find" and any(w in ("-delete", "-exec", "-execdir", "-fprint") for w in words):
+        if words[0] == "find" and any(w in ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+                                                      "-fprint", "-fprint0", "-fprintf", "-fls") for w in words):
             return f"find with {cmd[:120]}"
         for w in words[1:]:
             if _outside(w, ws):
@@ -213,6 +214,8 @@ class Session:
         if model and model != self.model:
             agent.call("session/set_model", {"sessionId": self.id, "modelId": model}, timeout=60)
             self.model = model
+        if agent.log:                          # the previous conversation's log (rotation, parking)
+            agent.log.close()
         agent.log = (agent.log_dir / f"{self.id}.ndjson").open("a")
 
     def turn(self, text: str, timeout: float) -> dict:
