@@ -11,7 +11,8 @@ unreachable (`agentapi new-conversation` prints {"response": {"newConversation":
     python3 scripts/agy_grader.py grading/queue/v4-off                                     # from agy, after pull
     cbench grade --mode penalty --judge agy --import grading/queue/v4-off/results.jsonl    # here, after pull
 
-For every task@repo group it builds one judge dir outside the checkout (repo/ copied from fixtures/,
+For every task@repo group it builds one judge dir in .cache/cbench-judge (gitignored; inside the
+workspace, so agy doesn't ask about each step there) with repo/ copied from fixtures/,
 task.md, PENALTIES.md) and starts one conversation (`agentapi new-conversation`). Each patch of the group
 is one message: patch.diff is rewritten first, so only the current change is ever in the dir, and the
 grader writes its JSON reply to verdicts/<id>.json in that dir, which this script waits for. The next
@@ -214,8 +215,9 @@ def grade_group(group: str, items: list[dict], args, queue: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("queue", type=Path, help="a dir written by cbench grade --mode penalty --export")
-    ap.add_argument("--work-dir", default=os.environ.get("ANTIGRAVITY_EXECUTABLE_DATA_DIR")
-                    or str(Path.home() / ".cache" / "cbench-judge"), help="judge dirs, outside the checkout")
+    ap.add_argument("--work-dir", default=str(ROOT / ".cache" / "cbench-judge"),
+                    help="judge dirs (default: .cache/cbench-judge in the checkout, gitignored: inside the "
+                         "workspace, so agy doesn't ask about every step)")
     ap.add_argument("--jobs", type=int, default=1, help="groups graded at once, one conversation each")
     ap.add_argument("--rotate", type=int, default=10, help="patches per conversation before a fresh one")
     ap.add_argument("--max-steers", type=int, default=2)
@@ -238,8 +240,6 @@ def main() -> None:
                    else [shutil.which("agentapi")] if shutil.which("agentapi") else [args.agy, "agentapi"])
     queue = args.queue.resolve()
     work = Path(args.work_dir).resolve()
-    if work == ROOT or ROOT in work.parents:
-        raise SystemExit("--work-dir must be outside the checkout")
     work.mkdir(parents=True, exist_ok=True)
     skip = load_ids(queue / "results.jsonl") | (set() if args.retry_parked else load_ids(queue / "parked.jsonl"))
     items = [json.loads(l) for l in (queue / "manifest.jsonl").read_text().splitlines() if l.strip()]

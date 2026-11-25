@@ -85,7 +85,8 @@ watched and steered:
 - `cbench grade --mode penalty --judge agy --thinking off --export grading/queue/v4-off` writes the
   queue (patches by hash, task texts, the catalogue; no run ids, nothing about how a patch was made). It
   goes to the Antigravity machine through the repository.
-- The script copies the fixture into a judge dir outside the checkout and starts a conversation
+- The script copies the fixture into a judge dir under `.cache/cbench-judge` (gitignored, inside the
+  workspace, so agy doesn't ask about every step) and starts a conversation
   (`agentapi new-conversation`). Each patch is one message: `patch.diff` is rewritten first, so only the
   current change is ever in the dir, and the grader writes its JSON to `verdicts/<id>.json` there, which
   the script waits for. Later patches go to the same conversation (`agentapi send-message`) and ask for the
@@ -97,8 +98,9 @@ watched and steered:
 - `cbench grade --mode penalty --judge agy --import <queue>/results.jsonl` runs the usual quote check and
   writes `results/penalties.jsonl`, with the conversation id and messages on each grade.
 
-The graders run with the app's permissions rather than a read-only allow-list, so blindness rests on the
-judge dir being outside the checkout and on the prompt; the app shows every step for review.
+The graders run with the app's permissions rather than a read-only allow-list, and the judge dir sits inside the
+checkout, so blindness rests on the prompt (only the judge dir belongs to the job); the app shows every
+step for review, and a grader that opens `docs/` or `results/` should have its grade discarded.
 The trade-off: a judge that has seen earlier changes for the same task may grade the next one relative
 to them. The catalogue names absolute defects, which limits this. The five calibration patches, graded
 again in one conversation, show whether it matters.
