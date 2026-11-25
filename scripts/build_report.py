@@ -98,6 +98,76 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
 
 
 
+PENALTY_POINTS = (("scope", "changes unrelated to the task", -10),
+                  ("reimplemented", "re-implements logic the repository already has", -10),
+                  ("convention", "breaks a convention visible in the repository (max -10 in total)", -5),
+                  ("api", "changes a public signature or behaviour other code relies on", -15),
+                  ("wrong_untested", "logic that looks wrong where the tests don't reach", -15),
+                  ("risk", "a security or data problem", -20))
+
+
+def penalty_section(rows: list[dict], title: str) -> str:
+    """Penalty grading for one round, per configuration: passing runs, how many the judge graded, mean
+    points per graded run, the share with no penalty, the clean pass rate (passing with no penalty, out of
+    all runs) and the most frequent codes. Empty when none of the round's runs is graded."""
+    from build_site import load_penalties
+    from context_bench.penalty import hard_pass
+    pen = load_penalties()
+    if not any(r["run_id"] in pen for r in rows):
+        return ""
+    by = collections.defaultdict(list)
+    for r in rows:
+        by[level_label(r)].append(r)
+    order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER))
+    body, graded_all = [], []
+    for lab in order:
+        rs = by[lab]
+        gs = [pen[r["run_id"]] for r in rs if r["run_id"] in pen and hard_pass(r)]
+        graded_all += [(r, pen[r["run_id"]]) for r in rs if r["run_id"] in pen and hard_pass(r)]
+        passes = sum(map(hard_pass, rs))
+        clean = sum(1 for g in gs if not g["penalties"])
+        codes = collections.Counter(p["code"] for g in gs for p in g["penalties"])
+        top = ", ".join(f"{c} {n}" for c, n in codes.most_common(3)) or "–"
+        mean = f"{sum(g['points'] for g in gs) / len(gs):.1f}" if gs else "–"
+        body.append(f"<tr><td>{e(lab)}</td><td class=r>{len(rs)}</td><td class=r>{passes}</td><td class=r>{len(gs)}</td>"
+                    f"<td class=r>{mean}</td><td class=r>{pct(clean, len(gs))}</td>"
+                    f"<td class=r>{pct(clean, len(rs)) if gs else '–'}</td>"
+                    f"<td class=small>{e(top)}</td></tr>")
+    dist = collections.Counter(g["points"] for _, g in graded_all)
+    n = len(graded_all)
+    dist_cells = "".join(f"<td class=r>{dist.get(p, 0)}</td>" for p in range(0, -45, -5))
+    worst = sorted(graded_all, key=lambda rg: (rg[1]["points"], rg[0]["run_id"]))[:5]
+    worst_html = "".join(
+        f"<li>{link(r['run_id'], r['task_id'] + ' @' + r['repo_size'] + ', ' + level_label(r))}: {g['points']} "
+        f"({', '.join(p['code'] for p in g['penalties'])})</li>" for r, g in worst)
+    catalogue = "".join(f"<tr><td><code>{c}</code></td><td>{e(d)}</td><td class=r>{p}</td></tr>" for c, d, p in PENALTY_POINTS)
+    return f"""
+  <section id="penalties">
+    <h2>Judged code quality: penalties ({e(title)})</h2>
+    <p class="prose">The hidden tests decide PASS or FAIL, and the judge never changes that. For each passing
+    patch, a blind judge (agy) looks for defects the tests wouldn't catch, using only the codes below, and has to
+    quote a changed line of the patch for each one. The harness keeps a penalty only if that quote really is a
+    changed line. Points range from 0 (nothing found) to the cap of -40, and they say how good a pass is, not
+    whether it passed. Failing runs aren't graded.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Code</th><th>Defect</th><th class=r>Points</th></tr></thead>
+      <tbody>{catalogue}</tbody></table></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Configuration</th><th class=r>Runs</th><th class=r>PASS</th><th class=r>Graded</th>
+      <th class=r>Mean points</th><th class=r>No penalty</th><th class=r>Clean pass</th><th>Top codes</th></tr></thead>
+      <tbody>{''.join(body)}</tbody></table></div>
+    <p class="small">PASS here also requires the repository's own tests to stay green. Graded: passing runs the
+    judge has graded. Mean points and No penalty are over the graded runs. Clean pass: runs that passed with no
+    penalty, out of all runs.</p>
+    <h3>Points per graded run</h3>
+    <div class="table-wrap"><table>
+      <thead><tr>{''.join(f'<th class=r>{p}</th>' for p in range(0, -45, -5))}<th class=r>Graded</th></tr></thead>
+      <tbody><tr>{dist_cells}<td class=r>{n}</td></tr></tbody></table></div>
+    <h3>Most penalized</h3>
+    <ul class="small">{worst_html}</ul>
+  </section>"""
+
+
 def sweep_status() -> dict | None:
     """results/sweep_status.json (written by cbench run), only while its sweep process is alive."""
     path = RESULTS / "sweep_status.json"
@@ -190,6 +260,7 @@ def build_progress(final: dict, off: dict) -> str:
     recorded plus the ones the running sweep still has queued. The number is PASS out of that total. The Method page defines the
     outcomes.</p>
   </section>
+  {penalty_section(list(off.values()), "thinking off")}
   <section>
     <h2>Per repo</h2>
     {table(list(off.values()), "Thinking off")}
