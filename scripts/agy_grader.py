@@ -4,6 +4,8 @@
 Run it from agy (ask a conversation to run it) or as an Antigravity sidecar: either way it inherits
 ANTIGRAVITY_LS_ADDRESS, ANTIGRAVITY_CSRF_TOKEN and ANTIGRAVITY_PROJECT_ID, which `agy agentapi` needs.
 The graders are ordinary conversations in the Antigravity app, so they can be watched and steered there.
+agy has to run it outside its terminal sandbox: inside it the local RPC port that agentapi talks to is
+unreachable (`agentapi new-conversation` prints {"response": {"newConversation": {"conversationId": ...}}}).
 
     cbench grade --mode penalty --judge agy --thinking off --export grading/queue/v4-off   # here, then push
     python3 scripts/agy_grader.py grading/queue/v4-off                                     # from agy, after pull
@@ -90,7 +92,8 @@ def agentapi(*args: str) -> str:
     p = subprocess.run([*AGENTAPI, *args], capture_output=True, text=True, timeout=180)
     out = (p.stdout + p.stderr).strip()
     if p.returncode != 0 or '"error"' in out[:200]:
-        raise RuntimeError(f"agentapi {args[0]} failed (exit {p.returncode}): {out[:300]}")
+        raise RuntimeError(f"agentapi {args[0]} failed (exit {p.returncode}; run outside agy's sandbox?): "
+                           f"{out[:300]}")
     return out
 
 
