@@ -1,0 +1,125 @@
+--- /dev/null
++++ b/shopkit/payouts/preview.py
+@@ -0,0 +1,122 @@
++"""Read-only preview of a single seller's next payout.
++
++build_payout_batch (batching.py) mutates the hold book and the rollover
++balances while it builds the weekly payouts.  This module re-runs the same
++per-seller math on *copies* of those books, so a seller can see the status
++and net amount their payout would get before finance runs the batch, and the
++real books are left exactly as they were.
++"""
++from __future__ import annotations
++
++import copy
++import logging
++from datetime import date, timedelta
++
++from shopkit.config import SETTINGS
++from shopkit.payouts.batching import BACKUP_WITHHOLDING_BP, MIN_PAYOUT_CENTS, Rollover, _commission
++from shopkit.payouts.holds import RETURN_WINDOW_DAYS, HoldBook
++from shopkit.payouts.models import (CLOSED, CLOSING, DRAFT, ROLLED_OVER, SUSPENDED, Adjustment, Earning, Seller)
++from shopkit.utils.numbers import apply_rate
++
++log = logging.getLogger(__name__)
++
++
++def preview_payout(seller: Seller, earnings: list[Earning], adjustments: list[Adjustment],
++                   period_start: date, period_end: date, holds: HoldBook,
++                   rollover: Rollover) -> tuple[str, int]:
++    """Return (status, net_cents) for this seller's payout over [period_start, period_end] (inclusive).
++
++    The result is what build_payout_batch would produce for this seller from the same inputs
++    and the current hold book / rollover state: same line selection, INC-2340 rejections,
++    INC-2377 within-batch dedupe, return-window holds, released holds, adjustments, reserve,
++    carried balance, backup withholding and the minimum-payout / negative-balance rules.
++
++    The preview changes nothing: no hold is placed or released and no balance is taken or
++    carried, so a real batch run afterwards sees the same state it did before the preview.
++    Earnings already paid by an earlier batch (the batch's paid_lines) are out of scope here;
++    pass only lines that would still be unpaid.
++
++    Suspended and closed sellers get no payout in the batch, so (status, 0) is returned for
++    them.  A seller paid in a different currency than the shop can be previewed only while
++    they would roll over (no conversion needed); a DRAFT payout would need the rate table
++    for the conversion and the FX fee, so a ValueError is raised instead of returning an
++    unconverted amount.
++    """
++    if seller.status in (SUSPENDED, CLOSED):
++        # the batch skips these sellers outright: no payout, nothing moved
++        return seller.status, 0
++
++    # release() and take() mutate their books, so the batch's own code paths run on
++    # throwaway copies; the real holds and rollover must stay as they were.
++    sim_holds = copy.deepcopy(holds)
++    sim_rollover = copy.deepcopy(rollover)
++
++    # --- lines: same selection and checks as build_payout_batch ----------------------------
++    in_period = []
++    seen: set[tuple[str, str, str]] = set()
++    for e in earnings:
++        if e.seller_id != seller.id:
++            continue
++        if e.gross_cents < 0 or e.refunded_cents < 0 or e.refunded_cents > e.gross_cents:
++            continue  # INC-2340: the batch rejects these rows
++        key = (e.seller_id, e.order_id, e.sku)
++        if key in seen:
++            continue  # INC-2377: a duplicate in the same batch keeps the first one
++        seen.add(key)
++        if e.delivered_on is not None and not (period_start - timedelta(days=366) <= e.delivered_on <= period_end):
++            continue
++        in_period.append(e)
++
++    held = 0
++    line_net = 0
++    gross = 0.0  # placeholder, overwritten below
++    gross = 0
++    for e in sorted(in_period, key=lambda e: (e.order_id, e.sku)):
++        commission = _commission(e.gross_cents, seller.commission_bp)
++        net = e.gross_cents - commission - e.refunded_cents
++        if e.refunded_cents and e.refunded_cents == e.gross_cents:
++            # full refund: the commission is given back to the seller too (marketplace terms §7.2)
++            net = 0
++            commission = 0
++        gross += e.gross_cents
++        line_net += net
++        within_window = e.delivered_on is None or e.delivered_on + timedelta(days=RETURN_WINDOW_DAYS) > period_end
++        if within_window and net > 0:
++            held += net  # the batch would place this in the hold book and hold it on the payout
++
++    # --- released holds, adjustments, reserve ------------------------------------------------
++    released = sim_holds.release(seller.id, period_end)
++    adjustments_cents = released
++    for a in adjustments:
++        if a.seller_id == seller.id:
++            adjustments_cents += a.amount_cents
++    reserve = apply_rate(gross, seller.reserve_bp / 100) if seller.reserve_bp else 0
++
++    # --- carried balance (take() pops, so it runs on the copy) --------------------------------
++    carried_in = sim_rollover.take(seller.id)
++
++    # --- backup withholding (the batch defaults unknown seller countries to US) --------------
++    if not seller.tax_id.strip():
++        withholdable = line_net - held
++        if withholdable > 0:
++            adjustments_cents -= apply_rate(withholdable, BACKUP_WITHHOLDING_BP / 100)
++
++    net = line_net + adjustments_cents + carried_in - held - reserve
++
++    # --- minimum payout and negative balances (same rules as the batch) -----------------------
++    # Below MIN_PAYOUT_CENTS (or negative) the amount is not sent but carried forward; a
++    # closing seller is paid whatever is left, however small.
++    if net < 0:
++        status = ROLLED_OVER
++    elif net < MIN_PAYOUT_CENTS and seller.status != CLOSING:
++        status = ROLLED_OVER
++    else:
++        status = DRAFT
++
++    if status == DRAFT and seller.payout_currency != SETTINGS.default_currency:
++        raise ValueError(
++            f"cannot preview a DRAFT payout for seller {seller.id} in {seller.payout_currency}: "
++            "the conversion and FX fee need the batch's rate table")
++
++    log.debug("payout preview seller=%s status=%s net=%d", seller.id, status, net)
++    return status, net

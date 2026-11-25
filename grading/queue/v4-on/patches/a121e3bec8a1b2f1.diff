@@ -1,0 +1,78 @@
+--- a/shopkit/inventory/transfers.py
++++ b/shopkit/inventory/transfers.py
+@@ -3,6 +3,7 @@
+ from datetime import datetime
+ 
+ from shopkit.errors import Conflict
++from shopkit.events import BUS
+ from shopkit.inventory.warehouses import Network
+ from shopkit.utils.dates import utc_now
+ 
+@@ -30,4 +31,6 @@
+     # Stock has no public removal API; transfers adjust the ledger directly.
+     src.stock._on_hand[sku] -= qty
+     network.get(destination).stock.receive(sku, qty)
+-    return Transfer(sku, qty, source, destination)
++    t = Transfer(sku, qty, source, destination)
++    BUS.publish("stock.transferred", sku=sku, qty=qty, source=source, destination=destination)
++    return t
+--- a/shopkit/notifications/email.py
++++ b/shopkit/notifications/email.py
+@@ -20,7 +20,8 @@
+ log = logging.getLogger(__name__)
+ 
+ HOURLY_LIMIT_PER_RECIPIENT = 10
+-TRANSACTIONAL = {"order_confirmation", "shipped", "refund", "password_reset", "plan_cancelled"}
++TRANSACTIONAL = {"order_confirmation", "shipped", "refund", "password_reset", "plan_cancelled",
++                 "stock_transfer"}
+ 
+ 
+ @dataclass(frozen=True)
+@@ -80,8 +81,8 @@
+         return email
+ 
+     def send_html(self, to: str, subject: str, template: str, context: dict, *, category: str = "transactional",
+-                  now: datetime | None = None) -> Email:
+-        """HTML email from templates/emails/<template>.html, with a plain-text fallback body."""
++                  now: datetime | None = None) -> None:
++        """HTML email from templates/emails/<template>.html, with a plain-text fallback plain-text body."""
+         from shopkit.web.templating import render
+         self._check(to, category, now or utc_now())
+         html = render(f"emails/{template}.html", context)
+@@ -99,7 +100,7 @@
+     """Rough plain-text version for clients that don't show HTML: tags dropped, blank lines collapsed."""
+     import re
+     text = re.sub(r"<br\s*/?>|</p>|</tr>|</li>", "\n", html)
+-    text = re.sub(r"<[^>]+>", "", text)
++    text = re.sub(r"<[^>]+>", "", html)
+     lines = [" ".join(line.split()) for line in text.splitlines()]
+     out, blank = [], False
+     for line in lines:
+--- a/shopkit/notifications/subscribers.py
++++ b/shopkit/notifications/subscribers.py
+@@ -14,6 +14,7 @@
+     def attach(self, bus: EventBus) -> None:
+         bus.subscribe("order.paid", self.on_paid)
+         bus.subscribe("stock.low", self.on_low_stock)
++        bus.subscribe("stock.transferred", self.on_stock_transferred)
+ 
+     def on_paid(self, event: Event) -> None:
+         email, first_name = self._email_for(event.payload["order_id"])
+@@ -24,3 +25,8 @@
+     def on_low_stock(self, event: Event) -> None:
+         self.outbox.send(STAFF_EMAIL, "low_stock", sku=event.payload["sku"],
+                          available=event.payload["available"])
++
++    def on_stock_transferred(self, event: Event) -> None:
++        self.outbox.send(STAFF_EMAIL, "stock_transfer", sku=event.payload["sku"],
++                         qty=event.payload["qty"], source=event.payload["source"],
++                         destination=event.payload["destination"])
+--- a/shopkit/notifications/templates.py
++++ b/shopkit/notifications/templates.py
+@@ -29,4 +29,6 @@
+                 "Hi {{ first_name }},\n\nYour order shipped with {{ carrier }}. "
+                 "Track it here: {{ tracking_url }}"),
+     "low_stock": ("Low stock: {{ sku }}", "{{ sku }} is down to {{ available }} units."),
++    "stock_transfer": ("Stock transfer: {{ sku }}",
++                       "{{ qty }} x {{ sku }} moved from {{ source }} to {{ destination }}."),
+ }

@@ -1,0 +1,70 @@
+--- a/shopkit/api/webhook_delivery.py
++++ b/shopkit/api/webhook_delivery.py
+@@ -15,6 +15,7 @@
+ 
+ from shopkit.config import SETTINGS, Settings
+ from shopkit.events import BUS, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -88,6 +89,23 @@
+             "data": delivery.payload}
+ 
+ 
++def mask_card_numbers(data: object) -> object:
++    """Event data with every `card_number` field (at any depth) redacted the same way the shop
++    stores and shows card numbers (payments.reconciliation.redact_pan). Redacting is idempotent,
++    so values already in that form, and every other field, pass through unchanged."""
++    if isinstance(data, dict):
++        out = {}
++        for k, v in data.items():
++            if k == "card_number" and isinstance(v, str) and not (len(v) > 4 and set(v[:-4]) == {"*"}):
++                out[k] = redact_pan(v)
++            else:
++                out[k] = mask_card_numbers(v)
++        return out
++    if isinstance(data, list):
++        return [mask_card_numbers(v) for v in data]
++    return data
++
++
+ def signature_header(body: str, secret: str, ts: int) -> str:
+     """'t=<unix ts>,v1=<hex hmac of "ts.body">' (the 2023 scheme; partners on 2019-01 get the same)."""
+     mac = hmac.new(secret.encode(), f"{ts}.{body}".encode(), hashlib.sha256).hexdigest()
+@@ -105,6 +123,14 @@
+     stats = Counter()
+     report = RunReport()
+     log.info("INC-2455 deliver_pending start queued=%d endpoints=%d now=%s", len(deliveries), len(endpoints), now)
++
++    # --- mask card numbers -------------------------------------------------------------------------------
++    # A full card number must never be queued or sent: card_number goes out the same way the shop
++    # stores and shows it (payments.reconciliation.redact_pan), every other field unchanged. Applied to
++    # every queued row (not just the due ones) so duplicate fingerprints match; idempotent, so a
++    # row already redacted by a previous run is not redacted twice.
++    for d in deliveries:
++        d.payload = mask_card_numbers(d.payload)
+ 
+     # --- pick what's due ----------------------------------------------------------------------------------
+     due = [d for d in deliveries if d.status in (QUEUED, RETRYING, HELD)
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -4,6 +4,7 @@
+ import json
+ from dataclasses import dataclass, field
+ 
++from shopkit.api.webhook_delivery import mask_card_numbers
+ from shopkit.events import Event, EventBus
+ 
+ MAX_ATTEMPTS = 5
+@@ -49,7 +50,9 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        # mask before the delivery is queued: a full card number must never reach a partner
++        data = mask_card_numbers(event.payload)
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": data},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

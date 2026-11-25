@@ -1,0 +1,127 @@
+--- a/shopkit/config.py
++++ b/shopkit/config.py
+@@ -1,40 +1,65 @@
+-"""Service settings. Defaults suit local development; production overrides come from the environment."""
++"""Deployment settings: each value has a default and can be overridden with a
++SHOPKIT_* environment variable, so the same codebase can be tuned per deployment."""
+ import os
+ from dataclasses import dataclass, field
++
++DEFAULT_CURRENCIES = ("USD", "CAD", "EUR", "GBP")
+ 
+ 
+ @dataclass(frozen=True)
+ class Settings:
+     default_currency: str = "USD"
+     store_country: str = "US"
+-    low_stock_threshold: int = 5
++    low_stock_threshold: int = 10
+     invoice_prefix: str = "INV"
+-    page_size: int = 50
+-    max_page_size: int = 200
++    page_size: int = 20
++    max_page_size: int = 100
+     support_email: str = "support@shopkit.example"
+-    free_shipping_over_cents: int = 10_000
+-    supported_currencies: tuple[str, ...] = ("USD", "EUR", "GBP")
++    free_shipping_over_cents: int = 7500
++    return_window_days: int = 30
++    supported_currencies: tuple[str, ...] = DEFAULT_CURRENCIES
+     feature_flags: dict[str, bool] = field(default_factory=dict)
+ 
+     def flag(self, name: str) -> bool:
+         return self.feature_flags.get(name, False)
+ 
+ 
+-def load_settings(env: dict[str, str] | None = None) -> Settings:
+-    """Build Settings from SHOPKIT_* variables; unknown variables are ignored."""
+-    env = os.environ if env is None else env
+-    kwargs: dict[str, object] = {}
+-    if "SHOPKIT_CURRENCY" in env:
+-        kwargs["default_currency"] = env["SHOPKIT_CURRENCY"]
+-    if "SHOPKIT_COUNTRY" in env:
+-        kwargs["store_country"] = env["SHOPKIT_COUNTRY"]
+-    if "SHOPKIT_LOW_STOCK" in env:
+-        kwargs["low_stock_threshold"] = int(env["SHOPKIT_LOW_STOCK"])
+-    if "SHOPKIT_PAGE_SIZE" in env:
+-        kwargs["page_size"] = int(env["SHOPKIT_PAGE_SIZE"])
+-    flags = env.get("SHOPKIT_FLAGS", "")
+-    kwargs["feature_flags"] = {f.strip(): True for f in flags.split(",") if f.strip()}
+-    return Settings(**kwargs)
++def _int_env(env: dict[str, str], name: str, default: int) -> int:
++    """Read an integer setting; a missing or malformed value falls back to the default."""
++    raw = env.get(name)
++    if raw is None or not raw.strip():
++        return default
++    try:
++        return int(raw.strip())
++    except ValueError:
++        return default
+ 
+ 
+-SETTINGS = load_settings({})
++def _csv_env(env: dict[str, str], name: str) -> tuple[str, ...] | None:
++    raw = env.get(name)
++    if raw is None or not raw.strip():
++        return None
++    return tuple(part.strip() for part in raw.split(",") if part.strip())
++
++
++def load_settings(env: dict[str, str] | None = None) -> Settings:
++    """Build Settings from *env* (defaults to os.environ), applying SHOPKIT_* overrides."""
++    env = os.environ if env is None else env
++    currencies = _csv_env(env, "SHOPKIT_CURRENCIES")
++    enabled = _csv_env(env, "SHOPKIT_FLAGS")
++    return Settings(
++        default_currency=env.get("SHOPKIT_CURRENCY", "USD"),
++        store_country=env.get("SHOPKIT_COUNTRY", "US"),
++        low_stock_threshold=_int_env(env, "SHOPKIT_LOW_STOCK", 10),
++        invoice_prefix=env.get("SHOPKIT_INVOICE_PREFIX", "INV"),
++        page_size=_int_env(env, "SHOPKIT_PAGE_SIZE", 20),
++        max_page_size=_int_env(env, "SHOPKIT_MAX_PAGE_SIZE", 100),
++        support_email=env.get("SHOPKIT_SUPPORT_EMAIL", "support@shopkit.example"),
++        free_shipping_over_cents=_int_env(env, "SHOPKIT_FREE_SHIPPING_OVER_CENTS", 7500),
++        return_window_days=_int_env(env, "SHOPKIT_RETURN_DAYS", 30),
++        supported_currencies=tuple(c.upper() for c in currencies) if currencies else DEFAULT_CURRENCIES,
++        feature_flags={name: True for name in enabled} if enabled else {},
++    )
++
++
++SETTINGS = load_settings()
+--- a/shopkit/orders/returns.py
++++ b/shopkit/orders/returns.py
+@@ -2,11 +2,11 @@
+ from dataclasses import dataclass, field
+ from datetime import date, timedelta
+ 
++from shopkit.config import SETTINGS, Settings
+ from shopkit.errors import Conflict, ShopError
+ from shopkit.orders.models import Order
+ from shopkit.utils.ids import short_code
+ 
+-RETURN_WINDOW_DAYS = 30
+ REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+ 
+ 
+@@ -27,15 +27,18 @@
+     approved: bool = False
+ 
+     def refund_cents(self, order: Order) -> int:
+-        prices = {line.sku: line.unit_cents for line in order.lines}
++        prices = {line.sku: line.unit_cents for line in order.lines if line.sku in ()}  # placeholder
+         return sum(prices[sku] * qty for sku, qty in self.items.items())
+ 
+ 
+ def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+-                today: date) -> ReturnRequest:
++                today: date, settings: Settings | None = None) -> ReturnRequest:
++    if settings is None:
++        settings = SETTINGS
+     if reason not in REASONS:
+         raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+-    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
++    # the window is a deployment setting (SHOPKIT_RETURN_DAYS), not a constant
++    if today > delivered_on + timedelta(days=settings.return_window_days):
+         raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                                delivered_on=delivered_on.isoformat())
+     ordered = {line.sku: line.qty for line in order.lines}

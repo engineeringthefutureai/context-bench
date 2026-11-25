@@ -1,0 +1,47 @@
+--- /dev/null
++++ b/shopkit/payouts/preview.py
+@@ -0,0 +1,44 @@
++"""Read-only preview of a seller's next payout.
++
++Answers "what would this seller's payout look like if the weekly batch ran for this period now".
++The preview reuses the real batch logic (batching.build_payout_batch) so it cannot drift from what
++finance actually runs, and it changes nothing: the hold book and the rollover are deep-copied
++first, so no hold is placed or released and no balance is taken or carried in the caller's state.
++"""
++from __future__ import annotations
++
++import copy
++from datetime import date
++
++from shopkit.config import SETTINGS, Settings
++from shopkit.payouts.batching import Rollover, build_payout_batch
++from shopkit.payouts.holds import HoldBook
++from shopkit.payouts.models import Adjustment, Earning, Seller
++from shopkit.pricing.currency import RateTable
++
++
++def preview_payout(seller: Seller, earnings: list[Earning], adjustments: list[Adjustment],
++                   period_start: date, period_end: date, holds: HoldBook, rollover: Rollover,
++                   *, rates: RateTable | None = None, seller_country: dict[str, str] | None = None,
++                   settings: Settings = SETTINGS) -> tuple[str, int]:
++    """The (status, net_cents) this seller's payout would get for [period_start, period_end].
++
++    Runs the weekly batch's own logic (build_payout_batch) on copies of the hold book and the
++    rollover, so the numbers are exactly what the batch would produce, but the preview is free of
++    side effects: nothing is held or released in ``holds`` and nothing is taken or put in
++    ``rollover``. Pass the holds, rollover and (for FX sellers) rates and seller_country the batch
++    would use so earlier periods are reflected. net_cents is in the seller's payout currency,
++    after the FX fee when the payout is converted.
++    """
++    result = build_payout_batch([seller], earnings, adjustments, period_start, period_end,
++                                holds=copy.deepcopy(holds), rollover=copy.deepcopy(rollover),
++                                rates=rates, settings=settings, seller_country=seller_country)
++    for payout in result.payouts:
++        if payout.seller_id == seller.id:
++            return payout.status, payout.net_cents
++    # The batch writes no payout for suspended/closed sellers and for FX sellers with no usable
++    # rate; they are recorded in result.skipped instead and get nothing paid this period.
++    reason = result.skipped.get(seller.id)
++    if reason is None:
++        raise RuntimeError(f"preview for {seller.id}: batch produced neither a payout nor a skip")
++    return reason, 0

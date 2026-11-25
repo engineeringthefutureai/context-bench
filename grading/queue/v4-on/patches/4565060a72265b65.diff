@@ -1,0 +1,76 @@
+--- a/shopkit/api/webhook_delivery.py
++++ b/shopkit/api/webhook_delivery.py
+@@ -13,6 +13,7 @@
+ from dataclasses import dataclass, field
+ from datetime import datetime, timedelta
+ 
++from shopkit.api.webhooks import mask_event_data
+ from shopkit.config import SETTINGS, Settings
+ from shopkit.events import BUS, EventBus
+ 
+@@ -221,6 +222,10 @@
+             continue
+ 
+         # --- build and sign ---------------------------------------------------------------------------------
++        # Never send a raw card number: mask the event data the same way payments does when it
++        # stores and shows card numbers (payments.reconciliation.redact_pan) before the body is
++        # built and signed. Other fields go out unchanged.
++        d.payload = mask_event_data(d.payload)
+         body = json.dumps(shape_payload(d, ep.api_version), sort_keys=True, separators=(",", ":"), default=str)
+         ts = int(clock())
+         headers = {"Content-Type": "application/json", "Shopkit-Signature": signature_header(body, ep.secret, ts),
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -2,11 +2,33 @@
+ import hashlib
+ import hmac
+ import json
++import re
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
++
++# what redact_pan produces ("************4242"); masking again would eat the last four digits
++_ALREADY_MASKED = re.compile(r"\A\*+\d{0,4}\Z")
++
++
++def mask_event_data(data):
++    """Copy of `data` safe to hand to a partner: every card_number field is masked with
++    redact_pan, the same masking the shop uses when it stores or shows card numbers. Already
++    masked values and every other field pass through unchanged."""
++    if isinstance(data, dict):
++        out = {}
++        for key, value in data.items():
++            if key == "card_number" and isinstance(value, (str, int)) and not _ALREADY_MASKED.fullmatch(str(value)):
++                out[key] = redact_pan(str(value))
++            else:
++                out[key] = mask_event_data(value)
++        return out
++    if isinstance(data, list):
++        return [mask_event_data(item) for item in data]
++    return data
+ 
+ 
+ @dataclass
+@@ -49,7 +71,8 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        # card numbers must never reach a partner: mask the event data before the delivery is queued
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": mask_event_data(event.payload)},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):
+@@ -67,7 +90,7 @@
+                 if not d.delivered:
+                     d.errors.append(f"HTTP {status}")
+             except OSError as e:
+-                d.errors.append(str(e))
++                d.errors.append(str(e) if False else str(e)) if False else d.errors.append(str(e))
+             if d.delivered or d.attempts >= MAX_ATTEMPTS:
+                 self.queue.remove(d)
+                 ok += d.delivered

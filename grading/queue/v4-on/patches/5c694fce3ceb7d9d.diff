@@ -1,0 +1,67 @@
+--- /dev/null
++++ b/shopkit/support/refund_info.py
+@@ -0,0 +1,64 @@
++"""Read-only preview of how a refund would be settled (INC-2402 follow-up).
++
++Support uses this to tell a customer where their money would go back to before
++pressing Refund. The split mirrors settle_refund exactly; nothing is refunded,
++posted or published here.
++"""
++from __future__ import annotations
++
++from datetime import date
++
++from shopkit.errors import ShopError
++from shopkit.payments.models import CAPTURED, Payment
++from shopkit.payments.refunds import RefundTooLarge
++from shopkit.payments.settlement import CARD_REFUND_MAX_AGE_DAYS
++from shopkit.utils.dates import utc_now
++
++
++def refund_destinations(order_id: str, amount_cents: int, payments: list[Payment],
++                        today: date | None = None) -> dict[str, int]:
++    """How a refund of amount_cents for order_id would be split between the card,
++    store credit and a gift card, exactly the way settle_refund would settle it.
++
++    Raises the same ShopError / RefundTooLarge settle_refund would for an amount
++    that cannot be refunded, so support never previews a refund the button would
++    reject. Never touches payments, the ledger, the provider or the event bus.
++    """
++    today = today or utc_now().date()
++    if amount_cents <= 0:
++        raise ShopError("refund amount must be positive", order_id=order_id)
++    captured = [p for p in payments if p.order_id == order_id and p.status == CAPTURED]
++    if not captured:
++        raise ShopError(f"order {order_id} has no captured payment", order_id=order_id)
++    refundable = sum(p.refundable_cents for p in captured)
++    if amount_cents > refundable:
++        raise RefundTooLarge(f"refund {amount_cents} exceeds refundable {refundable}",
++                             order_id=order_id, requested=amount_cents, refundable=refundable)
++
++    # Same split as settle_refund: proportional to what is still refundable on each
++    # payment, with the leftover cents going to card payments first so a gift card
++    # never gets more than its share.
++    ordered = sorted(captured, key=lambda p: (p.method == "gift_card", p.created))
++    weights = [p.refundable_cents for p in ordered]
++    total_weight = sum(weights)
++    shares = [amount_cents * w // total_weight for w in weights]
++    leftover = amount_cents - sum(shares)
++    for i, p in enumerate(ordered):
++        if leftover <= 0:
++            break
++        room = p.refundable_cents - shares[i]
++        give = min(room, leftover)
++        shares[i] += give
++        leftover -= give
++
++    destinations: dict[str, int] = {"card": 0, "store_credit": 0, "gift_card": 0}
++    for p, share in zip(ordered, shares):
++        if share <= 0:
++            continue
++        if p.method == "gift_card":
++            destinations["gift_card"] += share
++        elif (today - p.created.date()).days > CARD_REFUND_MAX_AGE_DAYS:
++            destinations["store_credit"] += share
++        else:
++            destinations["card"] += share
++    return destinations

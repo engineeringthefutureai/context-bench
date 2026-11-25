@@ -1,0 +1,97 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,94 @@
++"""Coupon preview for the cart page: how much a discount code would save before it is applied.
++
++The number shown next to the code field must match what the cart page actually applies, so this
++follows price_cart's coupon calculation exactly: the same line pricing (engine, member price),
++the same exclusions (gift cards, and items already on sale for percentage codes), the same
++minimum-order rule and the same printed-code handling. Automatic promotions are not part of a
++code's saving."""
++from __future__ import annotations
++
++from datetime import datetime
++
++from shopkit.catalog.models import Product
++from shopkit.config import SETTINGS, Settings
++from shopkit.core.pricing import parseCouponCode
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import CartItem, MEMBER_PRICE_LIST_TIER
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import PERCENT, Coupon, coupon_is_active, normalize_code
++from shopkit.utils.numbers import apply_rate
++
++
++def coupon_savings(items: list[CartItem], products: dict[str, Product], code: str | None,
++                   coupons: dict[str, Coupon] | None, engine: PricingEngine, ship_to: Address,
++                   weight_g: int, at: datetime, *, tier: str = "standard", member: bool = False,
++                   currency: str | None = None, settings: Settings = SETTINGS) -> int:
++    """The saving in cents that `code` would give on this cart, exactly as price_cart calculates
++    it; 0 when the code wouldn't apply (unknown, inactive or used up, below the minimum order,
++    or nothing left to discount).
++
++    `items`, `products`, `engine`, `ship_to`, `weight_g` and `at` are the same values the cart
++    page passes to price_cart, so the preview and the discount it later applies always agree.
++    `ship_to` and `weight_g` do not change the saving (tax and shipping are not part of it);
++    they are kept so the call reads like the cart's.
++    """
++    coupons = coupons or {}
++    currency = currency or settings.default_currency
++    if not code:
++        return 0
++
++    # --- lines, same as price_cart: merge duplicate SKUs, drop unpurchasable ones --------------------------
++    merged: dict[str, CartItem] = {}
++    for it in items:
++        if it.sku in merged:
++            merged[it.sku].qty += it.qty
++        else:
++            merged[it.sku] = CartItem(it.sku, it.qty, it.added_unit_cents, it.gift_card)
++    lines: list[tuple[CartItem, int, bool]] = []                       # (item, unit_cents, on_sale)
++    for it in merged.values():
++        if it.qty < 1:
++            continue
++        product = products.get(it.sku)
++        if product is None or not product.is_purchasable():
++            continue
++        if it.gift_card:
++            lines.append((it, product.price_cents, False))
++            continue
++        point = engine.price(product, it.qty, currency=currency, tier=tier, at=at)
++        unit, on_sale = point.unit_cents, point.compare_at_cents is not None
++        if member:
++            try:
++                member_point = engine.price(product, it.qty, currency=currency,
++                                            tier=MEMBER_PRICE_LIST_TIER, at=at)
++                if member_point.source.startswith("list:") and member_point.unit_cents < unit:
++                    unit, on_sale = member_point.unit_cents, False     # a member price is not a sale
++            except Exception:                                          # the member list may not exist
++                pass
++        lines.append((it, unit, on_sale))
++    if not lines:
++        return 0
++
++    # --- the code, same as price_cart: coupon table first, then printed codes -------------------------------
++    normalized = normalize_code(code)
++    coupon = coupons.get(normalized)
++    printed_pct = None
++    if coupon is None:
++        printed_pct = parseCouponCode(normalized)
++        if printed_pct:
++            coupon = Coupon(normalized, PERCENT, printed_pct, at.date(), at.date())
++    if coupon is None or not coupon_is_active(coupon, at.date()):
++        return 0
++
++    # --- the amount, same rules as price_cart ---------------------------------------------------------------
++    not_gift = [(it, unit, on_sale) for it, unit, on_sale in lines if not it.gift_card]
++    basket = sum(unit * it.qty for it, unit, _ in not_gift)            # on-sale items count for the minimum
++    if coupon.kind == PERCENT:
++        eligible = [(it, unit, on_sale) for it, unit, on_sale in not_gift if not on_sale]
++    else:
++        eligible = not_gift
++    eligible_base = sum(unit * it.qty for it, unit, _ in eligible)
++    if printed_pct is None and basket < coupon.min_order_cents:
++        return 0
++    if coupon.kind == PERCENT:
++        return apply_rate(eligible_base, coupon.value)
++    return min(coupon.value, eligible_base)

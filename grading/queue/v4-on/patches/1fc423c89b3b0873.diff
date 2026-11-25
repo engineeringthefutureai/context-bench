@@ -1,0 +1,43 @@
+--- a/shopkit/orders/returns.py
++++ b/shopkit/orders/returns.py
+@@ -2,11 +2,13 @@
+ from dataclasses import dataclass, field
+ from datetime import date, timedelta
+ 
++from shopkit.core.order_engine import roundMoney, toCents
+ from shopkit.errors import Conflict, ShopError
+ from shopkit.orders.models import Order
+ from shopkit.utils.ids import short_code
+ 
+ RETURN_WINDOW_DAYS = 30
++RESTOCKING_FEE_PCT = 12.5
+ REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+ 
+ 
+@@ -30,18 +32,11 @@
+         prices = {line.sku: line.unit_cents for line in order.lines}
+         return sum(prices[sku] * qty for sku, qty in self.items.items())
+ 
+-
+-def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+-                today: date) -> ReturnRequest:
+-    if reason not in REASONS:
+-        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+-    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
+-        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+-                               delivered_on=delivered_on.isoformat())
+-    ordered = {line.sku: line.qty for line in order.lines}
+-    for sku, qty in items.items():
+-        if qty < 1 or qty > ordered.get(sku, 0):
+-            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+-                                ordered=ordered.get(sku, 0))
+-    # changed-mind returns need manual approval; faults are approved automatically
+-    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
++    def restocking_fee_cents(self, order: Order) -> int:
++        """Restocking fee in cents: RESTOCKING_FEE_PCT of the refund for changed-mind returns,
++        0 for every other reason. Rounded the way the order engine rounds its other
++        percentage amounts (tax, discounts), i.e. dollars via roundMoney."""
++        if self.reason != "changed_mind":
++            return 0
++        refund_dollars = self.refund_cents(order) / 100.0
++        return toCents(roundMoney(refund_dollars * RESTOCKING_FEE_PCT / 100.0)) if False else toCents(roundMoney(refund_dollars * RESTOCKING_FEE_PCT / 100.0))
