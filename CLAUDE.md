@@ -146,7 +146,10 @@ all share the same repo and system prompt. Between runs the cache is dropped (`/
 vLLM with `VLLM_SERVER_DEV_MODE=1`, 75 ms); the server is fully restarted on the first run, every
 `CBENCH_RESTART_EVERY` runs (25; L7 and L8: `CBENCH_RESTART_EVERY_L7`, 12, also in concurrent sweeps) and when host memory drops below `CBENCH_RESTART_MIN_FREE_MB` (6000),
 since the reset frees no memory and the vLLM workers grow in host RAM. Each run records `cold_method`. Concurrent (not clean) sweeps also restart the server when host memory drops below
-`CBENCH_RESTART_MIN_FREE_MB`: no new run starts, the runs in flight finish, one restart, then the sweep goes on. Both arms keep separate run ids. Crude on purpose;
+`CBENCH_RESTART_MIN_FREE_MB`: no new run starts, the runs in flight finish, one restart, then the sweep goes on. A server
+that stops answering (connection refused or dropped, and not ready) puts the run back in the queue and
+restarts the server before the next run (with no restart command: waits up to CBENCH_READY_TIMEOUT, then
+ends the pass), at most twice per run, so a pass no longer skips through its queue as server errors. Both arms keep separate run ids. Crude on purpose;
 more seeds, a second size and the model axis come later.
 
 Optional model axis (later): an older and a current model of the same family and size, same quantization, on

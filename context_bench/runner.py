@@ -162,6 +162,19 @@ class Experiment:
         client.chat([{"role": "user", "content": "Reply with OK."}], temperature=None, seed=1,
                     max_tokens=8, thinking=False)
 
+    def _up(self, model_key: str, url: str) -> bool:
+        """The server answers as ready (clients without a readiness check count as up)."""
+        return getattr(self._client(model_key, url), "ready", lambda: True)()
+
+    def _wait_ready(self, model_key: str, url: str) -> bool:
+        """Wait up to CBENCH_READY_TIMEOUT seconds (default 1200) for the server to answer as ready."""
+        deadline = time.monotonic() + float(env_value("CBENCH_READY_TIMEOUT") or 1200)
+        while time.monotonic() < deadline:
+            if self._up(model_key, url):
+                return True
+            time.sleep(10)
+        return False
+
     def make_cold(self, model_key: str, url: str, level: str | None = None) -> str:
         """Clean mode, before a run's first model call: make the prefix cache cold. Restarts the server
         (restart_server) on the sweep's first run, every CBENCH_RESTART_EVERY runs (default 25; 1 =
@@ -565,6 +578,7 @@ class Experiment:
         failed: list[str] = []
         lock = threading.Lock()
         counter = iter(range(1, len(todo) + 1))
+        numbers: dict[str, int] = {}
         # results/sweep_status.json: what this sweep still has queued and what is running now, for the
         # in-progress page (scripts/build_report.py). Rewritten on every change, removed at the end.
         status_path = self.results_path.parent / "sweep_status.json"
@@ -591,7 +605,9 @@ class Experiment:
         # concurrent sweeps: drain and restart the server when host memory runs low
         cond = threading.Condition()
         gate_state = {"active": 0, "restarting": False, "enabled": not clean and bool(env_value("CBENCH_RESTART_CMD")),
-                      "agentic_since": None}   # agentic runs started since the last restart (None: none yet)
+                      "agentic_since": None,   # agentic runs started since the last restart (None: none yet)
+                      "down": False}           # the server stopped answering: restart before the next run
+        down_retries: dict[str, int] = {}
         min_free = int(env_value("CBENCH_RESTART_MIN_FREE_MB") or 6000)
 
         def gate(model: str, url: str, level: str) -> None:
@@ -605,7 +621,9 @@ class Experiment:
                     cond.wait()
                 since = gate_state["agentic_since"]
                 due = agentic and (since is None or since >= _restart_every(level))
-                if _free_mb() >= min_free and not due:
+                if gate_state["down"] and self._up(model, url):
+                    gate_state["down"] = False         # back already (another worker restarted it)
+                if _free_mb() >= min_free and not due and not gate_state["down"]:
                     gate_state["active"] += 1
                     if agentic:
                         gate_state["agentic_since"] = since + 1
@@ -614,7 +632,8 @@ class Experiment:
                 while gate_state["active"] > 0:
                     cond.wait()
             try:
-                reason = (f"low memory ({_free_mb()} MB free < {min_free})" if _free_mb() < min_free
+                reason = ("the server stopped answering" if gate_state["down"]
+                          else f"low memory ({_free_mb()} MB free < {min_free})" if _free_mb() < min_free
                           else f"before an agentic run ({level})")
                 print(f"{reason}: restarting the model server", file=sys.stderr)
                 self.restart_server(model, url)
@@ -624,6 +643,7 @@ class Experiment:
             finally:
                 with cond:
                     gate_state["restarting"] = False
+                    gate_state["down"] = False
                     gate_state["active"] += 1
                     gate_state["agentic_since"] = 1 if agentic else 0
                     cond.notify_all()
@@ -644,7 +664,9 @@ class Experiment:
                     if _variant(rc) in unimplemented:
                         set_state(rc.run_id, None)
                         continue
-                    i = next(counter)
+                    if rc.run_id not in numbers:       # a run queued again keeps its number
+                        numbers[rc.run_id] = next(counter)
+                    i = numbers[rc.run_id]
                     set_state(rc.run_id, "running")
                 tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
                 gate(rc.model, url, rc.level)
@@ -665,6 +687,24 @@ class Experiment:
                     print(f"({i}/{len(todo)}) {tag} restart failed, stopping: {e}", file=sys.stderr)
                     return
                 except httpx.HTTPError as e:
+                    # The server is down (not one bad request): don't race through the queue as errors.
+                    # Put the run back and restart the server before the next run (gate), or, with no
+                    # restart command, wait for it; a server that stays down ends the pass.
+                    if (isinstance(e, (httpx.TransportError, httpx.RemoteProtocolError))
+                            and not self._up(rc.model, url)
+                            and down_retries.get(rc.run_id, 0) < 2):
+                        down_retries[rc.run_id] = down_retries.get(rc.run_id, 0) + 1
+                        with lock:
+                            queue.insert(0, rc)
+                        print(f"({i}/{len(todo)}) {tag} server down ({type(e).__name__}), "
+                              f"run queued again", file=sys.stderr)
+                        if gate_state["enabled"]:
+                            gate_state["down"] = True
+                        elif not self._wait_ready(rc.model, url):
+                            with lock:
+                                queue.clear()
+                            print("model server still down, ending this pass", file=sys.stderr)
+                        continue
                     print(f"({i}/{len(todo)}) {tag} server error, will retry next run: "
                           f"{type(e).__name__}: {e}", file=sys.stderr)
                     continue

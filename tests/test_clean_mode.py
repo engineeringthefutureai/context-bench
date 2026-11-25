@@ -187,3 +187,43 @@ def test_restart_waits_for_a_new_server_not_the_old_one_still_answering(tmp_path
     exp._client_factory = lambda m, url: client
     exp.restart_server(exp.default_model, "http://a")
     assert client.start_probes >= 5               # waited until the start time changed
+
+
+def _down_once(exp, monkeypatch, state):
+    """run_one fails with a connection error while state["down"]; the first run takes the server down."""
+    import httpx
+    real = exp.run_one
+    def run_one(rc, url=None, **kw):
+        if not state["fired"]:
+            state.update(fired=True, down=True)
+        if state["down"]:
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        return real(rc, url, **kw)
+    monkeypatch.setattr(exp, "run_one", run_one)
+
+
+def test_concurrent_sweep_restarts_a_server_that_went_down_and_retries_the_run(tmp_path, monkeypatch):
+    exp, client, urls = _clean_exp(tmp_path, monkeypatch, "true")
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: 10**6)
+    state = {"fired": False, "down": False, "restarts": 0}
+    client.ready = lambda: not state["down"]
+    def restart(model, url):
+        state["restarts"] += 1
+        state["down"] = False
+    monkeypatch.setattr(exp, "restart_server", restart)
+    _down_once(exp, monkeypatch, state)
+    exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"])
+    assert state["restarts"] == 1
+    assert len(results.load(exp.results_path)) == len(exp.configs(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"]))
+
+
+def test_sweep_without_restarts_ends_the_pass_while_the_server_stays_down(tmp_path, monkeypatch, capsys):
+    exp, client, urls = _clean_exp(tmp_path, monkeypatch, "true")
+    monkeypatch.delenv("CBENCH_RESTART_CMD")
+    monkeypatch.setenv("CBENCH_READY_TIMEOUT", "0")
+    state = {"fired": False, "down": False}
+    client.ready = lambda: not state["down"]
+    _down_once(exp, monkeypatch, state)
+    exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"])
+    err = capsys.readouterr().err
+    assert "ending this pass" in err and err.count("server error, will retry") <= 2
