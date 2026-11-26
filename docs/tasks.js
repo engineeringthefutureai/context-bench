@@ -6,6 +6,9 @@
   const diff = (t) => esc(t).split("\n").map((l) => l.startsWith("@@") ? `<span class="hunk">${l}</span>` : l.startsWith("+") ? `<span class="add">${l}</span>` : l.startsWith("-") ? `<span class="del">${l}</span>` : l).join("\n");
   const SOL = { reference: "Reference solution (passes)", context_blind: "Written without the repository (fails)", trusting: "Trusts the docs (fails)" };
   let tasks = [];
+  // A task prompt as flowing paragraphs: the line breaks of the task file's hard wrapping are joined, blank lines
+  // between paragraphs kept, so the text fills its box at any width.
+  const reflow = (text) => String(text).trim().split(/\n\s*\n/).map((p) => p.replace(/\s*\n\s*/g, " ")).join("\n\n");
 
   function card(t) {
     const helpers = t.helpers.length ? t.helpers.map((h) => `<code>${esc(h.qualname)}</code> <span class="meta">${esc(h.naming || "")}</span>`).join("<br>") : "none";
@@ -17,7 +20,7 @@
     const challenge = t.challenge ? `<p class="challenge"><b>The challenge.</b> ${esc(t.challenge.replace(/\s*\n\s*/g, " "))}</p>` : "";
     return `<article class="task-card" id="${esc(t.id)}"><h3>${esc(t.id)} ${chip} <span class="tag">${esc(t.category)}</span> <span class="meta">tier ${t.tier} · repo ${t.repo_sizes.join(", ")} · target <code>${esc(t.target_file)}</code></span></h3>
       ${challenge}
-      <pre class="prompt">${esc(t.prompt)}</pre>
+      <pre class="prompt task-prompt">${esc(reflow(t.prompt))}</pre>
       <div class="facts"><span>needs <b>${helpers}</b></span><span>decoys <b>${decoys}</b></span></div>
       ${t.notes ? `<div class="task-notes"><div class="lab">What the runs show</div>${t.notes.split(/\n\s*\n/).map((p) => `<p>${esc(p.replace(/\s*\n\s*/g, " "))}</p>`).join("")}</div>` : ""}
       ${tests}${sols}

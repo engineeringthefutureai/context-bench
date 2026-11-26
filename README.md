@@ -41,8 +41,7 @@ docstring no longer matches its body. Hidden tests live outside the repo and nev
 
 - **Prompt v3 round (complete, tag `round-v3`):** repos S and M, levels L0-L7, thinking off and on (clean
   mode: cold prefix cache before every run), 440 + 440 runs, blind-graded. Findings:
-  [docs/findings.md](docs/findings.md), illustrated in [docs/report.html](docs/report.html). The diagrams in
-  `docs/diagrams/` (levels, task coverage, experiment flow) describe this round.
+  [docs/findings.md](docs/findings.md), illustrated in [docs/report.html](docs/report.html).
 - **Prompt v4 round (in progress, `main`):** adds repo L, L8, the file tree as L7's starting context, and
   EmbeddingGemma 2 with an 8k window and no truncation. Thinking off first, then the clean thinking-on
   round. Penalty grading comes after that.
