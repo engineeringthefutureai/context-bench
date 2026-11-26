@@ -81,8 +81,13 @@ class AgRun:
     calls: list[dict] = field(default_factory=list)   # per model call, from the proxy: tokens, latency, throttle wait
 
 
-def user_prompt(task: Task) -> str:
-    return USER_TEMPLATE.format(task=task.prompt.strip(), workspace=WORKSPACE)
+def user_prompt(task: Task, repo: Path | None = None) -> str:
+    """The task text, then (when the change creates a file, i.e. the target doesn't exist in the repository copy) the
+    same "File: <path> / (This file does not exist yet.)" block every other level gets, then where the repository is."""
+    text = task.prompt.strip()
+    if repo is not None and task.target_file and not (repo / task.target_file).exists():
+        text += f"\n\nFile: {task.target_file}\n(This file does not exist yet.)"
+    return USER_TEMPLATE.format(task=text, workspace=WORKSPACE)
 
 
 def upstream_url(base_url: str) -> str:
@@ -122,7 +127,7 @@ def run_ag(task: Task, sandbox: Path, *, base_url: str, model: str, api: str = "
     chat_template_kwargs.enable_thinking on every request (None: as the harness sends it, i.e. the server's default)."""
     with tempfile.TemporaryDirectory(prefix="l-ag-out-") as out, tempfile.TemporaryDirectory(prefix="l-ag-usage-") as usage:
         out_dir, usage_dir = Path(out), Path(usage)
-        (out_dir / "prompt.txt").write_text(user_prompt(task))
+        (out_dir / "prompt.txt").write_text(user_prompt(task, sandbox))
         project = f"l-ag-{uuid.uuid4().hex[:12]}"
         compose = [*COMPOSE, "-p", project]
         env = {**os.environ, "L_AG_WORKSPACE": str(sandbox.resolve()), "L_AG_OUT": str(out_dir),
@@ -199,6 +204,16 @@ def quota_detail(run: AgRun) -> str:
 def quota_error(run: AgRun) -> bool:
     text = " ".join(x for x in (run.error, run.stop_reason) if x)
     return any(m in text for m in QUOTA_MARKERS)
+
+
+SERVER_MARKERS = ("connection refused", "Connection refused", "connection reset", "EOF", "502", "503",
+                  "Bad Gateway", "Service Unavailable", "model API unreachable", "RemoteDisconnected")
+
+
+def server_error(run: AgRun) -> bool:
+    """The harness stopped because the model server failed (down, restarting, gateway errors), not because of
+    the agent: not a result. The runner raises it as a server error, so the sweep retries the run."""
+    return run.finish_reason == "error" and any(m in (run.error or "") for m in SERVER_MARKERS)
 
 
 OUTPUT_ARGS = ("combined_output", "output", "results", "matches")   # tool output the harness puts in a call's args

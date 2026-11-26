@@ -96,6 +96,13 @@ def home() -> bytes:
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def guess_type(self, path):
+        """Text files are UTF-8: say so, or a browser may read a stylesheet or script as Windows-1252."""
+        ctype = super().guess_type(path)
+        if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+            return ctype + "; charset=utf-8"
+        return ctype
+
     def _send(self, body: bytes, ctype: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", ctype)

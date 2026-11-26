@@ -32,6 +32,11 @@ LEVEL_ORDER = ["L0", "L1", "L1 +hint", "L2", "L3", "L4 bm25", "L4 embed", "L5 bm
                "L6", "L6+docs", "L7 grep", "L7 hybrid", "L7 rich", "L7 selective"]
 
 
+def lag_last(label: str) -> tuple:
+    """Labels outside LEVEL_ORDER sort by name, except L-AG (an external harness, not a context level): last."""
+    return (label.startswith("L-AG"), label)
+
+
 def e(x) -> str:
     return html.escape(str(x))
 
@@ -118,7 +123,7 @@ def penalty_section(rows: list[dict], title: str) -> str:
     by = collections.defaultdict(list)
     for r in rows:
         by[level_label(r)].append(r)
-    order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER))
+    order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER), key=lag_last)
     body, graded_all = [], []
     for lab in order:
         rs = by[lab]
@@ -219,7 +224,7 @@ def build_progress(final: dict, off: dict) -> str:
         labels = set(by) | {lab for (x, lab) in pending if x == rnd}
         if not labels:
             return f"<h3>{e(title)}</h3><p class=small>Nothing recorded or queued yet.</p>"
-        order = [l for l in LEVEL_ORDER if l in labels] + sorted(labels - set(LEVEL_ORDER))
+        order = [l for l in LEVEL_ORDER if l in labels] + sorted(labels - set(LEVEL_ORDER), key=lag_last)
         retry = {lab: max(expected[rnd, lab] - len(by[lab]) - sum(pending[rnd, lab].values()), 0) for lab in order}
         totals = {lab: len(by[lab]) + sum(pending[rnd, lab].values()) + retry[lab] for lab in order}
         scale = max(totals.values())
@@ -304,7 +309,7 @@ def build() -> str:
     by = collections.defaultdict(list)
     for r in F:
         by[level_label(r)].append(r)
-    order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER))
+    order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER), key=lag_last)
     oc_all = collections.Counter(outcome(r) for r in F)
     n_all = len(F)
 

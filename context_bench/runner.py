@@ -39,7 +39,8 @@ from .apply import (UnsafePath, apply_files, changed_files, format_status, make_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
-from .levels.l_ag_antigravity import (ModelQuotaError, percentiles as ag_percentiles, quota_detail as ag_quota_detail, quota_error as ag_quota_error, run_ag,
+from .levels.l_ag_antigravity import (ModelQuotaError, percentiles as ag_percentiles, quota_detail as ag_quota_detail,
+                                     server_error as ag_server_error, quota_error as ag_quota_error, run_ag,
                                      seen_text as ag_seen_text, user_prompt as ag_user_prompt)
 from .levels.l7_agentic import (FORMAT_RETRY, FORMAT_RETRY_EDIT, SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
                                 tool_schemas, turn_prompts)
@@ -254,7 +255,7 @@ class Experiment:
             messages = render(task, ctx, rc.prompt_arm, rc.prompt_version, rc.tool_names)
             prompt_tokens = 0 if hosted else client.count_prompt_tokens(messages)
             if rc.level == "L-AG":      # the harness's own system prompt; this is the user turn it gets
-                messages = [{"role": "user", "content": ag_user_prompt(task)}]
+                messages = [{"role": "user", "content": ag_user_prompt(task, sandbox)}]
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
                         sampling=self._sampling.get(rc.model, {}), ws=ws)
 
@@ -309,6 +310,8 @@ class Experiment:
                 ag = run_ag(task, sandbox, base_url=url, model=model_cfg["model"], api=model_cfg.get("api", "openai"),
                             rpm=model_cfg.get("rpm", 0), tpm=model_cfg.get("tpm", 0),
                             thinking=None if hosted else rc.thinking)
+                if ag_server_error(ag):   # the model server failed mid-run: the sweep retries it, nothing recorded
+                    raise httpx.RemoteProtocolError(f"L-AG: model server error ({(ag.error or '')[:200]})")
                 if ag_quota_error(ag):    # the API's quota, not the agent: nothing is recorded, run it again later
                     raise ModelQuotaError(f"{rc.model}: quota exhausted ({ag_quota_detail(ag)})")
                 chat = ChatResult(content=ag.content, reasoning=ag.reasoning or "", tokens_in=ag.tokens_in,

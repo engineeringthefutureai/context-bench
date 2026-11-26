@@ -268,6 +268,67 @@ def read(p: Path) -> str | None:
     return p.read_text(errors="replace") if p.exists() else None
 
 
+LAG_OUTPUT_ARGS = ("combined_output", "exit_code", "output")
+
+
+def _repo_dir(size: str) -> Path | None:
+    try:
+        repos = tomllib.loads((ROOT / "config" / "experiment.toml").read_text())["repos"]
+        return ROOT / repos[size]
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return None
+
+
+def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
+    """An L-AG run (the Antigravity harness) in the viewer's chat format. Its transcript is the harness's steps
+    (type, source, content, thinking, tool_calls with args); each model step becomes a model turn and each tool
+    call a harness result: run_command's command, exit code and output, view_file's lines (read from the
+    repository as it was before the change, since the harness keeps file contents to itself), edit_file's
+    edit blocks. The prompt (a USER step) and the bookkeeping records (MODEL_CALLS, TOOL_RESULTS) are left out."""
+    out = []
+    for i, t in enumerate(entries):
+        kind, source = t.get("type"), t.get("source")
+        if kind in ("MODEL_CALLS", "TOOL_RESULTS") or source == "USER":
+            continue
+        if source == "SYSTEM":
+            if (t.get("content") or "").strip():
+                out.append({"role": "user", "content": scrub(t["content"])})
+            continue
+        item = {"role": "assistant", "content": scrub(t.get("content") or "")}
+        if t.get("thinking"):
+            item["reasoning"] = scrub(t["thinking"])
+        calls = t.get("tool_calls") or []
+        if calls:
+            item["tool_calls"] = []
+        results = []
+        for j, c in enumerate(calls):
+            args = c.get("args") if isinstance(c.get("args"), dict) else {}
+            shown = {k: v for k, v in args.items() if k not in LAG_OUTPUT_ARGS}
+            cid = f"lag-{i}-{j}"
+            item["tool_calls"].append({"id": cid, "name": c.get("name", "tool"), "arguments": scrub(json.dumps(shown))})
+            name = c.get("name")
+            if name == "run_command":
+                res = f"$ {args.get('command_line', '')}\nexit {args.get('exit_code')}\n\n{args.get('combined_output') or ''}"
+            elif name == "view_file":
+                path = str(args.get("file_path", "")).removeprefix("/workspace/")
+                start, end = int(args.get("start_line") or 0), args.get("end_line")
+                text = ""
+                f = (repo / path) if repo else None
+                if f and f.is_file() and f.resolve().is_relative_to(repo.resolve()):
+                    lines = f.read_text(errors="replace").splitlines()
+                    text = "\n".join(lines[start:None if end is None else int(end) + 1])
+                res = (f"{path}, lines {start}-{end} (as in the repository before the change)\n\n{text}" if text
+                       else f"{path}, lines {start}-{end} (a file the agent created or changed; content not recorded)")
+            elif name in ("edit_file", "create_file"):
+                res = json.dumps({k: v for k, v in args.items() if k != "file_path"}, indent=1)
+            else:
+                res = json.dumps(args, indent=1)
+            results.append({"role": "tool", "tool_call_id": cid, "content": scrub(res)})
+        out.append(item)
+        out.extend(results)
+    return out
+
+
 def run_payload(r: dict) -> dict:
     d = RESULTS / "runs" / r["run_id"]
     target = r.get("target_file")
@@ -278,7 +339,10 @@ def run_payload(r: dict) -> dict:
         m = re.search(r"^Target file: (.+)$", user, re.M)
         target = m.group(1).strip() if m else TARGETS.get(r["task_id"], "")   # v4 prompts name no target
     transcript = []
-    if (d / "transcript.jsonl").exists():
+    if r.get("level") == "L-AG" and (d / "transcript.jsonl").exists():
+        transcript = lag_transcript([json.loads(x) for x in open(d / "transcript.jsonl") if x.strip()],
+                                    _repo_dir(r["repo_size"]))
+    elif (d / "transcript.jsonl").exists():
         for line in open(d / "transcript.jsonl"):
             t = json.loads(line)
             if "message" in t and "role" not in t:                  # a wrapped final message

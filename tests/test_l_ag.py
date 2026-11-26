@@ -172,7 +172,7 @@ def test_run_ag_reads_the_result(tmp_path, monkeypatch):
     run = ag.run_ag(_task(), tmp_path, base_url="http://localhost:8080", model="Qwen/Qwen3.8-27B")
     assert run.content == "Done." and run.tool_calls == 4
     assert (run.model_calls, run.peak_ctx_tokens, run.tokens_in, run.tokens_cached, run.tokens_out) == (2, 3000, 4000, 900, 130)
-    assert seen["prompt"] == ag.user_prompt(_task())
+    assert seen["prompt"] == ag.user_prompt(_task(), tmp_path)
     assert seen["env"]["L_AG_WORKSPACE"] == str(tmp_path.resolve())
     assert seen["env"]["L_AG_PROXY_UPSTREAM"] == "http://host.docker.internal:8080"
     assert seen["cmd"][-1] == "l-ag" and "--rm" in seen["cmd"]
@@ -315,3 +315,23 @@ def test_run_ag_passes_thinking(tmp_path, monkeypatch):
     assert seen["thinking"] == "off"
     ag.run_ag(_task(), tmp_path, base_url="http://localhost:8080", model="m")
     assert seen["thinking"] == ""
+
+
+def test_model_server_errors_are_not_results():
+    assert ag.server_error(ag.AgRun(finish_reason="error", error="AntigravityExecutionError: dial tcp: connection refused"))
+    assert ag.server_error(ag.AgRun(finish_reason="error", error="Error 503, Message: Service Unavailable"))
+    assert not ag.server_error(ag.AgRun(finish_reason="timeout", error="timed out after 3600 s"))
+    assert not ag.server_error(ag.AgRun(finish_reason="harness_stop", error="stopped by the harness: MAX_MODEL_CALLS_EXCEEDED"))
+
+
+def test_prompt_names_a_file_the_change_creates(tmp_path):
+    """Like every other level: a target that doesn't exist yet is named, as "File: path / (This file does not
+    exist yet.)"; an existing target is not."""
+    t = Task(id="control-001", category="control", tier=1, prompt="Create parse_weight(text).",
+             target_file="shopkit/utils/units.py", needed_helpers=(), hidden_tests=Path("/nonexistent"))
+    text = ag.user_prompt(t, tmp_path)
+    assert "File: shopkit/utils/units.py\n(This file does not exist yet.)" in text
+    assert text.index("Create parse_weight") < text.index("File:") < text.index("/workspace")
+    (tmp_path / "shopkit/utils").mkdir(parents=True)
+    (tmp_path / "shopkit/utils/units.py").write_text("")
+    assert "File:" not in ag.user_prompt(t, tmp_path)

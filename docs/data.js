@@ -90,7 +90,10 @@
       .replace("selective", "sel").replace("hybrid", "hyb").replace("qwen names", "qw").replace(/\s+/g, " ").trim();
     return v || "·";
   };
-  const levelOrder = (a, b) => a.level.localeCompare(b.level, "en", {numeric: true}) || a.label.localeCompare(b.label);
+  // L-AG (an external harness, not one of the context levels) always comes last
+  const lagLast = (x) => (String(x).startsWith("L-AG") ? 1 : 0);
+  const byLabel = (x, y) => lagLast(x) - lagLast(y) || String(x).localeCompare(String(y), "en", {numeric: true});
+  const levelOrder = (a, b) => lagLast(a.level) - lagLast(b.level) || a.level.localeCompare(b.level, "en", {numeric: true}) || a.label.localeCompare(b.label);
 
   function renderMatrix() {
     const scope = runs.filter((r) =>
@@ -166,7 +169,7 @@
     const opts = (vals, cur, all) => `<option value="">${all}</option>` + vals.map((v) => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("");
     const uniq = (k) => [...new Set(runs.map((r) => r[k]))].sort();
     $("#f-task").innerHTML = opts(uniq("task_id"), state.task, "All tasks");
-    $("#f-level").innerHTML = opts(uniq("level_label"), state.level, "All levels");
+    $("#f-level").innerHTML = opts(uniq("level_label").sort(byLabel), state.level, "All levels");
     $("#f-label").innerHTML = opts(uniq("outcome"), state.label, "Any outcome");
     $("#f-round").value = state.round;
     $("#f-q").value = state.q;
@@ -474,7 +477,7 @@
     // other runs of the same task: the quickest way to pick a comparison
     const m = run.meta;
     const twins = runs.filter((r) => r.task_id === m.task_id && r.run_id !== m.run_id)
-      .sort((x, y) => x.round.localeCompare(y.round) || x.level_label.localeCompare(y.level_label) || x.repo_size.localeCompare(y.repo_size));
+      .sort((x, y) => x.round.localeCompare(y.round) || byLabel(x.level_label, y.level_label) || x.repo_size.localeCompare(y.repo_size));
     return `<label>Compare A with <select id="twin"><option value="">same task, another run…</option>` +
       twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"} · ${r.outcome}</option>`).join("") +
       `</select></label>`;
