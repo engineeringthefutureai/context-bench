@@ -29,6 +29,10 @@ DOCS = ROOT / "docs"
 NAV = [("./", "Results", "index"), ("method", "Method", "method"), ("levels", "Levels", "levels"), ("tasks", "Tasks", "tasks"), ("cases", "Cases", "cases"),
        ("guide", "Guide", "guide"), ("data", "Raw data", "data"), ("downloads", "Downloads", "downloads")]
 
+# Footer: the round the site reports and when its results were final (fixed, so a rebuild is reproducible).
+ROUND = "Prompt v4 round"
+UPDATED = "26 November 2026"
+
 _HEADER = re.compile(r"\A<!--\n(.*?)\n-->\n", re.S)
 
 
@@ -52,7 +56,7 @@ def render(content: str, *, page: str, title: str, description: str, scripts: li
         description=html.escape(description, quote=False).replace('"', "&quot;"),
         content=content.strip("\n"), scripts=tags, style_css=asset("style.css"), site_css=asset("site.css"),
         main_attr=f' class="{main_class}"' if main_class else "",
-        analytics_js=asset("analytics.js"))
+        analytics_js=asset("analytics.js"), round=ROUND, updated=UPDATED)
 
 
 def _page_file(name: str) -> Path:

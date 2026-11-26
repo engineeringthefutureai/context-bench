@@ -147,7 +147,7 @@ def penalty_section(rows: list[dict], title: str, sid: str = "penalties") -> str
         f"({', '.join(p['code'] for p in g['penalties'])})</li>" for r, g in worst)
     catalogue = "".join(f"<tr><td><code>{c}</code></td><td>{e(d)}</td><td class=r>{p}</td></tr>" for c, d, p in PENALTY_POINTS)
     intro = (f"""    <p class="prose">The hidden tests decide PASS or FAIL, and the judge never changes that. For each passing
-    patch, a blind judge (agy) looks for defects the tests wouldn't catch, using only the codes below, and has to
+    patch, a blind judge (Gemini 4 Neon in agy) looks for defects the tests wouldn't catch, using only the codes below, and has to
     quote a changed line of the patch for each one. The harness keeps a penalty only if that quote really is a
     changed line. Points range from 0 (nothing found) to the cap of -40. They rate how clean a passing patch is, and
     PASS or FAIL still comes from the tests alone. Failing runs aren't graded.</p>
@@ -515,8 +515,8 @@ def build_final(final: dict, off: dict) -> str:
          f"L8 reads by symbol and edits in place. It reached the highest pass rate ({pc('L8')}) but used more input per run than L7 (median {st.median(r['tokens_in'] for r in G_on['L8']) / 1e3:.0f}k against {l7_in[1]:.0f}k)."),
         ("Documentation drift (the trap task) is caught only where the helper's body is in view.", "held",
          f"Thinking on, the model reused and fixed the helper at {', '.join(trap_fixed)}, and failed at L6 on both repos, where only the signature and docstring are in view."),
-        ("A second chance after a failed check recovers answers.", "held",
-         f"{len(tail)} agent runs ended with a file that didn't parse or failing repository tests and got one more turn. {tail_pass} of them pass."),
+        ("A single feedback loop can make a huge difference.", "held",
+         f"{len(tail)} agent runs ended with a file that didn't parse or failing repository tests and got one more turn with the error. {tail_pass} of them pass now."),
         ("A reuse hint in the prompt raises reuse.", "small",
          f"Thinking on: L1 {pc('L1')} → {pc('L1 +hint')}, L5 embed {pc('L5 embed task_vs_code')} → {pc('L5 embed task_vs_code +hint')}. Thinking off, the hint scores one run lower in both."),
     ]
@@ -688,7 +688,7 @@ def build_final(final: dict, off: dict) -> str:
   <section>
     <div class="eyebrow">Quality</div>
     <h2>How clean the passing code is</h2>
-    <p class="prose">A blind judge (agy) read every passing patch. It never learned which level produced a patch, and it
+    <p class="prose">A blind judge, Gemini 4 Neon in Google Antigravity (agy), read every passing patch. It never learned which level produced a patch, and it
     flagged what tests can't see: unrelated edits, re-implemented helpers, broken conventions, logic that looks wrong where
     no test reaches, and risky code. A clean pass clears the hidden tests, leaves the repository's own tests green and draws no
     flag from the judge.</p>
@@ -706,6 +706,10 @@ def build_final(final: dict, off: dict) -> str:
       and loop, shell commands included. It passed {passed(lag_on)} of {len(lag_on)} with thinking on and {passed(lag_off)} of
       {len(lag_off)} with thinking off. That's level with the best primitive agents here ({lag_l78} of 57), though it read far
       more, a median {lag_in:.0f}k input tokens per run against {l8_in:.0f}k for L8.</p>
+      <p class="prose">Gemini 3.5 Flash-Lite, the cheapest model of Gemini's previous generation and the family Antigravity
+      was built around, ran the same harness on 10 of the hardest task cells. It passed all 10, against 9 of 10 for Qwen
+      in each round, and none of its 141 shell commands ran empty. It also read more, a median 734k input tokens per
+      run on those cells, against 483k for Qwen with thinking on.</p>
       <p class="small">Two caveats apply. Antigravity was built around Gemini, and Qwen often named tool arguments its own
       way, which left many shell commands empty (the Levels page has the numbers). L-AG also ran one sample per task, like
       everything else. On these tasks and this model, the primitive agents matched a commercial harness.</p>

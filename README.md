@@ -2,29 +2,48 @@
 
 Measuring how context building shapes LLM-written code, from one pasted file to agentic search.
 
-Site: **https://context.engineeringthefuture.ai/** (results, the raw data of every run, method, tasks).
+Site: **https://context.engineeringthefuture.ai/**, with the results, every run's raw data, the method, the
+levels, the tasks and notable case studies.
 
-The same model gets the same coding tasks nine times over, each time with its context built a different way,
-while the system prompt, task text, output format and generation settings stay identical at every level. The levels are deliberately simple, one harness component each, so the results show what even a crude
-context strategy does to the code.
+One model, Qwen 3.8 27B, gets the same 30 coding tasks at every level. Only the context changes. System
+prompt, task text, output format and generation settings stay identical. The levels are deliberately simple,
+one harness component each, so the results show what even a crude context strategy does to the code.
 
-| Level | Strategy |
+| Level | Context |
 |---|---|
-| L0 | No context (control tasks only) |
-| L1 | One file (the target) |
-| L2 | Hand-picked files: the target, its imports, its test file |
-| L3 | Whole project |
-| L4 | File-level RAG (BM25 or embeddings) |
-| L5 | Function-level RAG (task text or the model's own queries) |
-| L6 | Repo map: one-line signatures (+ docstrings) |
-| L7 | Agentic search: grep / hybrid / rich / selective tool sets, 15-call budget |
-| L8 | Experimental agent: symbol list, `read_symbol` only, edits made with `edit` / `create_file` tools |
+| L0 | Task text only (control tasks) |
+| L1 | The target file |
+| L2 | The target, its imports and its test file |
+| L3 | The whole repository |
+| L4 | Target + 3 files found by BM25 or embeddings |
+| L5 | Target + 8 functions found by search (task text or the model's own queries) |
+| L6 | Target + a map of every signature (optionally with docstrings) |
+| L7 | An agent with search tools and a 15-call budget, starting from the file tree: grep, hybrid, rich, selective |
+| L8 | An agent that reads by symbol and edits the repository in place |
+| L-AG | Reference: the same model inside Google's Antigravity agent harness, confined in Docker (also run with Gemini 3.5 Flash-Lite) |
 
-Each level sits in its own self-contained module under `context_bench/levels/`, readable without the others.
+Each level lives in its own self-contained module under `context_bench/levels/`, readable without the others.
 
-Every run records whether the hidden tests passed, whether the model reused the helper the repo already has
-(a spy test checks this) or wrote its own, whether it had seen that helper at all, whether it touched dead code,
-whether the repo's own tests still pass, and what the run cost in tokens and time.
+Every run records whether the hidden tests passed, whether the model reused the helper the repository already
+has (a spy test checks this) or wrote its own, whether it had seen that helper, whether it touched dead code,
+whether the repository's own tests still pass, and what the run cost in tokens and time. A blind judge then
+reads every passing patch for defects the tests miss.
+
+## Results (prompt v4 round)
+
+2,122 runs on repos S, M and L, with thinking off and on, one sample per configuration. On these tasks:
+
+- The agents (L7, L8) passed 93-96% with thinking on, on every repo size. The best search-based level reached 68%.
+- Clean passes, which pass the tests, keep the repository's own tests green and draw no penalty from the judge,
+  rose from 10% with one file to 82% at L8.
+- Thinking lifted the one-shot levels L1-L6 from 35% to 59% PASS, and the agents from 81% to 93%.
+- With thinking on, the agents read about half as much, and the whole round used fewer tokens (53M against 33M).
+- L-AG passed 53 of 57 with thinking on, level with the best primitive agents, on about 3× the input of L8.
+  On 10 of the hardest cells, Gemini 3.5 Flash-Lite in the same harness passed all 10 (Qwen: 9 of 10), with
+  none of the empty shell commands Qwen sent when it named tool arguments its own way.
+
+The full write-up, the hypotheses and their verdicts are on the site. The v3 round (repos S and M, 880 runs)
+stays available at the tag `round-v3`.
 
 ## Tasks and repos
 
@@ -34,50 +53,73 @@ whether the repo's own tests still pass, and what the run cost in tokens and tim
 - **L** (~169k tokens, too big for the model's window at L3): the same shop a year later, with SQL
   migrations, templates and incident-bloated functions
 
-By category that's 13 reuse, 4 cross-file, 3 convention, 4 control, 5 long-function and 1 trap, a helper whose
-docstring no longer matches its body. Hidden tests live outside the repo and never enter the context.
+By category: 13 reuse, 4 cross-file, 3 convention, 4 control, 5 long-function and 1 trap, whose helper's
+docstring no longer matches its body. Hidden tests live outside the repository and never enter the context.
+Every task has a reference solution that passes, and the context-dependent ones keep a plausible solution
+written without the repository that fails.
 
-## Status
+## How the harness works
 
-- **Prompt v3 round (complete, tag `round-v3`):** repos S and M, levels L0-L7, thinking off and on (clean
-  mode: cold prefix cache before every run), 440 + 440 runs, blind-graded. Findings:
-  [docs/findings.md](docs/findings.md), illustrated in [docs/report.html](docs/report.html).
-- **Prompt v4 round (in progress, `main`):** adds repo L, L8, the file tree as L7's starting context, and
-  EmbeddingGemma 2 with an 8k window and no truncation. Thinking off first, then the clean thinking-on
-  round. Penalty grading comes after that.
-
-The site (`docs/`, published with GitHub Pages at context.engineeringthefuture.ai) has one layout,
-`site/layout.html` (head, top bar, footer), and two kinds of content:
-
-- **Written pages**, `site/pages/*.md` (method, guide, downloads) and `*.html` shells (raw data, tasks, 404):
-  `python3 scripts/build_pages.py` renders them into the layout (needs `pip install -e '.[site]'`).
-- **Generated content**: `scripts/build_report.py` builds the Results page from `results/` into the same
-  layout; `scripts/build_site.py` writes the run data and tasks JSON that the raw-data and tasks pages load
-  on demand.
-
-`scripts/live_site.py` serves a live preview that re-renders everything on every request. Assets are versioned
-by content, so nothing goes stale. Visits are counted with Google Analytics
-(`docs/analytics.js`, off on local previews).
+- **Outcomes** come from the hidden tests alone: PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER,
+  STOPPED EARLY, INVALID, OUT OF TOKENS, OUT OF TIME, NO FIT (`docs/labeling-design.md`).
+- **Second chance:** when an agent tries to finish, the harness compiles every changed file (L7) or runs the
+  repository's own tests (L8), never the hidden ones, and returns a failure for one more turn. The agent isn't
+  told in advance.
+- **Grading:** a blind judge (Gemini 4 Neon in `agy`) penalises defects in passing patches from a fixed catalogue and must quote
+  a changed line for each (`docs/penalty-grading-design.md`). It never changes PASS or FAIL.
+- **L-AG:** each run gets its own Docker compose project. The agent's container sees only its repository copy,
+  and a separate proxy container holds the model API key (`docker/l-ag/`). The model is replaceable: Qwen on
+  vLLM, or Gemini through its API.
 
 ## Running it
 
 ```bash
 pip install -e '.[dev]'
 pytest
-cp .env.example .env                 # API key, optional restart command for clean mode
+cp .env.example .env                 # model server key; GEMINI_API_KEY for L-AG on Gemini
 cbench validate-retrieval --retrievers bm25,embed
 cbench one --task reuse-001 --level L1
 cbench run --dry-run                 # what a sweep would run; `cbench run` resumes by run id
+cbench run --thinking                # every configuration with thinking on
+cbench grade --mode penalty --judge agy --export DIR   # blind grading queue for the agy judge
 cbench report
 ```
 
-The guide page (`docs/guide.html`) covers configuration: models, the embedder, generation and the sweep.
+Any OpenAI-compatible endpoint works, plus an embedder for the embedding variants. The guide page covers
+configuration: models, the embedder, generation and the sweep, and how long a round takes.
+
+## The site
+
+`docs/` is published with GitHub Pages at context.engineeringthefuture.ai. One layout, `site/layout.html`
+(head, top bar, footer), wraps two kinds of content:
+
+- **Written pages**, `site/pages/*.md` (method, levels, case studies, guide, downloads) and `*.html` shells
+  (raw data, tasks, 404): `python3 scripts/build_pages.py` renders them (needs `pip install -e '.[site]'`).
+- **Generated content**: `scripts/build_report.py` builds the Results page from `results/`, and
+  `scripts/build_site.py` writes the run data and task JSON that the raw-data viewer and the tasks page load.
+  It scrubs local paths and ends with a leak scan.
+
+`scripts/live_site.py` serves a live preview that re-renders on every request. Assets are versioned by
+content. Visits are counted with Google Analytics (`docs/analytics.js`, off on local previews).
 
 ## Design notes
 
-- `docs/design.md`: questions, metrics, controls, decisions, and dated results per experiment
-- `docs/semantic-search-design.md`: the embedding index (no truncation, windows, bulk builds on the B60s)
+- `docs/design.md`: questions, metrics, controls and decisions
+- `docs/semantic-search-design.md`: the embedding index (no truncation, windows, bulk builds)
 - `docs/repo-L-design.md`: how repo L was grown from M
-- `docs/penalty-grading-design.md`: the judge for the v4 round
-- `docs/labeling-design.md`: how runs get outcomes and badges (exact rules, embeddings, validation)
+- `docs/penalty-grading-design.md`: the penalty judge
+- `docs/labeling-design.md`: how runs get outcomes and badges
 - `CLAUDE.md`: the hard rules and the current state of every level, in detail
+
+## Credits
+
+The harness, the analysis and the site were written with [Claude Code](https://claude.com/claude-code)
+(Claude Opus 5.5). The model under study is Qwen 3.8 27B, served by vLLM, with EmbeddingGemma 2 on Ollama for
+embeddings. Gemini 4 Neon in Google Antigravity (`agy`) is the blind judge, and the Antigravity SDK powers the L-AG reference.
+
+## License
+
+MIT, see [LICENSE](LICENSE). It covers the code, tasks, fixtures, rubric and published run data.
+Dependencies keep their own permissive licenses (httpx and Markdown: BSD-3-Clause; numpy: BSD; pytest: MIT;
+the Antigravity SDK, installed only in the `docker/l-ag` image: Apache-2.0). The site loads highlight.js
+(BSD-3-Clause) and its fonts (SIL Open Font License) from their CDNs.
