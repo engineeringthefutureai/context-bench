@@ -634,7 +634,7 @@ def build_final(final: dict, off: dict) -> str:
   <header style="display:grid;gap:12px">
     <div class="eyebrow">Experiment report · prompt v4 round</div>
     <h1>How context building affects generated code</h1>
-    <p class="lede">One model, Qwen 3.8 27B, gets the same 30 coding tasks every time. Only the context changes. The
+    <p class="lede">One model gets the same 30 coding tasks every time. Only the context changes. The
     harness builds it in deliberately simple ways, from a single file up to a minimal agent that explores the repository
     with search tools of its own, and each of those ways is one primitive part of a coding harness. This page reports how far
     that one choice moved the results in this experiment, and what it cost in tokens.</p>
@@ -647,6 +647,16 @@ def build_final(final: dict, off: dict) -> str:
     <div class="takeaway"><b>Context building was the key to higher-quality code</b><span>Clean passes rose from {clean_rate['L1']:.0f}% with one file (L1) to {clean_rate['L8']:.0f}% at L8. Helper reuse went from {pct(vn[1], vn[0])} with the helper out of view to {pct(vf[1], vf[0])} with its source in context.</span></div>
     <div class="takeaway"><b>Thinking lifted one-shot prompts much more than agents</b><span>Same runs, off → on: the one-shot levels L1 to L6 went from {pct(os_off, os_n)} to {pct(os_on, os_n)} PASS, the agents from {pct(ag_off, ag_n)} to {pct(ag_on, ag_n)}.</span></div>
     <div class="takeaway"><b>Thinking made the agents read half as much</b><span>L7's median input per run fell from {l7_in[0]:.0f}k to {l7_in[1]:.0f}k tokens, and the thinking-on round used fewer tokens in total ({(in_off + out_off) / 1e6:.0f}M → {(in_on + out_on) / 1e6:.0f}M) despite the extra output.</span></div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Hypotheses</div>
+    <h2>What was expected and what was found</h2>
+    <p class="prose">Each verdict holds for this model, these 30 tasks and this codebase, with one sample per
+    configuration. Read them as observations from this experiment, to test elsewhere before relying on them. The sections after this table give the evidence behind each verdict.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Expectation</th><th>Verdict</th><th>Evidence</th></tr></thead>
+      <tbody>{hyp_rows}</tbody></table></div>
   </section>
 
   <section>
@@ -781,16 +791,6 @@ def build_final(final: dict, off: dict) -> str:
     </ul>
     <p class="small">Tool calls and input: medians per run. Clean pass: passes the tests, keeps the repository's own tests
     green, and the judge found no defect.</p>
-  </section>
-
-  <section>
-    <div class="eyebrow">Hypotheses</div>
-    <h2>What was expected and what was found</h2>
-    <p class="prose">Each verdict holds for this model, these 30 tasks and this codebase, with one sample per
-    configuration. Read them as observations from this experiment, to test elsewhere before relying on them.</p>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Expectation</th><th>Verdict</th><th>Evidence</th></tr></thead>
-      <tbody>{hyp_rows}</tbody></table></div>
   </section>
 
   <section>
