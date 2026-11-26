@@ -306,21 +306,29 @@ def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
     call a harness result: run_command's command, exit code and output, view_file's lines (read from the
     repository as it was before the change, since the harness keeps file contents to itself), edit_file's
     edit blocks. The prompt (a USER step) and the bookkeeping records (MODEL_CALLS, TOOL_RESULTS) are left out."""
-    out = []
+    out, item = [], None              # item: the model turn being assembled
     for i, t in enumerate(entries):
         kind, source = t.get("type"), t.get("source")
         if kind in ("MODEL_CALLS", "TOOL_RESULTS") or source == "USER":
             continue
         if source == "SYSTEM":
+            if item:
+                out.append(item)
+                item = None
             if (t.get("content") or "").strip():
                 out.append({"role": "user", "content": scrub(t["content"])})
             continue
-        item = {"role": "assistant", "content": scrub(t.get("content") or "")}
+        # The harness stores one model call as several steps (THINKING, TEXT_RESPONSE, then TOOL_CALL): they are
+        # one turn, which ends with the step that makes tool calls.
+        item = item or {"role": "assistant", "content": ""}
+        if (t.get("content") or "").strip():
+            item["content"] = "\n\n".join(x for x in (item["content"], scrub(t["content"])) if x)
         if t.get("thinking"):
-            item["reasoning"] = scrub(t["thinking"])
+            item["reasoning"] = "\n\n".join(x for x in (item.get("reasoning"), scrub(t["thinking"])) if x)
         calls = t.get("tool_calls") or []
-        if calls:
-            item["tool_calls"] = []
+        if not calls:
+            continue
+        item["tool_calls"] = []
         results = []
         for j, c in enumerate(calls):
             args = c.get("args") if isinstance(c.get("args"), dict) else {}
@@ -353,6 +361,9 @@ def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
             results.append({"role": "tool", "tool_call_id": cid, "content": scrub(res)})
         out.append(item)
         out.extend(results)
+        item = None
+    if item:
+        out.append(item)
     return out
 
 

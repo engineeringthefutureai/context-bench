@@ -239,6 +239,7 @@
   // its end and reopened on the next line. hljs escapes the code, so every "<" in its output is a tag.
   function hlLines(texts, lang) {
     if (!window.hljs || lang === "plaintext") return texts.map(esc);
+    if (!texts.length) return [];                         // "".split("\n") would still give one line
     const out = [], open = [];
     for (const line of hl(texts.join("\n"), lang).split("\n")) {
       const start = open.join("");
