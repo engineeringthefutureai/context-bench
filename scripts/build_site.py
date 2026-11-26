@@ -271,6 +271,27 @@ def read(p: Path) -> str | None:
 LAG_OUTPUT_ARGS = ("combined_output", "exit_code", "output")
 
 
+def lag_edit_sides(args: dict) -> tuple[str, str, str] | None:
+    """An Antigravity edit (diff_block: regions of lines marked LINE_ACTION_NONE / _INSERT / _DELETE) as the
+    viewer's old and new text, so it draws the side-by-side diff it draws for L8's edits: old = kept + deleted
+    lines, new = kept + inserted lines; several regions are joined with a "…" line. Also "lines a-b" per region."""
+    blocks = args.get("diff_block")
+    if not isinstance(blocks, list) or not blocks:
+        return None
+    olds, news, spans = [], [], []
+    for b in blocks:
+        o, n = [], []
+        for ln in b.get("lines") or []:
+            act, text = str(ln.get("action", "")), ln.get("text", "")
+            if not act.endswith("INSERT"):
+                o.append(text)
+            if not act.endswith("DELETE"):
+                n.append(text)
+        olds.append("\n".join(o)); news.append("\n".join(n))
+        spans.append(f"{b.get('start_line')}-{b.get('end_line')}")
+    return "\n…\n".join(olds), "\n…\n".join(news), ", ".join(spans)
+
+
 def _repo_dir(size: str) -> Path | None:
     try:
         repos = tomllib.loads((ROOT / "config" / "experiment.toml").read_text())["repos"]
@@ -304,9 +325,13 @@ def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
         for j, c in enumerate(calls):
             args = c.get("args") if isinstance(c.get("args"), dict) else {}
             shown = {k: v for k, v in args.items() if k not in LAG_OUTPUT_ARGS}
+            name = c.get("name")
+            sides = lag_edit_sides(args) if name in ("edit_file", "replace_file_content") else None
+            if sides:                                # the viewer draws old/new side by side
+                shown = {"path": str(args.get("file_path", "")).removeprefix("/workspace/"), "old": sides[0],
+                         "new": sides[1], "lines": sides[2]}
             cid = f"lag-{i}-{j}"
             item["tool_calls"].append({"id": cid, "name": c.get("name", "tool"), "arguments": scrub(json.dumps(shown))})
-            name = c.get("name")
             if name == "run_command":
                 res = f"$ {args.get('command_line', '')}\nexit {args.get('exit_code')}\n\n{args.get('combined_output') or ''}"
             elif name == "view_file":
@@ -319,6 +344,8 @@ def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
                     text = "\n".join(lines[start:None if end is None else int(end) + 1])
                 res = (f"{path}, lines {start}-{end} (as in the repository before the change)\n\n{text}" if text
                        else f"{path}, lines {start}-{end} (a file the agent created or changed; content not recorded)")
+            elif name in ("edit_file", "replace_file_content") and sides:
+                res = f"edited {shown['path']} (lines {sides[2]})"
             elif name in ("edit_file", "create_file"):
                 res = json.dumps({k: v for k, v in args.items() if k != "file_path"}, indent=1)
             else:
@@ -327,6 +354,18 @@ def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
         out.append(item)
         out.extend(results)
     return out
+
+
+def lag_system_segments() -> list[dict]:
+    """L-AG's system message is the Antigravity harness's own (identity, rules, tool definitions): measured once
+    (docker/l-ag/harness_prompt.json, token counts only) and shown as classified, never published."""
+    try:
+        h = json.loads((ROOT / "docker" / "l-ag" / "harness_prompt.json").read_text())
+    except (OSError, ValueError):
+        return []
+    return [dict(seg("system", "Antigravity system prompt", "[CLASSIFIED]"), tokens=h["system_prompt_tokens"]),
+            dict(seg("tools", f"Antigravity tool definitions: {', '.join(h['tools'])}", "[CLASSIFIED]"),
+                 tokens=h["tool_definitions_tokens"])]
 
 
 def run_payload(r: dict) -> dict:
@@ -381,7 +420,8 @@ def run_payload(r: dict) -> dict:
                 peak_ctx_tokens=r.get("peak_ctx_tokens"), target_file=target)
     return {
         "meta": meta,
-        "system": [dict(s, text=scrub(s["text"])) for s in segment_system(system)],
+        "system": (lag_system_segments() if r.get("level") == "L-AG"
+                   else [dict(s, text=scrub(s["text"])) for s in segment_system(system)]),
         "user": [dict(s, text=scrub(s["text"])) for s in segment_user(user, target)],
         "transcript": transcript,
         "reasoning": scrub(read(d / "reasoning.txt")),

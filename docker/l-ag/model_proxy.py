@@ -12,6 +12,8 @@ Per proxy, so per run: runs in parallel against one quota share it only if each 
 L_AG_PROXY_THINKING: "on" or "off" sets chat_template_kwargs.enable_thinking on every OpenAI-compatible chat
 request (the harness's OpenAI client has no thinking setting); unset forwards requests as sent. What the client
 itself asked for (its top-level keys and any thinking fields) is logged with each call.
+L_AG_PROXY_CAPTURE: a file for the first model request's body, written once (to measure the harness's system prompt
+and tool definitions); unset by default.
 L_AG_PROXY_USAGE: a file for one JSON line per model call: status, request size, throttle wait, latency and the
 token usage the API reported (prompt, cached, output, thinking). On the proxy's own mount, not the agent's.
 
@@ -68,6 +70,7 @@ class Throttle:
 
 THROTTLE = Throttle(RPM, TPM)
 USAGE_LOG = os.environ.get("L_AG_PROXY_USAGE")           # one JSON line per model call (the proxy's own mount)
+CAPTURE = os.environ.get("L_AG_PROXY_CAPTURE")          # write the first model request's body here, once (opt-in)
 _log_lock = threading.Lock()
 
 
@@ -150,6 +153,9 @@ class Proxy(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         waited, client_asked = 0.0, {}
         if self.command == "POST":           # model calls; GETs (model lists) are free
+            if CAPTURE and not os.path.exists(CAPTURE):
+                with open(CAPTURE, "wb") as f:   # as the harness sent it, before the thinking switch
+                    f.write(body)
             body, client_asked = apply_thinking(body)
             waited = THROTTLE.wait(len(body) / CHARS_PER_TOKEN)
         t0, status, received = time.monotonic(), None, bytearray()

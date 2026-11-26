@@ -181,17 +181,21 @@
     return cache.get(id);
   }
 
+  // a segment's size in characters; a measured token count (s.tokens: L-AG's classified harness prompt) wins
+  const segChars = (s) => (s.tokens != null ? s.tokens * 3.6 : s.text.length);
+  const segTok = (s) => (s.tokens != null ? s.tokens : tok(s.text.length));
+
   function compBar(run) {
     const segs = [...run.system, ...run.user];
-    const total = segs.reduce((s, x) => s + x.text.length, 0) || 1;
-    const parts = segs.map((s) => `<div class="k-${s.kind}" style="flex:${s.text.length / total}" title="${esc(s.label)}: ≈${fmt(tok(s.text.length))} tok"></div>`).join("");
+    const total = segs.reduce((s, x) => s + segChars(x), 0) || 1;
+    const parts = segs.map((s) => `<div class="k-${s.kind}" style="flex:${segChars(s) / total}" title="${esc(s.label)}: ≈${fmt(segTok(s))} tok"></div>`).join("");
     return `<div class="comp-wrap"><div class="comp" role="img" aria-label="Prompt composition">${parts}</div>
       <div class="meta"><span>initial prompt ≈${fmt(tok(total))} tok (est. from characters)</span><span>${segs.length} parts</span></div></div>`;
   }
 
   function segHTML(s) {
     const open = OPEN_BY_DEFAULT.has(s.kind) && s.text.length < 6000 ? " open" : "";
-    return `<details class="seg k-${s.kind}"${open}><summary><span class="lab">${esc(s.label)}</span><span class="sz">≈${fmt(tok(s.text.length))} tok</span></summary><pre>${esc(s.text)}</pre></details>`;
+    return `<details class="seg k-${s.kind}"${open}><summary><span class="lab">${esc(s.label)}</span><span class="sz">≈${fmt(segTok(s))} tok</span></summary><pre>${esc(s.text)}</pre></details>`;
   }
 
   function promptHTML(run) {
@@ -242,6 +246,19 @@
       out.push(start + line + "</span>".repeat(open.length));
     }
     return out;
+  }
+
+  // A file view (L-AG's view_file) as a code browser panel: the path and line range as its header, then numbered,
+  // highlighted lines. Antigravity's ranges are 0-based and inclusive; the panel numbers lines from 1.
+  function codeViewHTML(path, start, end, text, note) {
+    const lang = LANG[(String(path).split(".").pop() || "").toLowerCase()] || "plaintext";
+    const first = Number(start) + 1, lines = text == null ? null : text.split("\n");
+    // the lines actually shown (a range asked past the file's end is cut there); without content, the range asked for
+    const last = lines ? first + lines.length - 1 : (end === "None" || end == null ? "end" : Number(end) + 1);
+    const head = `<div class="cv-head"><span class="cv-path">${esc(path)}</span><span class="cv-range">lines ${first}–${last}</span>${note ? `<span class="cv-note">${esc(note)}</span>` : ""}</div>`;
+    if (lines == null) return `<div class="codeview">${head}</div>`;
+    const rows = hlLines(lines, lang).map((h, i) => `<tr><td class="ln">${first + i}</td><td class="code">${h || " "}</td></tr>`).join("");
+    return `<div class="codeview">${head}<div class="cv-body"><table class="cv"><colgroup><col class="n"><col></colgroup><tbody>${rows}</tbody></table></div></div>`;
   }
 
   // One file of a diff, side by side (the Diff tab and edit calls): f = {old, path, hunks, add, del}.
@@ -340,10 +357,28 @@
   // One tool call: the tool and what it targets on one line, the raw parameters collapsed, and any code it
   // carries (a new file's content, an edit's old and new text) as highlighted file text. Both vocabularies:
   // the harness's (path, old, new) and Qwen Code's (file_path, old_string, new_string).
+  // A shell command as a terminal line: the working directory as the prompt, the command as written (multi-line
+  // scripts keep their lines).
+  function termCommandHTML(cmd, cwd) {
+    return `<pre class="term"><span class="cwd">${esc(cwd || "")}</span><span class="prompt">$ </span>${esc(cmd)}</pre>`;
+  }
+
+  // run_command's result as the viewer gets it ("$ command\nexit N\n\noutput"): {exit, html} with the exit code for
+  // the result's header and the output as a terminal panel.
+  function termResult(text) {
+    const m = String(text).match(/^\$ ([\s\S]*?)\nexit (\S+)\n\n?([\s\S]*)$/);
+    if (!m) return {exit: null, html: `<pre class="term"><span class="out">${esc(text)}</span></pre>`};
+    return {exit: m[2], html: `<pre class="term"><span class="out">${esc(m[3] || "(no output)")}</span></pre>`};
+  }
+
   function callHTML(c) {
     let a = null;
     try { a = JSON.parse(c.arguments || "{}"); } catch (e) { a = null; }
     if (!a || typeof a !== "object" || Array.isArray(a)) return `<div class="call"><b>${esc(c.name)}</b> ${esc(c.arguments)}</div>`;
+    if (c.name === "run_command" && typeof a.command_line === "string") {
+      const params = `<details class="params"><summary>parameters</summary><pre>${esc(JSON.stringify(a, null, 2))}</pre></details>`;
+      return `<div class="call"><div><b>run_command</b></div>${termCommandHTML(a.command_line, a.working_dir ? a.working_dir + " " : "")}${params}</div>`;
+    }
     const path = a.path || a.file_path || "";
     const lang = LANG[(String(path).split(".").pop() || "").toLowerCase()] || "plaintext";
     const code = (label, text) => `<details class="seg k-file" open><summary><span class="lab">${esc(label)}</span><span class="sz">${String(text).split("\n").length} lines</span></summary><pre class="code"><code class="language-${lang}">${esc(text)}</code></pre></details>`;
@@ -409,6 +444,20 @@
           }).join("");
           harness.push({tool: true, html: `<div class="result-group"><div class="lab">Result · ${esc(tool)} · ${parts.length} parts</div>${items}</div>`});
           if (pointsItem) harness.push(pointsItem);
+          continue;
+        }
+        const view = tool === "view_file" && content.match(/^(.+?), lines (\d+)-(\S+) \((as in the repository before the change|a file the agent created or changed; content not recorded)\)(?:\n\n([\s\S]*))?$/);
+        if (view) {                                // L-AG's file views: a code browser panel
+          const before = view[4].startsWith("as in");
+          const panel = codeViewHTML(view[1], view[2], view[3], before ? (view[5] ?? "") : null,
+                                     before ? "as before the change" : "created or changed by the agent; content not recorded");
+          harness.push({tool: true, html: `<details class="seg k-tools" open><summary><span class="lab">Result · view_file</span><span class="sz">≈${fmt(tok(content.length))} tok</span></summary>${panel}</details>`});
+          continue;
+        }
+        if (tool === "run_command" && /^\$ /.test(content)) {      // L-AG's shell: the output as a terminal panel
+          const r = termResult(content);
+          const ex = r.exit == null ? "" : ` · <span class="${r.exit === "0" ? "exit-ok" : "exit-bad"}">exit ${esc(r.exit)}</span>`;
+          harness.push({tool: true, html: `<details class="seg k-tools" open><summary><span class="lab">Result · run_command${ex}</span><span class="sz">≈${fmt(tok(content.length))} tok</span></summary>${r.html}</details>`});
           continue;
         }
         const note = gone.length ? ` · ${all ? "dropped later" : "partly dropped later"} (${gone.map((i) => "#" + i).join(", ")}; stubs sent from then on)` : "";
