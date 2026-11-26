@@ -1,0 +1,51 @@
+--- /dev/null
++++ b/shopkit/payouts/preview.py
+@@ -0,0 +1,48 @@
++"""Preview of a seller's next payout, without running (or changing) the weekly batch.
++
++Sellers want to see what their next payout will look like before finance runs the weekly batch.
++preview_payout replays the exact weekly batch logic (batching.build_payout_batch) for one seller
++and reports (status, net_cents). The batch runs over copies of the holds book and the
++carried-forward balances, so held amounts and rollovers stay exactly as they were.
++"""
++from __future__ import annotations
++
++import copy
++from datetime import date
++
++from shopkit.config import SETTINGS, Settings
++from shopkit.payouts.batching import Rollover, build_payout_batch
++from shopkit.payouts.holds import HoldBook
++from shopkit.payouts.models import Adjustment, Earning, Seller
++from shopkit.pricing.currency import RateTable
++
++
++def preview_payout(seller: Seller, earnings: list[Earning], adjustments: list[Adjustment],
++                   period_start: date, period_end: date, holds: HoldBook, rollover: Rollover,
++                   rates: RateTable | None = None, settings: Settings = SETTINGS,
++                   seller_country: dict[str, str] | None = None,
++                   paid_lines: set[tuple[str, str, str]] | None = None) -> tuple[str, int]:
++    """What the weekly payout batch would pay `seller` for [period_start, period_end] (inclusive).
++
++    Returns (status, net_cents) of the payout build_payout_batch would create, with all of its
++    rules: commission and refunds per line, holds for orders still inside the return window,
++    released holds and adjustments added, review reserve, backup withholding, negative balances
++    and amounts below the minimum carried forward, and FX conversion for other-currency sellers
++    (pass the same `rates` table the batch would use; without one, other-currency sellers are
++    skipped, as the batch does).
++
++    The preview never changes anything: the batch runs over a deep copy of `holds` and a fresh
++    Rollover seeded from `rollover.balances`, so holds (placed, released, release dates) and
++    carried balances stay as they were. A seller the batch would skip (suspended, closed, no FX
++    rates) comes back with the skip reason and a net of 0, because the batch creates no payout
++    for them.
++    """
++    safe_holds = copy.deepcopy(holds)                         # the batch places and releases holds
++    safe_rollover = Rollover(balances=dict(rollover.balances))  # the batch takes from and puts to it
++    result = build_payout_batch([seller], list(earnings), list(adjustments), period_start, period_end,
++                                holds=safe_holds, rollover=safe_rollover, rates=rates, settings=settings,
++                                seller_country=seller_country, paid_lines=paid_lines)
++    payout = next((p for p in result.payouts if p.seller_id == seller.id), None)
++    if payout is None:
++        return result.skipped.get(seller.id, "skipped"), 0
++    return payout.status, payout.net_cents

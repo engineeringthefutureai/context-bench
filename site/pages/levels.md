@@ -81,6 +81,28 @@ Results are append-only, so everything the model has read stays in the conversat
 
 **L7 selective** is rich plus `drop`. Every tool result gets an ID such as `[#3]`, and the model can drop results of its latest tool turn (the "live tail"), each of which is then replaced by a one-line stub in all later turns. Only the latest results can be dropped, so everything older stays byte-identical and the server's cached prompt prefix survives up to the tail. Results are split into segments with their own IDs (one definition, one read range, a note), and a file's imports form a separate segment that the harness manages itself: it shows them once per file, stubs them automatically when the last code from that file is dropped, and shows them again with the file's next code. Dropping is free on the budget, and a drop that removes at least 300 tokens gives back a quarter of a call, at most two calls per run, which is taken back if the model reads the dropped code again. The tool note adds a factual explanation of why dropping helps, namely that every result is re-read with every later turn, and nothing about dead code, decoys or reuse. Selective against rich measures the dropping, and every run records what it dropped, how many input tokens the drops saved over later requests, and whether the needed helper was still in context when the model answered.
 
+### How the agents search and read
+
+Every tool call of the v4 rounds (684 runs of L7 and L8) falls into one of four kinds: text search (`grep`), lookup by name (`find_references`, and `read_symbol` given names), search by meaning (`semantic_search`) and reading (`read_file`, and `read_symbol` given line ranges or a path). The table gives calls per run, thinking off / on.
+
+| Configuration | Text search | Lookup by name | Search by meaning | Reading |
+|---|--:|--:|--:|--:|
+| L7 grep | 2.0 / 1.7 | 0.4 / 1.0 | – | 11.7 / 8.3 |
+| L7 hybrid | 1.4 / 1.6 | 0.4 / 1.0 | 0.2 / 0.3 | 11.9 / 8.2 |
+| L7 rich | 1.2 / 1.5 | 0.5 / 1.0 | 0.1 / 0.2 | 12.5 / 7.8 |
+| L7 selective | 1.7 / 1.4 | 0.4 / 0.8 | 0.1 / 0.2 | 12.3 / 6.2 |
+| L7 selective, Qwen names | 1.6 / – | 0.7 / – | 0.1 / – | 11.9 / – |
+| L8 | 0.9 / 1.1 | 1.6 / 1.8 | 0.0 / 0.0 | 4.7 / 4.0 |
+| L8, Qwen names | 1.0 / – | 1.3 / – | 0.0 / – | 4.8 / – |
+
+At L7 the agent mostly reads. With thinking off, about 12 of its 12 to 13 calls per run read code, and 88 to 96% of runs open with a read, because the file tree already names the likely files. Thinking cuts reading to 6 to 8 calls and doubles lookups by name, mostly `find_references`, so the model checks where a name is used before it opens files. Searching grows with the repository: in L7 grep it makes up 5% of searches and reads on repo S, 17% on M and 26% on L.
+
+L8 has no whole-file reader and starts from a map of every function name, and its mix changes accordingly. Lookup by name becomes its most frequent search, reading drops to 4 or 5 calls, a run takes about 10 calls instead of 12, and 28 to 44% of runs open with a lookup by name. Its share of searching stays near 36 to 40% on every repo.
+
+The kinds differ in precision. On tasks with a needed helper, a search by meaning returned that helper's source in 75% of calls (40 of 53), a lookup by name in 41%, a text search in 37% and a read in 15%. Reading still finds most helpers through sheer volume: at L7 it was the first to show 65 to 77% of the helpers, and at L8 reading showed 54% and lookups by name 39%. Search by meaning stayed rare, at most 0.3 calls per run, almost only on reuse tasks on repos M and L, with short queries in the task's product language such as "loyalty points earned on paid order".
+
+Finding the helper was never the hard part. Every configuration found 59 or 60 of the 60 needed helpers (30 of 30 for the Qwen-names arms), at a median of the third call (the second at L8), and reused it in all but one to three runs. The differences in pass rate between the agents come from what they do after finding the code, not from how they search for it.
+
 ## L8: reading by symbol, editing in place
 
 L8 is experimental: an attempt to push the model toward using fewer tokens by allowing it to read only selected parts of a file. At L7 (rich, selective) the model could already read by symbol, yet it kept reading whole files, so L8 removes the whole-file reader altogether. No gain in quality was expected, since the interest is in token use.
@@ -95,6 +117,22 @@ The first request gets a compact map of the code base, one line per file with it
 The budget is 15 points: each reading or search call costs one point, while `edit`, `create_file` and `drop` are free and keep working after the points run out, and a failed call costs half a point. After every turn the harness shows how many points are left. After each edit of a Python file, the harness compiles it, without running anything, and appends a warning with the line if the file no longer parses. A reply without tool calls ends the run, and the patch is simply the difference between the copy and the original. Two retries exist: one if the run ends without any change, and one if it ends while a changed file doesn't parse. Because the answer is a set of edits rather than `<file>` blocks, L8 uses its own output instructions, the one exception to "only the context changes", and it is reported apart from L7.
 
 Models trained on other agent harnesses reach for tools that L8 doesn't have, such as `read_file` or `write_file`. Calls to them get a specific error that says the tool doesn't exist in this harness, points to the L8 tool that does the job (`read_symbol` for reading, `edit` or `create_file` for changes) and lists the tools that are available.
+
+## L-AG: an external agent harness
+
+L-AG runs the same model inside a complete agent harness that the experiment doesn't own: Google's Antigravity SDK (`google-antigravity` 0.1.24), connected to the model server through its OpenAI-compatible client. The harness runs as shipped, with its own system prompt, its own tools (viewing, creating and editing files, and `run_command` for shell commands) and its own loop. That makes it the one exception to "only the context changes", and the only level whose agent can run code. The user turn is the task text plus where the repository is. Web search, reading URLs, images, questions to the user and subagents are switched off, since the project is public and a run has no user to ask.
+
+Each run is confined in Docker. The agent's container sees only its own copy of the repository and the prompt, with a read-only root filesystem and no Linux capabilities, and none of the project's tasks, hidden tests or results. The model is reached through a small proxy in its own container, which adds the server's key, sets the thinking switch on every request (the SDK's client has none) and records token use per call. The harness's own system prompt and tool definitions add about 5,100 tokens to every request. A run stops after 100 model calls or an hour, limits the agent isn't told about. The patch is the difference between the copy and the original, scored like L8. L-AG compares harnesses with the model fixed, so it is listed after the context levels rather than among them.
+
+### Tool calls that don't fit the harness
+
+Antigravity's tools name their arguments in their own style, such as `CommandLine`, `WaitMsBeforeAsync`, `AbsolutePath` and `TargetFile`. Qwen often names them its own way instead. Its most frequent slip is calling `run_command` with `command` and `wait_ms_before_async`, the names of its native shell tool. Antigravity ignores arguments it doesn't know, so such a call runs an empty command and reports exit code 0 with no output. The model takes that at face value and looks for the problem in the environment: it probes with commands like `echo hello`, writes output to a file to read it back, and suspects "a persistent terminal problem". Once a run slips, it tends to repeat the slip, so most runs have either none of these calls or many.
+
+With thinking off, 205 of 556 commands (37%) ran nothing, in 16 of 57 runs. With thinking on, 408 of 804 did (51%), in 41 of 57 runs. In 4 of the 6 failed thinking-off runs, most commands ran nothing (long-001: 24 of 27). Other slips fail loudly: a missing `AbsolutePath` on `view_file`, an unknown `TargetFile` on an edit, or a tool that doesn't exist, such as `list_files`. Those return an error, and the model usually corrects the call within one or two tries.
+
+Gemini 3.5 Flash-Lite, the cheapest model of Gemini's previous generation, ran the same harness on 10 of the hardest task cells. None of its 141 commands ran nothing, and it never misnamed an argument or called a tool that doesn't exist. Its only errors were four uses of an Antigravity file-annotation feature in the wrong place. On the same cells, Qwen 3.8 27B, the newest model in its family's 27B class, sent 63 of 134 commands (thinking off) with arguments the harness couldn't use. Model strength doesn't explain the gap, since the older and cheaper model made none of these errors. The pairing does: Antigravity was built with Gemini, and Qwen falls back on the tool vocabulary it was trained on. The comparison isn't fully controlled, because the serving stacks differ too, but the errors themselves are about naming.
+
+The native-names arm below looks at the same effect from the other side, by giving Qwen its own tool names in the harness built for this experiment.
 
 ## Native tool names (thinking off only)
 

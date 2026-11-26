@@ -1,0 +1,132 @@
+--- /dev/null
++++ b/shopkit/utils/units.py
+@@ -0,0 +1,73 @@
++"""Weight parsing helpers for warehouse staff input.
++
++Ships need to read package weights typed in by warehouse staff.  Weights
++may be entered with a unit (``g``, ``kg``, ``lb``, ``oz``) and optional
++whitespace, e.g. ``"2.5 kg"`` or ``"12 OZ"``.
++"""
++
++from __future__ import annotations
++
++import re
++from decimal import ROUND_HALF_UP, Decimal
++
++__all__ = ["parse_weight"]
++
++# Gram equivalents for each supported unit.  The pound and ounce values are
++# the exact statutory definitions; kilograms are defined as 1000 g.
++_GRAMS_PER_UNIT = {
++    "g": Decimal("1"),
++    "kg": Decimal("1000"),
++    "lb": Decimal("453.59237"),
++    "oz": Decimal("28.349523125"),
++}
++
++# The input is a number (integer or decimal with "." as separator),
++# optional whitespace, then a single-letter unit.  The sign is rejected
++# explicitly below: negative values are an error, and a "+" prefix is not
++# part of the accepted format.  [0-9] is used instead of \d so that
++# non-ASCII Unicode digits are rejected as well.
++_WEIGHT_RE = re.compile(
++    r"^([0-9]+(?:\.[0-9]+)?|\.[0-9]+)\s*(g|kg|lb|oz)$",
++    re.IGNORECASE,
++)
++
++
++def parse_weight(text: str) -> int:
++    """Parse a human-typed package weight and return it in whole grams.
++
++    Args:
++        text: A number (integer or decimal using ``.`` as separator),
++            optional whitespace, and a unit of ``g``, ``kg``, ``lb`` or
++            ``oz`` (case-insensitive).  Leading and trailing whitespace
++            is ignored.
++
++    Returns:
++        The weight in whole grams, rounded to the nearest gram.
++
++    Raises:
++        ValueError: If the input is missing a number or unit, uses an
++            unknown unit, a negative value, a non-``str``/non-string
++            value, or uses ``","`` as the decimal separator (or any
++            other malformed input).
++    """
++    if not isinstance(text, str):
++        raise ValueError(f"weight must be a string, got {type(text).__name__}")
++
++    match = _WEIGHT_RE.match(text.strip())
++    if match is None:
++        # Provide specific guidance for common typos.
++        if "," in text:
++            raise ValueError(
++                f"invalid weight {text!r}: ',' is not a valid decimal "
++                "separator; use '.' instead"
++            )
++        if any(sign in text for sign in ("-", "+")):
++            raise ValueError(
++                f"invalid weight {text!r}: negative values and signed "
++                "values are not allowed"
++            )
++        raise ValueError(f"invalid weight {text!r}")
++
++    number, unit = match.groups()
++    weight_grams = Decimal(number) * _GRAMS_PER_UNIT[unit.lower()]
++    return int(weight_grams.to_integral_value(rounding=ROUND_HALF_UP))
+--- /dev/null
++++ b/tests/test_units.py
+@@ -0,0 +1,53 @@
++from shopkit.utils.units import parse_weight
++
++# (input, expected)  -- expected None means expect ValueError
++cases = [
++    ("500 g", 500),
++    ("500g", 500),
++    ("  2.5 KG ", 2500),
++    ("1 lb", 454),          # 453.59237 -> 454
++    ("1 LB", 454),
++    ("0.9994 lb", 453),     # 453.351... -> 453
++    ("1oz", 28),            # 28.349523125 -> 28
++    ("16 oz", 454),         # 453.59237000 -> 454
++    ("0.5 oz", 14),         # 14.1747615625 -> 14
++    (".5 kg", 500),
++    ("0.45359237 kg", 454), # 453.59237 -> 454
++    ("10", None),           # missing unit
++    ("12.345 g", 12),
++    ("100.5 g", 101),       # round half up
++    ("2 lb", 907),          # 907.18474 -> 907
++    ("0 g", 0),
++    ("0.499 g", 0),         # -> 0
++    ("0.5 g", 1),           # half up -> 1
++    ("-5 g", None),
++    ("5,000 g", None),
++    ("5,0 g", None),
++    ("kg", None),           # missing number
++    ("", None),
++    ("   ", None),
++    ("5 stone", None),
++    ("5.2.3 g", None),
++    ("5. g", None),
++    (". g", None),
++    ("+5 g", None),
++    ("5 g extra", None),
++    ("5 kg 6 g", None),
++    ("5gb", None),
++    ("5g6", None),
++    ("5.5.", None),
++]
++
++results = []
++for text, expected in cases:
++    try:
++        got = parse_weight(text)
++    except ValueError:
++        got = "ValueError"
++    ok = (got == expected) or (expected is None and got == "ValueError")
++    results.append(("PASS" if ok else "FAIL", text, got, expected))
++
++fails = [r for r in results if r[0] == "FAIL"]
++print(f"total={len(results)} pass={len(results)-len(fails)} fail={len(fails)}")
++for status, text, got, expected in results:
++    print(f"{status}: parse_weight({text!r}) = {got!r} (expected {expected!r})")

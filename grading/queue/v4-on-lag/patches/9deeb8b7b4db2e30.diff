@@ -1,0 +1,64 @@
+--- /dev/null
++++ b/shopkit/pricing/coupon_preview.py
+@@ -0,0 +1,26 @@
++"""Coupon preview: how much a code would take off this cart before the shopper applies it.
++
++Delegates to the same pricing path as the cart page (pricing.cart.price_cart) so the preview can
++never disagree with checkout: unit prices, the sale/gift-card exclusions for percentage codes,
++minimum order values, printed-code rules and rejected codes are all handled exactly as on the cart
++page. The saving is 0 whenever the code would not be applied."""
++from __future__ import annotations
++
++from datetime import datetime
++
++from shopkit.catalog.models import Product
++from shopkit.customers.models import Address
++from shopkit.pricing.cart import CartItem, price_cart
++from shopkit.pricing.engine import PricingEngine
++from shopkit.promotions.coupons import Coupon
++
++
++def coupon_savings(items: list[CartItem], products: dict[str, Product], code: str | None,
++                   coupons: dict[str, Coupon], engine: PricingEngine, ship_to: Address,
++                   weight_g: int, at: datetime) -> int:
++    """The saving in cents that `code` would give on this cart, calculated exactly as the cart page
++    calculates it. Returns 0 when the code isn't valid, isn't active, doesn't meet its minimum
++    order, or has no eligible lines to discount."""
++    cart = price_cart(items, products, coupon_code=code, coupons=coupons, engine=engine,
++                      ship_to=ship_to, weight_g=weight_g, at=at)
++    return cart.coupon_discount_cents
+--- a/tests/test_cart_pricing.py
++++ b/tests/test_cart_pricing.py
+@@ -63,3 +63,32 @@
+     assert any("changed" in x for x in cart.messages) and any("NOPE" in x for x in cart.messages)
+     assert m["cart.merged_lines"] == 1
+     assert "isn't valid" in " ".join(_price([CartItem("MUG", 1)], coupon_code="BOGUS").messages)
++
++
++def test_coupon_savings_matches_the_cart_page():
++    from shopkit.pricing.coupon_preview import coupon_savings
++
++    def items(skus):
++        return [CartItem(sku, qty) for sku, qty in skus]
++
++    ten = Coupon("TEN", PERCENT, 10, date(2026, 1, 1), date(2026, 12, 31), min_order_cents=3_000)
++    five = Coupon("FIVE", FIXED, 500, date(2026, 1, 1), date(2026, 12, 31))
++    big = Coupon("BIG", FIXED, 50_000, date(2026, 1, 1), date(2026, 12, 31))
++    dead = Coupon("DEAD", PERCENT, 50, date(2020, 1, 1), date(2020, 12, 31))
++    engine, coupons = _engine(), {"TEN": ten, "FIVE": five, "BIG": big, "DEAD": dead}
++
++    # 10% of the mug only: the on-sale tea is excluded but still counts towards the minimum
++    assert coupon_savings(items([("MUG", 1), ("TEA", 2)]), PRODUCTS, "TEN", coupons, engine, OR, 400, AT) == 200
++    # below the minimum, unknown, expired and absent codes give no saving
++    assert coupon_savings(items([("MUG", 1)]), PRODUCTS, "TEN", coupons, engine, OR, 400, AT) == 0
++    assert coupon_savings(items([("MUG", 1)]), PRODUCTS, "BOGUS", {}, engine, OR, 400, AT) == 0
++    assert coupon_savings(items([("MUG", 1)]), PRODUCTS, "DEAD", coupons, engine, OR, 400, AT) == 0
++    assert coupon_savings(items([("MUG", 1)]), PRODUCTS, None, coupons, engine, OR, 400, AT) == 0
++    # gift cards aren't eligible; a fixed code never exceeds the eligible subtotal
++    assert coupon_savings(items([("TEA", 1), ("GC50", 1)]), PRODUCTS, "FIVE", coupons, engine, OR, 400, AT) == 500
++    assert coupon_savings(items([("MUG", 1)]), PRODUCTS, "BIG", coupons, engine, OR, 400, AT) == 2000
++    # the preview can never disagree with the cart page
++    for skus, code in [([("MUG", 1), ("TEA", 2)], "ten"), ([("MUG", 1)], "BIG"),
++                       ([("MUG", 1)], "BOGUS"), ([("MUG", 1), ("MUG", 2)], "TEN")]:
++        cart = _price(items(skus), coupon_code=code, coupons=coupons)
++        assert coupon_savings(items(skus), PRODUCTS, code, coupons, engine, OR, 400, AT) == cart.coupon_discount_cents

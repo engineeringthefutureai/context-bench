@@ -1,0 +1,49 @@
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -49,7 +50,10 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        data = dict(event.payload)
++        if isinstance(data.get("card_number"), str):
++            data["card_number"] = redact_pan(data["card_number"])
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": data},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):
+--- a/tests/test_webhooks.py
++++ b/tests/test_webhooks.py
+@@ -1,3 +1,5 @@
++import json
++
+ from shopkit.api.webhooks import MAX_ATTEMPTS, Endpoint, WebhookDispatcher, sign, verify
+ from shopkit.events import EventBus
+ 
+@@ -23,3 +25,18 @@
+     for _ in range(MAX_ATTEMPTS):
+         d.flush()
+     assert d.queue == [] and "https://other/none" not in calls
++
++
++def test_card_number_is_masked_in_delivery():
++    bodies = []
++    transport = lambda url, body, headers: (bodies.append(body), 200)[1]
++    bus = EventBus()
++    d = WebhookDispatcher([Endpoint("https://partner/pay", "k", {"payment.*"})], transport)
++    d.attach(bus)
++    bus.publish("payment.captured", order_id="o1", card_number="4242 4242 4242 4242",
++                amount_cents=1099)
++    d.flush()
++    assert d.queue == []
++    data = json.loads(bodies[0])["data"]
++    assert data["card_number"] == "************4242"
++    assert data["order_id"] == "o1" and data["amount_cents"] == 1099

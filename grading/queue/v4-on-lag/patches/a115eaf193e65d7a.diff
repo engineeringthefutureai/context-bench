@@ -1,0 +1,103 @@
+--- a/shopkit/invoices/render.py
++++ b/shopkit/invoices/render.py
+@@ -9,5 +9,8 @@
+     for line in order.lines:
+         rows.append(f"{normalize_sku(line.sku):<16}{line.qty:>4} x {format_money(line.unit_cents, order.currency):>12}"
+                     f"  = {format_money(line.total_cents, order.currency):>12}")
++    if order.discount_percent:
++        label = f"DISCOUNT (-{order.discount_percent}%)"
++        rows.append(f"{label:<36}{format_money(order.discount_cents, order.currency):>12}")
+     rows.append(f"{'TOTAL':<36}{format_money(order.total_cents, order.currency):>12}")
+     return "\n".join(rows)
+--- a/shopkit/orders/export.py
++++ b/shopkit/orders/export.py
+@@ -9,6 +9,7 @@
+         {
+             "id": o.id,
+             "currency": o.currency,
++            "discount_percent": o.discount_percent,
+             "lines": [{"sku": l.sku, "qty": l.qty, "unit_cents": l.unit_cents} for l in o.lines],
+         }
+         for o in orders
+--- a/shopkit/orders/models.py
++++ b/shopkit/orders/models.py
+@@ -17,7 +17,21 @@
+     id: str
+     lines: list[OrderLine] = field(default_factory=list)
+     currency: str = "USD"
++    discount_percent: int = 0
++
++    def __post_init__(self) -> None:
++        if not 0 <= self.discount_percent <= 100:
++            raise ValueError("discount_percent must be between 0 and 100")
++
++    @property
++    def list_cents(self) -> int:
++        return sum(line.total_cents for line in self.lines)
++
++    @property
++    def discount_cents(self) -> int:
++        """Discount amount in cents, rounded down to whole cents."""
++        return self.list_cents * self.discount_percent // 100
+ 
+     @property
+     def total_cents(self) -> int:
+-        return sum(line.total_cents for line in self.lines)
++        return self.list_cents - self.discount_cents
+--- /dev/null
++++ b/tests/test_order_discount.py
+@@ -0,0 +1,54 @@
++import json
++
++import pytest
++
++from shopkit.invoices.render import render_invoice_text
++from shopkit.orders.export import export_orders_json
++from shopkit.orders.models import Order, OrderLine
++
++
++def make_order(percent: int = 0) -> Order:
++    return Order("o1", [OrderLine("mug 1", 2, 1250), OrderLine("cup 2", 1, 499)], "USD", percent)
++
++
++def test_default_no_discount():
++    order = make_order()
++    assert order.discount_percent == 0
++    assert order.discount_cents == 0
++    assert order.total_cents == 2999
++
++
++def test_discount_floors_to_whole_cents():
++    # 10% of $19.99 is $1.999 -> $1.99 (rounded down)
++    order = Order("o2", [OrderLine("mug 1", 1, 1999)], "USD", 10)
++    assert order.discount_cents == 199
++    assert order.total_cents == 1800
++
++
++def test_invalid_percent_rejected():
++    with pytest.raises(ValueError):
++        Order("o3", [OrderLine("mug 1", 1, 100)], "USD", -1)
++    with pytest.raises(ValueError):
++        Order("o4", [OrderLine("mug 1", 1, 100)], "USD", 101)
++
++
++def test_invoice_undiscounted_unchanged():
++    text = render_invoice_text(make_order())
++    assert "DISCOUNT" not in text
++    assert text.splitlines()[-1].startswith("TOTAL")
++    assert text.splitlines()[-1].endswith("$29.99")
++
++
++def test_invoice_shows_discount_line_before_total():
++    text = render_invoice_text(make_order(15))
++    lines = text.splitlines()
++    total_idx = next(i for i, l in enumerate(lines) if l.startswith("TOTAL"))
++    assert lines[total_idx - 1].startswith("DISCOUNT (-15%)")
++    # 15% of 2999 = 449.85 -> 449
++    assert lines[total_idx - 1].endswith("$4.49")
++    assert lines[total_idx].endswith("$25.50")  # 2999 - 449
++
++
++def test_warehouse_export_includes_discount_percent():
++    payload = json.loads(export_orders_json([make_order(20), make_order()]))
++    assert [o["discount_percent"] for o in payload] == [20, 0]

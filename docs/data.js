@@ -29,8 +29,8 @@
   }
 
   // ---------- run list ----------
-  // report outcomes (stored labels stay ok/broken/...): PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER, INVALID,
-  // OUT OF TOKENS, NO FIT
+  // report outcomes (stored labels stay ok/broken/...): PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER,
+  // STOPPED EARLY, INVALID, OUT OF TOKENS, OUT OF TIME, NO FIT
   const badge = (o) => `<span class="badge ${o === "PASS" ? "b-ok" : o === "FAIL" ? "b-broken" : "b-other"}">${esc(o)}</span>`;
   const yn = (v) => (v == null ? "–" : v ? "yes" : "no");
   const frac = (a, b) => (b ? `${a}/${b}` : "–");
@@ -80,7 +80,8 @@
   // ---------- matrix view: tasks (rows) x harness levels (columns); each cell stacks the repos S, M, L ----------
   // Outcome colours are the Results page's (.o-*); the tooltip and the table view carry the same facts as text.
   const OCLS = {"PASS": "o-pass", "FAIL": "o-fail", "UNPARSABLE": "o-unparsable", "ASKED TO EXPLORE": "o-explore",
-    "NO ANSWER": "o-noanswer", "INVALID": "o-invalid", "OUT OF TOKENS": "o-oot", "NO FIT": "o-nofit"};
+    "NO ANSWER": "o-noanswer", "STOPPED EARLY": "o-stopped", "INVALID": "o-invalid", "OUT OF TOKENS": "o-oot",
+    "OUT OF TIME": "o-time", "NO FIT": "o-nofit"};
   const REPOS = ["S", "M", "L"];
   const CATS = ["control", "reuse", "convention", "cross_file", "trap", "long"];
   // compact column labels (the full label is the column's tooltip; the legend explains the abbreviations)

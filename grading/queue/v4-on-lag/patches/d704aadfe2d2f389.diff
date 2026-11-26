@@ -1,0 +1,205 @@
+--- /dev/null
++++ b/shopkit/support/refund_info.py
+@@ -0,0 +1,87 @@
++"""Read-only preview of refund destinations: before an agent presses Refund, show where each
++cent of a refund would land ("card", "store_credit", "gift_card").
++
++The split must match payments.settlement.settle_refund() exactly, so this module runs settle_refund()
++itself against stand-in provider/journal/gift-card services and a throwaway ledger: no real
++provider is called, no payment is marked refunded, no ledger entry is written. If the amount
++would be rejected at settlement time (nothing captured, more than refundable, or card
++refunds paused) the same error is raised here as well."""
++from __future__ import annotations
++
++from collections.abc import Iterable
++from dataclasses import dataclass, field, replace
++from datetime import date
++
++from shopkit.accounting.journal import Journal
++from shopkit.config import SETTINGS
++from shopkit.events import EventBus
++from shopkit.payments.models import CAPTURED, Payment
++from shopkit.payments.settlement import (RefundRequest, RefundTooLarge,
++                                         SettlementLedger, settle_refund)
++
++
++@dataclass
++class _FakeProvider:
++    """Stands in for the payment provider so settle_refund can run to completion.
++
++    Only reachable for card destinations, which never fail here; the recorded calls are
++    discarded and never replayed, so no real refund is ever issued."""
++    calls: list[tuple[str, int, str]] = field(default_factory=list)
++
++    def refund(self, payment_id: str, amount_cents: int, idempotency_key: str) -> str:
++        self.calls.append((payment_id, amount_cents, idempotency_key))
++        return f"preview:{idempotency_key}"
++
++
++@dataclass
++class _RecordingGiftCards:
++    """Stand-in gift card service that records the amount a new gift card would carry.
++
++    settlement's "no gift card service" fallback (store credit instead) must never fire, so
++    one is always passed; `issued_cents` must equal the settlement's gift card cents or the
++    preview would silently disagree with what settlement does."""
++    issued_cents: int = 0
++
++    def issue(self, amount_cents: int, customer_id: str) -> str:
++        self.issued_cents += amount_cents
++        return f"GC-PREVIEW-{amount_cents}"
++
++
++def refund_destinations(order_id: str, amount_cents: int, payments: Iterable[Payment],
++                        today: date) -> dict[str, int]:
++    """How a refund of `amount_cents` for `order_id` would be split across destinations.
++
++    Returns {"card": int, "store_credit": int, "gift_card": int} summing to
++    `amount_cents`, computed exactly the way settle_refund() would settle it (proportional
++    to what is still refundable on each captured payment, cards first, same 180-day
++    card/store-credit rule). Nothing is refunded: no provider is called, no payment is
++    marked refunded, no ledger entry is written."""
++    payments = list(payments)
++    refundable = sum(p.refundable_cents for p in payments
++                     if p.order_id == order_id and p.status == CAPTURED)
++    if amount_cents <= 0:
++        raise RefundTooLarge(f"refund {amount_cents} must be positive", order_id=order_id,
++                             requested=amount_cents, refundable=0)
++    if not any(p.order_id == order_id and p.status == CAPTURED for p in payments):
++        raise RefundTooLarge(f"order {order_id} has no captured payment", order_id=order_id,
++                             requested=amount_cents, refundable=0)
++    if amount_cents > refundable:
++        raise RefundTooLarge(f"refund {amount_cents} exceeds refundable {refundable}", order_id=order_id,
++                             requested=amount_cents, refundable=refundable)
++
++    # settle_refund() books journal lines per goods/tax/shipping; the Journal below is fresh and
++    # thrown away, so the whole amount as goods is enough for the destination split.
++    req = RefundRequest(order_id, amount_cents, 0, 0, "preview", "support:preview")
++    provider = _FakeProvider()
++    gift_cards = _RecordingGiftCards()
++    # settle_refund() books the refund against each payment it settles, which mutates the
++    # Payment's refunded_cents. Hand it copies so the caller's payments stay exactly as they were.
++    copies = [replace(p) for p in payments]
++    settlement = settle_refund(req, copies, customer_id="preview", today=today,
++                               provider=provider, journal=Journal(),
++                               ledger=SettlementLedger(), gift_cards=gift_cards,
++                               settings=SETTINGS, bus=EventBus(), sleep=lambda s: None)
++    if gift_cards.issued_cents != settlement.to_gift_card_cents:
++        raise RuntimeError("gift card preview inconsistent with settlement", order_id=order_id)
++    return {"card": settlement.to_card_cents, "store_credit": settlement.to_store_credit_cents,
++            "gift_card": settlement.to_gift_card_cents}
+--- /dev/null
++++ b/tests/test_refund_info.py
+@@ -0,0 +1,112 @@
++from datetime import date, datetime
++
++import pytest
++
++from shopkit.accounting.journal import Journal
++from shopkit.config import Settings
++from shopkit.events import EventBus
++from shopkit.payments.models import CAPTURED, Payment
++from shopkit.payments.refunds import RefundTooLarge
++from shopkit.payments.settlement import (RefundRequest, RefundsPaused, SettlementLedger, settle_refund)
++from shopkit.support.refund_info import refund_destinations
++
++TODAY = date(2026, 3, 10)
++
++
++def _pay(pid, amount, created, method="card"):
++    return Payment(pid, "O1", amount, "USD", method, status=CAPTURED, created=created)
++
++
++def test_recent_card_goes_to_card():
++    d = refund_destinations("O1", 1080, [_pay("P1", 5000, datetime(2026, 3, 1))], TODAY)
++    assert d == {"card": 1080, "store_credit": 0, "gift_card": 0}
++
++
++def test_old_card_goes_to_store_credit():
++    d = refund_destinations("O1", 1000, [_pay("P1", 5000, datetime(2025, 8, 1))], TODAY)
++    assert d == {"card": 0, "store_credit": 1000, "gift_card": 0}
++
++
++def test_split_payment_card_and_gift_card():
++    d = refund_destinations("O1", 1001, [_pay("P1", 3000, datetime(2026, 3, 1)),
++                                         _pay("G1", 1000, datetime(2026, 3, 1), "gift_card")], TODAY)
++    assert d == {"card": 751, "store_credit": 0, "gift_card": 250}
++
++
++def test_partial_refund_uses_remaining_refundable():
++    pays = [_pay("P1", 5000, datetime(2026, 3, 1)), _pay("G1", 1000, datetime(2026, 3, 1), "gift_card")]
++    pays[0].refunded_cents = 2000
++    d = refund_destinations("O1", 2000, pays, TODAY)
++    assert d == {"card": 1500, "store_credit": 0, "gift_card": 500}
++
++
++def test_mixed_recent_and_old_cards_split():
++    d = refund_destinations("O1", 1100, [_pay("P1", 2000, datetime(2026, 3, 1)),
++                                         _pay("P2", 2000, datetime(2025, 1, 1))], TODAY)
++    assert d == {"card": 550, "store_credit": 550, "gift_card": 0}
++
++
++def test_exactly_180_days_still_goes_to_card():
++    d = refund_destinations("O1", 100, [_pay("P1", 5000, datetime(2025, 9, 11))], TODAY)  # exactly 180 days
++    assert d == {"card": 100, "store_credit": 0, "gift_card": 0}
++
++
++def test_refunds_nothing():
++    p = _pay("P1", 5000, datetime(2026, 3, 1))
++    d1 = refund_destinations("O1", 1000, [p], TODAY)
++    d2 = refund_destinations("O1", 1000, [p], TODAY)  # same answer, still nothing refunded
++    assert d1 == d2 == {"card": 1000, "store_credit": 0, "gift_card": 0}
++    assert p.refunded_cents == 0 and p.status == CAPTURED
++
++
++def test_invalid_amounts_raise_refund_too_large():
++    paid = [_pay("P1", 5000, datetime(2026, 3, 1))]
++    partially_paid = _pay("P1", 5000, datetime(2026, 3, 1))
++    partially_paid.refunded_cents = 1000
++    failed = Payment("P1", "O1", 5000, "USD", "card", status="failed", created=datetime(2026, 3, 1))
++    for order, amount, pays in [
++            ("O1", 0, paid),
++            ("O1", -5, paid),
++            ("O1", 100, []),
++            ("O1", 100, [failed]),
++            ("O2", 100, paid),                    # payments belong to a different order
++            ("O1", 9000, paid),                   # exceeds refundable
++            ("O1", 5000, [partially_paid]),       # 1000 already refunded, only 4000 left
++        ]:
++        with pytest.raises(RefundTooLarge):
++            refund_destinations(order, amount, pays, TODAY)
++
++
++def test_kill_switch_blocks_card_part():
++    import shopkit.support.refund_info as ri
++    orig = ri.SETTINGS
++    try:
++        ri.SETTINGS = Settings(feature_flags={"refunds_paused": True})
++        with pytest.raises(RefundsPaused):
++            refund_destinations("O1", 100, [_pay("P1", 5000, datetime(2026, 3, 1))], TODAY)
++        d = refund_destinations("O1", 100, [_pay("P1", 5000, datetime(2025, 1, 1))], TODAY)
++        assert d == {"card": 0, "store_credit": 100, "gift_card": 0}
++    finally:
++        ri.SETTINGS = orig
++
++
++def test_matches_settle_refund():
++    pays = [_pay("P1", 3000, datetime(2026, 3, 1)),
++            _pay("G1", 1000, datetime(2026, 3, 1), "gift_card"),
++            _pay("P2", 4000, datetime(2025, 1, 1))]
++    preview = refund_destinations("O1", 2500, pays, TODAY)
++    fresh = [Payment(p.id, p.order_id, p.amount_cents, p.currency, p.method, p.status,
++                     p.card_number, p.created, p.refunded_cents) for p in pays]
++
++    class GiftCards:
++        def issue(self, a, c): return f"GC-{a}"
++
++    class Provider:
++        def refund(self, pid, amt, key): return "pr"
++
++    real = settle_refund(RefundRequest("O1", 2500, 0, 0, "r", "a"), fresh, customer_id="C1",
++                         today=TODAY, provider=Provider(), journal=Journal(),
++                         ledger=SettlementLedger(), gift_cards=GiftCards(),
++                         bus=EventBus(), sleep=lambda s: None)
++    assert preview == {"card": real.to_card_cents, "store_credit": real.to_store_credit_cents,
++                       "gift_card": real.to_gift_card_cents}

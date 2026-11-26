@@ -1,0 +1,79 @@
+--- /dev/null
++++ b/migrations/0025_gift_message.sql
+@@ -0,0 +1,2 @@
++-- The shopper's gift message, printed on the first parcel's packing slip.
++ALTER TABLE orders ADD COLUMN gift_message TEXT NOT NULL DEFAULT '';
+--- a/shopkit/api/serializers.py
++++ b/shopkit/api/serializers.py
+@@ -22,6 +22,7 @@
+         "lines": [{"sku": l.sku, "qty": l.qty, "unit": money(l.unit_cents, o.currency),
+                    "total": money(l.total_cents, o.currency)} for l in o.lines],
+         "total": money(o.total_cents, o.currency),
++        "gift_message": o.gift_message,
+     }
+ 
+ 
+--- a/shopkit/db/repositories.py
++++ b/shopkit/db/repositories.py
+@@ -116,20 +116,21 @@
+             self.db.execute(*insert("orders", {
+                 "id": order.id, "customer_id": customer_id, "currency": order.currency, "status": status,
+                 "created_at": (created_at or utc_now()).isoformat(), "subtotal_cents": order.total_cents,
+-                "total_cents": order.total_cents, "channel": channel}))
++                "total_cents": order.total_cents, "channel": channel, "gift_message": order.gift_message}))
+             for no, line in enumerate(order.lines, 1):
+                 self.db.execute(*insert("order_lines", {"order_id": order.id, "line_no": no, "sku": line.sku,
+                                                         "qty": line.qty, "unit_cents": line.unit_cents}))
+             self._history(order.id, status)
+ 
+     def get(self, order_id: str) -> Order:
+-        head = self.db.query_one("SELECT id, currency FROM orders WHERE id = ?", (order_id,))
++        head = self.db.query_one("SELECT id, currency, gift_message FROM orders WHERE id = ?", (order_id,))
+         if head is None:
+             raise OrderNotFound(f"no order {order_id}", order_id=order_id)
+         lines = self.db.query("SELECT sku, qty, unit_cents FROM order_lines WHERE order_id = ? ORDER BY line_no",
+                               (order_id,))
+         return Order(id=head["id"], currency=head["currency"],
+-                     lines=[OrderLine(r["sku"], r["qty"], r["unit_cents"]) for r in lines])
++                     lines=[OrderLine(r["sku"], r["qty"], r["unit_cents"]) for r in lines],
++                     gift_message=head["gift_message"])
+ 
+     def status(self, order_id: str) -> str:
+         status = self.db.scalar("SELECT status FROM orders WHERE id = ?", (order_id,))
+--- a/shopkit/orders/fulfillment.py
++++ b/shopkit/orders/fulfillment.py
+@@ -13,6 +13,7 @@
+     order_id: str
+     number: int
+     items: list[tuple[str, int]] = field(default_factory=list)    # (sku, qty)
++    gift_message: str = ""
+ 
+     @property
+     def item_count(self) -> int:
+@@ -31,7 +32,8 @@
+     parcels = []
+     for n, batch in enumerate(chunked(units, max_items), start=1):
+         counts = group_by(batch, key=lambda s: s)
+-        parcels.append(Parcel(order.id, n, [(sku, len(v)) for sku, v in counts.items()]))
++        gift = order.gift_message if n == 1 else ""
++        parcels.append(Parcel(order.id, n, [(sku, len(v)) for sku, v in counts.items()], gift_message=gift))
+     return parcels
+ 
+ 
+@@ -39,4 +41,6 @@
+     """Slip packed inside each parcel: order, parcel number, contents and weight."""
+     lines = [f"Order {parcel.order_id} - parcel {parcel.number}", f"Weight: {format_weight(weight_g)}"]
+     lines += [f"  {qty} x {sku}" for sku, qty in parcel.items]
++    if parcel.gift_message:
++        lines += ["", f"Gift: {parcel.gift_message}"]
+     return "\n".join(lines)
+--- a/shopkit/orders/models.py
++++ b/shopkit/orders/models.py
+@@ -17,6 +17,7 @@
+     id: str
+     lines: list[OrderLine] = field(default_factory=list)
+     currency: str = "USD"
++    gift_message: str = ""
+ 
+     @property
+     def total_cents(self) -> int:

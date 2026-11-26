@@ -1,0 +1,179 @@
+--- /dev/null
++++ b/migrations/0025_order_discount_percent.sql
+@@ -0,0 +1,2 @@
++-- Percentage discount (0-100) on the order; the total reflects it, amount rounded down to whole cents.
++ALTER TABLE orders ADD COLUMN discount_percent INTEGER NOT NULL DEFAULT 0;
+--- a/shopkit/db/repositories.py
++++ b/shopkit/db/repositories.py
+@@ -115,7 +115,8 @@
+         with self.db.transaction():
+             self.db.execute(*insert("orders", {
+                 "id": order.id, "customer_id": customer_id, "currency": order.currency, "status": status,
+-                "created_at": (created_at or utc_now()).isoformat(), "subtotal_cents": order.total_cents,
++                "created_at": (created_at or utc_now()).isoformat(), "subtotal_cents": order.subtotal_cents,
++                "discount_cents": order.discount_cents, "discount_percent": order.discount_percent,
+                 "total_cents": order.total_cents, "channel": channel}))
+             for no, line in enumerate(order.lines, 1):
+                 self.db.execute(*insert("order_lines", {"order_id": order.id, "line_no": no, "sku": line.sku,
+@@ -123,12 +124,12 @@
+             self._history(order.id, status)
+ 
+     def get(self, order_id: str) -> Order:
+-        head = self.db.query_one("SELECT id, currency FROM orders WHERE id = ?", (order_id,))
++        head = self.db.query_one("SELECT id, currency, discount_percent FROM orders WHERE id = ?", (order_id,))
+         if head is None:
+             raise OrderNotFound(f"no order {order_id}", order_id=order_id)
+         lines = self.db.query("SELECT sku, qty, unit_cents FROM order_lines WHERE order_id = ? ORDER BY line_no",
+                               (order_id,))
+-        return Order(id=head["id"], currency=head["currency"],
++        return Order(id=head["id"], currency=head["currency"], discount_percent=head["discount_percent"],
+                      lines=[OrderLine(r["sku"], r["qty"], r["unit_cents"]) for r in lines])
+ 
+     def status(self, order_id: str) -> str:
+--- a/shopkit/invoices/render.py
++++ b/shopkit/invoices/render.py
+@@ -9,5 +9,7 @@
+     for line in order.lines:
+         rows.append(f"{normalize_sku(line.sku):<16}{line.qty:>4} x {format_money(line.unit_cents, order.currency):>12}"
+                     f"  = {format_money(line.total_cents, order.currency):>12}")
++    if order.discount_percent:
++        rows.append(f"{'Discount':<36}{format_money(-order.discount_cents, order.currency):>12}")
+     rows.append(f"{'TOTAL':<36}{format_money(order.total_cents, order.currency):>12}")
+     return "\n".join(rows)
+--- a/shopkit/orders/export.py
++++ b/shopkit/orders/export.py
+@@ -9,6 +9,7 @@
+         {
+             "id": o.id,
+             "currency": o.currency,
++            "discount_percent": o.discount_percent,
+             "lines": [{"sku": l.sku, "qty": l.qty, "unit_cents": l.unit_cents} for l in o.lines],
+         }
+         for o in orders
+--- a/shopkit/orders/models.py
++++ b/shopkit/orders/models.py
+@@ -17,7 +17,21 @@
+     id: str
+     lines: list[OrderLine] = field(default_factory=list)
+     currency: str = "USD"
++    discount_percent: int = 0
++
++    def __post_init__(self):
++        if not 0 <= self.discount_percent <= 100:
++            raise ValueError(f"discount_percent must be 0-100, got {self.discount_percent!r}")
++
++    @property
++    def subtotal_cents(self) -> int:
++        return sum(line.total_cents for line in self.lines)
++
++    @property
++    def discount_cents(self) -> int:
++        """Whole-cent discount; the fraction of a cent is rounded down."""
++        return self.subtotal_cents * self.discount_percent // 100
+ 
+     @property
+     def total_cents(self) -> int:
+-        return sum(line.total_cents for line in self.lines)
++        return self.subtotal_cents - self.discount_cents
+--- a/tests/test_db.py
++++ b/tests/test_db.py
+@@ -97,6 +97,17 @@
+         repo.get("nope")
+ 
+ 
++def test_order_repository_persists_discount(db):
++    repo = OrderRepository(db)
++    repo.add(Order("O3", [OrderLine("SKU-1", 3, 333)], discount_percent=10))
++    got = repo.get("O3")
++    assert got.discount_percent == 10 and got.discount_cents == 99 and got.total_cents == 899
++    row = db.query_one("SELECT subtotal_cents, discount_cents, discount_percent, total_cents FROM orders WHERE id = 'O3'")
++    assert (row["subtotal_cents"], row["discount_cents"], row["discount_percent"], row["total_cents"]) == (999, 99, 10, 899)
++    page = repo.page()
++    assert {r.id: r.total_cents for r in page.rows}["O3"] == 899
++
++
+ def test_transaction_rolls_back_order_and_lines_together(db):
+     repo = OrderRepository(db)
+     with pytest.raises(sqlite3.IntegrityError):
+--- /dev/null
++++ b/tests/test_order_discount.py
+@@ -0,0 +1,79 @@
++"""Orders with a percentage discount: totals, customer invoices, warehouse export."""
++import json
++from datetime import date
++
++import pytest
++
++from shopkit.customers.models import Address
++from shopkit.invoices.issuing import InvoiceRegister
++from shopkit.invoices.render import render_invoice_text
++from shopkit.money import format_money
++from shopkit.orders.export import export_orders_json
++from shopkit.orders.models import Order, OrderLine
++from shopkit.utils.text import normalize_sku
++
++BILL_TO = Address("Ann Lee", "1 Main St", "Austin", "78701", "US", region="TX")
++
++
++def _order(percent=0):
++    return Order("o1", [OrderLine("MUG-1", 2, 1250), OrderLine("TEA-9", 1, 899)],
++                 discount_percent=percent)
++
++
++def _line_row(order, line):
++    # Mirrors the row format in shopkit.invoices.render exactly.
++    return (f"{normalize_sku(line.sku):<16}{line.qty:>4} x {format_money(line.unit_cents, order.currency):>12}"
++            f"  = {format_money(line.total_cents, order.currency):>12}")
++
++
++def test_total_reflects_discount_rounded_down():
++    assert _order().subtotal_cents == 3399 and _order().discount_cents == 0 and _order().total_cents == 3399
++    # 10% of 3399 = 339.9 cents -> 339 (rounded down)
++    assert _order(10).discount_cents == 339 and _order(10).total_cents == 3060
++    # 20% of 3399 = 679.8 cents -> 679 (rounded down)
++    assert _order(20).discount_cents == 679 and _order(20).total_cents == 2720
++    # 25% divides exactly; 100% zeroes the total
++    assert _order(25).discount_cents == 849 and _order(25).total_cents == 2550
++    assert _order(100).discount_cents == 3399 and _order(100).total_cents == 0
++
++
++def test_discount_percent_defaults_to_zero_and_validates_range():
++    assert Order("o").discount_percent == 0
++    assert _order(0).total_cents == _order().total_cents
++    with pytest.raises(ValueError):
++        Order("o", discount_percent=101)
++    with pytest.raises(ValueError):
++        Order("o", discount_percent=-1)
++
++
++def test_invoice_unchanged_without_discount():
++    o = _order()
++    rows = [f"Invoice o1", *(_line_row(o, l) for l in o.lines),
++            f"{'TOTAL':<36}{format_money(o.total_cents, o.currency):>12}"]
++    assert render_invoice_text(o) == "\n".join(rows)
++    assert "Discount" not in render_invoice_text(o)
++
++
++def test_invoice_shows_discount_line_just_before_total():
++    o = _order(10)
++    rows = [f"Invoice o1", *(_line_row(o, l) for l in o.lines),
++            f"{'Discount':<36}{format_money(-o.discount_cents, o.currency):>12}",
++            f"{'TOTAL':<36}{format_money(o.total_cents, o.currency):>12}"]
++    assert render_invoice_text(o) == "\n".join(rows)
++
++
++def test_issued_invoice_text_has_discount_before_total():
++    o = _order(10)
++    inv = InvoiceRegister().issue(o, BILL_TO, date(2026, 11, 20))
++    discount_row = f"{'Discount':<36}{format_money(-o.discount_cents, o.currency):>12}"
++    total_row = f"{'TOTAL':<36}{format_money(o.total_cents, o.currency):>12}"
++    assert discount_row in inv.text and total_row in inv.text
++    assert inv.text.index(discount_row) < inv.text.index(total_row)
++
++
++def test_warehouse_export_includes_discount_percent():
++    payload = json.loads(export_orders_json([_order(10), _order()]))
++    assert payload[0]["discount_percent"] == 10 and payload[0]["id"] == "o1"
++    assert payload[1]["discount_percent"] == 0
++    # undiscounted orders keep their previous shape plus the new field
++    assert set(payload[1]) == {"id", "currency", "discount_percent", "lines"}

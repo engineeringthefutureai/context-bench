@@ -12,7 +12,7 @@ Code: `context_bench/apply.py` (`format_status`), `context_bench/runner.py` (lab
 | Layer | What it says | How it's decided | Certainty |
 |---|---|---|---|
 | Stored label | ok / broken / tool_error / no_fit | tests and the output protocol, at run time | exact |
-| Outcome (reader-facing) | PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, INVALID, OUT OF TOKENS, NO FIT | a pure function of stored fields | exact |
+| Outcome (reader-facing) | PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER, STOPPED EARLY, INVALID, OUT OF TOKENS, OUT OF TIME, NO FIT | a pure function of stored fields | exact |
 | Badges | exact ones (BAD FORMAT, SECOND CHANCE, ...) and intent ones (DECLARES COMPLETION, ...) | exact: stored fields; intent: embeddings | exact / high or medium confidence |
 
 Stored labels never change once recorded (run ids, rescore and grading depend on them). Outcomes and
@@ -65,7 +65,9 @@ The label stays strict.
 | NO FIT | label `no_fit` | the prompt is larger than the model's window |
 | OUT OF TOKENS | error says `max_output_tokens` | the reply hit the output limit |
 | UNPARSABLE | `format_status = bad_format` | code is there, not in the required blocks |
-| ASKED TO EXPLORE | `format_status` is `no_code` or `tool_request` | no code; the reply asks to look at the repository first, in prose or as a pretend tool call |
+| ASKED TO EXPLORE | `format_status` is `no_code` or `tool_request`, at a level without tools (L0-L6) | no code; the reply asks to look at the repository first, in prose or as a pretend tool call |
+| STOPPED EARLY | an agent (L7, L8, L-AG) with `format_status` `no_code` or `tool_request`, no time limit hit | the agent ended without code or a change, typically announcing its next step in prose without the call (2026-11-26: L-AG long-005@L, reuse-001@L) |
+| OUT OF TIME | an agent with no answer whose `error` says the harness's limit ended it ("timed out after", "stopped by the harness") | L-AG's 1 h or 100-call cap; a run that already had a passing change keeps PASS |
 | NO ANSWER | `format_status = empty` | the reply was empty: an agent that went silent |
 | INVALID | anything else without an accepted answer | a run whose reply doesn't say (a harness failure) |
 

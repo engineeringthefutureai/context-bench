@@ -22,7 +22,7 @@
       ${challenge}
       <pre class="prompt task-prompt">${esc(reflow(t.prompt))}</pre>
       <div class="facts"><span>needs <b>${helpers}</b></span><span>decoys <b>${decoys}</b></span></div>
-      ${t.notes ? `<div class="task-notes"><div class="lab">What the runs show</div>${t.notes.split(/\n\s*\n/).map((p) => `<p>${esc(p.replace(/\s*\n\s*/g, " "))}</p>`).join("")}</div>` : ""}
+      ${t.notes ? `<div class="task-notes"><div class="lab">A known ambiguity</div>${t.notes.split(/\n\s*\n/).map((p) => `<p>${esc(p.replace(/\s*\n\s*/g, " "))}</p>`).join("")}</div>` : ""}
       ${tests}${sols}
       <p class="meta"><a href="data#round=final&task=${encodeURIComponent(t.id)}">Every run of this task →</a></p></article>`;
   }

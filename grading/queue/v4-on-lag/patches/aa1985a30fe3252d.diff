@@ -1,0 +1,74 @@
+--- a/shopkit/inventory/stock.py
++++ b/shopkit/inventory/stock.py
+@@ -1,3 +1,10 @@
++from shopkit.errors import Conflict
++
++
++class NotEnoughStock(Conflict):
++    pass
++
++
+ class Stock:
+     """On-hand quantities per SKU."""
+ 
+@@ -9,3 +16,11 @@
+ 
+     def available(self, sku: str) -> int:
+         return self._on_hand.get(sku, 0)
++
++    def reserve(self, sku: str, qty: int) -> None:
++        """Lower the available quantity of `sku` by `qty`.
++        Raises NotEnoughStock without changing anything if `sku` has less than `qty`."""
++        avail = self._on_hand.get(sku, 0)
++        if avail < qty:
++            raise NotEnoughStock(f"not enough {sku}", sku=sku, requested=qty, available=avail)
++        self._on_hand[sku] = avail - qty
+--- /dev/null
++++ b/tests/test_stock.py
+@@ -0,0 +1,46 @@
++import pytest
++
++from shopkit.api.handlers import handle
++from shopkit.inventory.stock import NotEnoughStock, Stock
++
++
++def stock():
++    s = Stock()
++    s.receive("MILK", 10)
++    return s
++
++
++def test_reserve_lowers_available():
++    s = stock()
++    s.reserve("MILK", 4)
++    assert s.available("MILK") == 6
++
++
++def test_reserve_all_of_stock():
++    s = stock()
++    s.reserve("MILK", 10)
++    assert s.available("MILK") == 0
++
++
++def test_reserve_too_much_changes_nothing():
++    s = stock()
++    with pytest.raises(NotEnoughStock) as e:
++        s.reserve("MILK", 11)
++    assert e.value.details == {"sku": "MILK", "requested": 11, "available": 10}
++    assert s.available("MILK") == 10
++
++
++def test_reserve_unknown_sku_fails():
++    s = stock()
++    with pytest.raises(NotEnoughStock) as e:
++        s.reserve("SODA", 1)
++    assert e.value.details == {"sku": "SODA", "requested": 1, "available": 0}
++    assert s.available("SODA") == 0
++
++
++def test_api_responds_conflict_with_quantities():
++    s = stock()
++    status, body = handle(s.reserve, "MILK", 11)
++    assert status == 409
++    assert body["requested"] == 11
++    assert body["available"] == 10

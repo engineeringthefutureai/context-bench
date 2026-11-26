@@ -1,0 +1,4 @@
+When a customer adds the same product twice, the order should show one line, not two.
+Add `Order.add_line(sku, qty, unit_cents)` that returns the order line it touched. If the order
+already has a line with the same SKU and the same unit price, increase that line's quantity;
+otherwise append a new line.

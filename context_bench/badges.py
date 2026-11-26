@@ -215,8 +215,10 @@ LOOK_FIRST = re.compile(r"\b(let me|i'll|i will|i need to|first,? i)\b[^.?!]{0,6
 
 
 def is_dodge(r: dict) -> bool:
-    """The ASKED TO EXPLORE outcome: no code, asked to look at the repository first."""
-    return r.get("format_status") in ("no_code", "tool_request") and r.get("label") != "tool_error"
+    """The ASKED TO EXPLORE outcome: no code, asked to look at the repository first (levels without tools; an
+    agent that ends like this is STOPPED EARLY or OUT OF TIME)."""
+    return (r.get("format_status") in ("no_code", "tool_request") and r.get("label") != "tool_error"
+            and r.get("level") not in ("L7", "L8", "L-AG"))
 
 
 def dodge_text(r: dict, run_dir: Path) -> str:

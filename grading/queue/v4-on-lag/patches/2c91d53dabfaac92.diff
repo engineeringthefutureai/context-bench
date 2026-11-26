@@ -1,0 +1,78 @@
+--- a/shopkit/errors.py
++++ b/shopkit/errors.py
+@@ -24,3 +24,7 @@
+ 
+ class DuplicateOrder(Conflict):
+     pass
++
++
++class InsufficientStock(Conflict):
++    pass
+--- a/shopkit/inventory/stock.py
++++ b/shopkit/inventory/stock.py
+@@ -1,3 +1,6 @@
++from shopkit.errors import InsufficientStock
++
++
+ class Stock:
+     """On-hand quantities per SKU."""
+ 
+@@ -9,3 +12,14 @@
+ 
+     def available(self, sku: str) -> int:
+         return self._on_hand.get(sku, 0)
++
++    def reserve(self, sku: str, qty: int) -> None:
++        """Hold `qty` units of `sku` for an order."""
++        on_hand = self._on_hand.get(sku, 0)
++        if qty > on_hand:
++            raise InsufficientStock(
++                f"cannot reserve {qty} of {sku}, only {on_hand} available",
++                requested=qty,
++                available=on_hand,
++            )
++        self._on_hand[sku] = on_hand - qty
+--- /dev/null
++++ b/tests/test_stock.py
+@@ -0,0 +1,41 @@
++import pytest
++
++from shopkit.api.handlers import handle
++from shopkit.errors import InsufficientStock
++from shopkit.inventory.stock import Stock
++
++
++def test_reserve_success():
++    stock = Stock()
++    stock.receive("sku-a", 5)
++    stock.reserve("sku-a", 2)
++    assert stock.available("sku-a") == 3
++    stock.reserve("sku-a", 3)
++    assert stock.available("sku-a") == 0
++
++
++def test_reserve_insufficient_leaves_stock_unchanged():
++    stock = Stock()
++    stock.receive("sku-a", 2)
++    with pytest.raises(InsufficientStock):
++        stock.reserve("sku-a", 3)
++    assert stock.available("sku-a") == 2
++
++
++def test_reserve_insufficient_via_api():
++    stock = Stock()
++    stock.receive("sku-a", 2)
++    status, body = handle(stock.reserve, "sku-a", 3)
++    assert status == 409
++    assert body["error"] == "InsufficientStock"
++    assert body["requested"] == 3
++    assert body["available"] == 2
++
++
++def test_reserve_unknown_sku_fails():
++    stock = Stock()
++    status, body = handle(stock.reserve, "sku-missing", 1)
++    assert status == 409
++    assert body["requested"] == 1
++    assert body["available"] == 0
++    assert stock.available("sku-missing") == 0

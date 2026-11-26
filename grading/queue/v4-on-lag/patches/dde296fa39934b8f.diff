@@ -1,0 +1,73 @@
+--- a/shopkit/api/webhook_delivery.py
++++ b/shopkit/api/webhook_delivery.py
+@@ -15,6 +15,7 @@
+ 
+ from shopkit.config import SETTINGS, Settings
+ from shopkit.events import BUS, EventBus
++from shopkit.payments.reconciliation import redact_payment_payload
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -81,11 +82,11 @@
+     """Body per API version. 2019-01 partners get the event fields at the top level plus "event";
+     2023-06 partners get {"id", "type", "created", "data"}."""
+     if api_version == "2019-01":
+-        body = dict(delivery.payload)
++        body = redact_payment_payload(delivery.payload)
+         body["event"] = delivery.event
+         return body
+     return {"id": f"evt_{delivery.id}", "type": delivery.event, "created": delivery.created.isoformat(),
+-            "data": delivery.payload}
++            "data": redact_payment_payload(delivery.payload)}
+ 
+ 
+ def signature_header(body: str, secret: str, ts: int) -> str:
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_payment_payload
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -49,7 +50,8 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(),
++                           "data": redact_payment_payload(event.payload)},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):
+--- a/shopkit/payments/reconciliation.py
++++ b/shopkit/payments/reconciliation.py
+@@ -12,6 +12,26 @@
+     if len(digits) <= 4:
+         return "*" * len(digits)
+     return "*" * (len(digits) - 4) + digits[-4:]
++
++
++def mask_card_number(card_number) -> str:
++    """redact_pan for a value that may already be masked. A full card number is redacted exactly
++    like everywhere else it is stored or shown; a value that is already masked (contains '*') is
++    returned untouched, so redacting is idempotent."""
++    if not isinstance(card_number, str) or not card_number:
++        return card_number
++    if "*" in card_number:
++        return card_number
++    return redact_pan(card_number)
++
++
++def redact_payment_payload(payload: dict) -> dict:
++    """Copy of `payload` with the `card_number` field masked (redact_pan); all other fields unchanged.
++    Used before a webhook delivery is queued/sent so partners never receive a full card number."""
++    masked = dict(payload)
++    if "card_number" in masked:
++        masked["card_number"] = mask_card_number(masked["card_number"])
++    return masked
+ 
+ 
+ @dataclass

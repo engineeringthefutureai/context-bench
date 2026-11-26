@@ -235,6 +235,9 @@ INDEX_FIELDS = ["run_id", "round", "task_id", "category", "tier", "level", "retr
                 "patch_stmts", "patch_coverage", "tests_added"]
 
 
+AGENT_LEVELS = ("L7", "L8", "L-AG")     # levels whose model has tools and explores on its own
+
+
 def outcome(r: dict) -> str:
     """Report outcome (the stored label is unchanged): PASS, FAIL, OUT OF TOKENS (hit the output limit),
     NO FIT (prompt too long), and three kinds of no accepted answer:
@@ -244,6 +247,9 @@ def outcome(r: dict) -> str:
       thinking-off rounds: every one is "let me look first", none asks the user anything;
     - NO ANSWER: the reply was empty (format_status empty; for agents, nothing at all after their tool calls,
       often after a loop of identical calls);
+    - STOPPED EARLY (agents: L7, L8, L-AG): ended without code or a change, typically by announcing the next step
+      in prose instead of making the call; an agent can explore, so this is not ASKED TO EXPLORE;
+    - OUT OF TIME (agents): the harness's own limit (L-AG: 1 h or 100 model calls) ended a run with no answer;
     - INVALID: anything else (a run whose reply doesn't say: e.g. a harness failure).
     The reply decides, not the stored label: an agent's label is tool_error when any tool call failed along
     the way, but those calls get feedback and the run goes on, so its final reply is what it ended with.
@@ -255,6 +261,12 @@ def outcome(r: dict) -> str:
     fs = r.get("format_status", "ok")
     if fs == "bad_format":
         return "UNPARSABLE"
+    if r.get("level") in AGENT_LEVELS and fs in ("no_code", "tool_request", "empty"):
+        err = r.get("error") or ""
+        if "timed out after" in err or "stopped by the harness" in err:
+            return "OUT OF TIME"
+        if fs != "empty":
+            return "STOPPED EARLY"
     if fs in ("no_code", "tool_request"):
         return "ASKED TO EXPLORE"
     if fs == "empty":

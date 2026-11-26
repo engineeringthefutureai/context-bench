@@ -88,10 +88,10 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
     length is comparable across levels."""
     not_run = max(scale - n, 0)
     names = {"pass": "PASS", "fail": "FAIL", "unparsable": "UNPARSABLE", "explore": "ASKED TO EXPLORE",
-             "noanswer": "NO ANSWER", "invalid": "INVALID", "oot": "OUT OF TOKENS", "nofit": "NO FIT",
-             "running": "in progress", "queued": "queued", "retry": "to rerun in the next pass"}
+             "noanswer": "NO ANSWER", "stopped": "STOPPED EARLY", "invalid": "INVALID", "oot": "OUT OF TOKENS",
+             "time": "OUT OF TIME", "nofit": "NO FIT", "running": "in progress", "queued": "queued", "retry": "to rerun in the next pass"}
     parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{names[k]}: {counts.get(k, 0)}"></span>'
-                    for k in ("pass", "fail", "unparsable", "explore", "noanswer", "invalid", "oot", "nofit", "running", "queued", "retry")
+                    for k in ("pass", "fail", "unparsable", "explore", "noanswer", "stopped", "invalid", "oot", "time", "nofit", "running", "queued", "retry")
                     if counts.get(k))
     if not_run:
         parts += f'<span class="o-na" style="flex:{not_run}" title="not run at this level: {not_run}"></span>'
@@ -111,7 +111,7 @@ PENALTY_POINTS = (("scope", "changes unrelated to the task", -10),
                   ("risk", "a security or data problem", -20))
 
 
-def penalty_section(rows: list[dict], title: str) -> str:
+def penalty_section(rows: list[dict], title: str, sid: str = "penalties") -> str:
     """Penalty grading for one round, per configuration: passing runs, how many the judge graded, mean
     points per graded run, the share with no penalty, the clean pass rate (passing with no penalty, out of
     all runs) and the most frequent codes. Empty when none of the round's runs is graded."""
@@ -136,7 +136,7 @@ def penalty_section(rows: list[dict], title: str) -> str:
         mean = f"{sum(g['points'] for g in gs) / len(gs):.1f}" if gs else "–"
         body.append(f"<tr><td>{e(lab)}</td><td class=r>{len(rs)}</td><td class=r>{passes}</td><td class=r>{len(gs)}</td>"
                     f"<td class=r>{mean}</td><td class=r>{pct(clean, len(gs))}</td>"
-                    f"<td class=r>{pct(clean, len(rs)) if gs else '–'}</td>"
+                    f"<td class=r>{pct(clean, len(rs)) if gs and len(gs) == passes else '–'}</td>"
                     f"<td class=small>{e(top)}</td></tr>")
     dist = collections.Counter(g["points"] for _, g in graded_all)
     n = len(graded_all)
@@ -146,10 +146,7 @@ def penalty_section(rows: list[dict], title: str) -> str:
         f"<li>{link(r['run_id'], r['task_id'] + ' @' + r['repo_size'] + ', ' + level_label(r))}: {g['points']} "
         f"({', '.join(p['code'] for p in g['penalties'])})</li>" for r, g in worst)
     catalogue = "".join(f"<tr><td><code>{c}</code></td><td>{e(d)}</td><td class=r>{p}</td></tr>" for c, d, p in PENALTY_POINTS)
-    return f"""
-  <section id="penalties">
-    <h2>Judged code quality: penalties ({e(title)})</h2>
-    <p class="prose">The hidden tests decide PASS or FAIL, and the judge never changes that. For each passing
+    intro = (f"""    <p class="prose">The hidden tests decide PASS or FAIL, and the judge never changes that. For each passing
     patch, a blind judge (agy) looks for defects the tests wouldn't catch, using only the codes below, and has to
     quote a changed line of the patch for each one. The harness keeps a penalty only if that quote really is a
     changed line. Points range from 0 (nothing found) to the cap of -40. They rate how clean a passing patch is, and
@@ -157,13 +154,19 @@ def penalty_section(rows: list[dict], title: str) -> str:
     <div class="table-wrap"><table>
       <thead><tr><th>Code</th><th>Defect</th><th class=r>Points</th></tr></thead>
       <tbody>{catalogue}</tbody></table></div>
-    <div class="table-wrap"><table>
+""" if sid == "penalties" else
+             '    <p class="prose">The same judge, codes and points as for thinking off (see above), on the passing runs '
+             'of the thinking-on round.</p>\n')
+    return f"""
+  <section id="{sid}">
+    <h2>Judged code quality: penalties ({e(title)})</h2>
+{intro}    <div class="table-wrap"><table>
       <thead><tr><th>Configuration</th><th class=r>Runs</th><th class=r>PASS</th><th class=r>Graded</th>
       <th class=r>Mean points</th><th class=r>No penalty</th><th class=r>Clean pass</th><th>Top codes</th></tr></thead>
       <tbody>{''.join(body)}</tbody></table></div>
     <p class="small">PASS here also requires the repository's own tests to stay green. Graded: passing runs the
     judge has graded. Mean points and No penalty are over the graded runs. Clean pass: runs that passed with no
-    penalty, out of all runs.</p>
+    penalty, out of all runs, given once every passing run of the configuration is graded.</p>
     <h3>Points per graded run</h3>
     <div class="table-wrap"><table>
       <thead><tr>{''.join(f'<th class=r>{p}</th>' for p in range(0, -45, -5))}<th class=r>Graded</th></tr></thead>
@@ -233,8 +236,8 @@ def build_progress(final: dict, off: dict) -> str:
             oc = collections.Counter(outcome(r) for r in by[lab])
             pend = pending[rnd, lab]
             counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"], "explore": oc["ASKED TO EXPLORE"],
-                      "noanswer": oc["NO ANSWER"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"],
-                      "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"], "retry": retry[lab]}
+                      "noanswer": oc["NO ANSWER"], "stopped": oc["STOPPED EARLY"], "invalid": oc["INVALID"],
+                      "oot": oc["OUT OF TOKENS"], "time": oc["OUT OF TIME"], "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"], "retry": retry[lab]}
             group = lab.split()[0].replace("+docs", "")
             prev = order[i - 1].split()[0].replace("+docs", "") if i else group
             bar = obar(lab, counts, totals[lab], "group-start" if group != prev else "", scale=scale)
@@ -250,17 +253,18 @@ def build_progress(final: dict, off: dict) -> str:
         by = collections.defaultdict(collections.Counter)
         for r in rows:
             by[r["repo_size"]][outcome(r)] += 1
-        cols = ["PASS", "FAIL", "UNPARSABLE", "ASKED TO EXPLORE", "NO ANSWER", "INVALID", "OUT OF TOKENS", "NO FIT"]
+        cols = ["PASS", "FAIL", "UNPARSABLE", "ASKED TO EXPLORE", "NO ANSWER", "STOPPED EARLY", "INVALID", "OUT OF TOKENS",
+                "OUT OF TIME", "NO FIT"]
         body = "".join(f"<tr><td>{s}</td>" + "".join(f"<td class=r>{c[k]}</td>" for k in cols)
                        + f"<td class=r>{sum(c.values())}</td></tr>" for s, c in sorted(by.items()))
         return (f"<h3>{e(title)}</h3><div class=table-wrap><table><thead><tr><th>Repo</th>"
                 + "".join(f"<th class=r>{k}</th>" for k in cols) + "<th class=r>Runs</th></tr></thead>"
-                f"<tbody>{body or '<tr><td colspan=10>none yet</td></tr>'}</tbody></table></div>")
+                f"<tbody>{body or '<tr><td colspan=12>none yet</td></tr>'}</tbody></table></div>")
 
     legend = ('<div class="olegend small">' + "".join(
         f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("fail", "FAIL"),
-                                                          ("unparsable", "UNPARSABLE"), ("explore", "ASKED TO EXPLORE"), ("noanswer", "NO ANSWER"), ("invalid", "INVALID"),
-                                                          ("oot", "OUT OF TOKENS"), ("nofit", "NO FIT"),
+                                                          ("unparsable", "UNPARSABLE"), ("explore", "ASKED TO EXPLORE"), ("noanswer", "NO ANSWER"), ("stopped", "STOPPED EARLY"),
+                                                          ("invalid", "INVALID"), ("oot", "OUT OF TOKENS"), ("time", "OUT OF TIME"), ("nofit", "NO FIT"),
                                                           ("running", "in progress"), ("queued", "queued"),
                                                           ("retry", "to rerun next pass"), ("na", "not run at this level"))) + "</div>")
     if status:
@@ -292,6 +296,7 @@ def build_progress(final: dict, off: dict) -> str:
     outcomes.</p>
   </section>
   {penalty_section(list(off.values()), "thinking off")}
+  {penalty_section(list(final.values()), "thinking on", "penalties-on")}
   <section>
     <h2>Per repo</h2>
     {table(list(off.values()), "Thinking off")}
@@ -320,8 +325,8 @@ def build() -> str:
         xs = by[name]
         oc = collections.Counter(outcome(r) for r in xs)
         counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"],
-                  "explore": oc["ASKED TO EXPLORE"], "noanswer": oc["NO ANSWER"], "invalid": oc["INVALID"],
-                  "oot": oc["OUT OF TOKENS"]}
+                  "explore": oc["ASKED TO EXPLORE"], "noanswer": oc["NO ANSWER"], "stopped": oc["STOPPED EARLY"],
+                  "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"], "time": oc["OUT OF TIME"]}
         group = name.split()[0].replace("+docs", "")
         prev = order[i - 1].split()[0].replace("+docs", "") if i else group
         bars.append(obar(name, counts, len(xs), "group-start" if group != prev else "", scale=scale))

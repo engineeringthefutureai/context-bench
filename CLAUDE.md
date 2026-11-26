@@ -197,7 +197,9 @@ In the report and viewer the labels show as outcomes (stored labels unchanged): 
 EXPLORE (no code, asked to look at the repo first, in prose or a pretend tool call: `no_code`,
 `tool_request`; checked 2026-11-24 by embeddings: all 231 such thinking-off replies are "let me look first",
 none asks the user anything), NO ANSWER (an empty reply, `empty`: agents that went silent, often after
-repeating one tool call; badge LOOPED), INVALID (anything else: a run whose reply doesn't say; the reply decides,
+repeating one tool call; badge LOOPED), STOPPED EARLY (an agent, L7/L8/L-AG, ended without code or a change: it
+can explore, so not ASKED TO EXPLORE; typically it announced its next step in prose without the call), OUT OF TIME
+(an agent's run with no answer ended by the harness's own limit, L-AG's 1 h or 100 model calls), INVALID (anything else: a run whose reply doesn't say; the reply decides,
 not the stored label, since an agent's `tool_error` only means some call failed along the way), OUT OF TOKENS
 (hit max output), NO FIT. Never "broken" in reader-facing text. Labeling techniques (outcome rules, badges, the embedding checks): `docs/labeling-design.md`.
 Regression check, also separate: `repo_tests_passed/total` = the repo's own `tests/` after the patch
