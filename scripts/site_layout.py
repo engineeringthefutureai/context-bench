@@ -26,7 +26,7 @@ SITE = ROOT / "site"
 DOCS = ROOT / "docs"
 
 # (href, label, page name): the top bar, in order
-NAV = [("./", "Results", "index"), ("method", "Method", "method"), ("levels", "Levels", "levels"), ("tasks", "Tasks", "tasks"),
+NAV = [("./", "Results", "index"), ("method", "Method", "method"), ("levels", "Levels", "levels"), ("tasks", "Tasks", "tasks"), ("cases", "Cases", "cases"),
        ("guide", "Guide", "guide"), ("data", "Raw data", "data"), ("downloads", "Downloads", "downloads")]
 
 _HEADER = re.compile(r"\A<!--\n(.*?)\n-->\n", re.S)

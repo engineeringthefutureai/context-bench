@@ -307,351 +307,478 @@ def build_progress(final: dict, off: dict) -> str:
 
 def build() -> str:
     final, off, grades = load()
-    if not final or not all(r.get("cold_start") for r in final.values()):
-        return build_progress(final, off)   # the full write-up below is the v3 one (a clean thinking-on round)
-    F = list(final.values())
-    common = [k for k in final if k in off]
-    by = collections.defaultdict(list)
-    for r in F:
-        by[level_label(r)].append(r)
-    order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER), key=lag_last)
-    oc_all = collections.Counter(outcome(r) for r in F)
-    n_all = len(F)
+    if sweep_status():
+        return build_progress(final, off)    # a sweep is running: the live preview
+    return build_final(final, off)
 
-    # ---- per level rows
-    rows_html, bars = [], []
-    scale = max(len(by[name]) for name in order)
-    for i, name in enumerate(order):
-        xs = by[name]
-        oc = collections.Counter(outcome(r) for r in xs)
-        counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"],
-                  "explore": oc["ASKED TO EXPLORE"], "noanswer": oc["NO ANSWER"], "stopped": oc["STOPPED EARLY"],
-                  "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"], "time": oc["OUT OF TIME"]}
-        group = name.split()[0].replace("+docs", "")
-        prev = order[i - 1].split()[0].replace("+docs", "") if i else group
-        bars.append(obar(name, counts, len(xs), "group-start" if group != prev else "", scale=scale))
-        reuse = [r["reuse_passed"] for r in xs if r.get("reuse_passed") is not None]
-        ok = [r for r in xs if r["label"] == "ok"]
-        kept = sum(1 for r in ok if r.get("repo_tests_total") and r["repo_tests_passed"] == r["repo_tests_total"])
-        rk = [grades[r["run_id"]]["rank_pct"] for r in xs if r["run_id"] in grades and grades[r["run_id"]].get("rank_pct") is not None]
-        rows_html.append(
-            f"<tr><td>{e(name)}</td><td class=r>{len(xs)}</td><td class=r>{oc['PASS']}</td><td class=r>"
-            f"{(str(sum(reuse)) + '/' + str(len(reuse))) if reuse else '–'}</td><td class=r>{kept}/{len(ok)}</td>"
-            f"<td class=r>{(f'{st.mean(rk):.2f}') if rk else '–'}</td>"
-            f"<td class=r>{st.median(r['tokens_in'] for r in xs) / 1000:.1f}k</td>"
-            f"<td class=r>{st.median(r['tokens_out'] for r in xs) / 1000:.1f}k</td>"
-            f"<td class=r>{st.median(r['latency_s'] for r in xs):.0f}</td></tr>")
+
+# Level groups for the overview charts: (group, what the model gets). Arms that change the prompt (+hint) or the
+# tool names (Qwen names) are left out of the group rates; the configuration tables list them.
+GROUPS = [("L1", "the target file"), ("L2", "target, its imports and its test"), ("L3", "the whole repository"),
+          ("L4", "3 files found by search"), ("L5", "8 functions found by search"), ("L6", "a map of every signature"),
+          ("L7", "an agent with search tools"), ("L8", "an agent that reads by symbol and edits in place")]
+
+
+def in_group(r: dict, g: str) -> bool:
+    return r["level"] == g and (r.get("prompt_arm") or "base") in ("base", "edit_tools") and (r.get("tool_names") or "harness") == "harness"
+
+
+def sent(r: dict) -> bool:
+    """False for a run whose prompt never reached the model (NO FIT before the first request): its recorded
+    tokens_in is the prompt's size, not tokens spent."""
+    return not (outcome(r) == "NO FIT" and not r.get("tokens_out"))
+
+
+def passed(xs) -> int:
+    return sum(outcome(r) == "PASS" for r in xs)
+
+
+def dumbbell(rows: list[tuple[str, str, float, float, str]]) -> str:
+    """Pass rate per row, thinking off (hollow) to thinking on (filled), on one 0-100% axis. rows: (label,
+    sublabel, off %, on %, note). Inline SVG coloured by the site's tokens, so it follows the theme."""
+    w, left, right, rh, top = 760, 250, 96, 34, 28
+    x = lambda p: left + (w - left - right) * p / 100
+    h = top + rh * len(rows) + 8
+    grid = "".join(f'<line x1="{x(p):.1f}" y1="{top - 6}" x2="{x(p):.1f}" y2="{h - 8}" style="stroke:var(--rule)"/>'
+                   f'<text x="{x(p):.1f}" y="{top - 12}" text-anchor="middle" class="ax">{p}%</text>' for p in range(0, 101, 25))
+    body = []
+    for i, (lab, sub, a, b, note) in enumerate(rows):
+        y = top + rh * i + rh / 2
+        ref = lab.startswith("L-AG")
+        col = "var(--muted)" if ref else "var(--accent)"
+        body.append(
+            f'<text x="0" y="{y - 2:.1f}" class="lb">{e(lab)}</text><text x="0" y="{y + 12:.1f}" class="sb">{e(sub)}</text>'
+            f'<line x1="{x(a):.1f}" y1="{y:.1f}" x2="{x(b):.1f}" y2="{y:.1f}" style="stroke:{col};stroke-width:2;opacity:.45"/>'
+            f'<circle cx="{x(a):.1f}" cy="{y:.1f}" r="5.5" style="fill:var(--surface);stroke:{col};stroke-width:2"><title>{e(lab)}, thinking off: {a:.0f}%</title></circle>'
+            f'<circle cx="{x(b):.1f}" cy="{y:.1f}" r="6" style="fill:{col}"><title>{e(lab)}, thinking on: {b:.0f}%</title></circle>'
+            f'<text x="{w - right + 10}" y="{y + 4:.1f}" class="vl">{a:.0f} → <tspan style="font-weight:700">{b:.0f}%</tspan></text>'
+            + (f'<text x="{x(max(a, b)) + 12:.1f}" y="{y + 4:.1f}" class="nt">{e(note)}</text>' if note else ""))
+    return (f'<svg class="chart" viewBox="0 0 {w} {h}" role="img" aria-label="Pass rate per level, thinking off and on">'
+            f'{grid}{"".join(body)}</svg>')
+
+
+def hbars(rows: list[tuple[str, list[tuple[float, str, str]], str]], scale: float) -> str:
+    """Horizontal bars in the site's .obar layout: (label, [(value, css colour, title)], value text)."""
+    out = []
+    for lab, segs, val in rows:
+        spans = "".join(f'<span style="flex:0 0 {100 * v / scale:.2f}%;background:{c}" title="{e(t)}"></span>' for v, c, t in segs if v)
+        out.append(f'<div class="obar"><span class="lab">{e(lab)}</span><span class="track">{spans}</span><span class="v">{val}</span></div>')
+    return f'<div class="obars">{"".join(out)}</div>'
+
+
+def build_final(final: dict, off: dict) -> str:
+    """The Results page of the v4 round: both rounds, repos S, M and L; L-AG only as an outside reference."""
+    from build_site import load_penalties
+    from context_bench.penalty import hard_pass
+    pen = load_penalties()
+    F = [r for r in final.values() if r["level"] != "L-AG"]
+    O = [r for r in off.values() if r["level"] != "L-AG"]
+    lag_on = [r for r in final.values() if r["level"] == "L-AG"]
+    lag_off = [r for r in off.values() if r["level"] == "L-AG"]
+    n_runs = len(final) + len(off)
+    rate = lambda xs: 100 * passed(xs) / len(xs) if xs else 0
+    G_on = {g: [r for r in F if in_group(r, g)] for g, _ in GROUPS}
+    G_off = {g: [r for r in O if in_group(r, g)] for g, _ in GROUPS}
+
+    # ---- the ladder (dumbbell)
+    notes = {"L3": "no fit on repo L"}
+    ladder = [(g, sub, rate(G_off[g]), rate(G_on[g]), notes.get(g, "")) for g, sub in GROUPS]
+    ladder.append(("L-AG", "Antigravity, a commercial harness", rate(lag_off), rate(lag_on), ""))
+
+    # ---- repo size heat table (thinking on)
+    def cell(xs):
+        if not xs:
+            return '<div class="hc na">–</div>'
+        p = rate(xs)
+        nofit = all(outcome(r) == "NO FIT" for r in xs)
+        bg = "var(--subtle)" if nofit else f"color-mix(in srgb, var(--good) {p * 0.8:.0f}%, var(--surface))"
+        fg = "var(--muted)" if nofit else "#fff" if p >= 60 else "var(--ink)"
+        return (f'<div class="hc" style="background:{bg};color:{fg}" title="{passed(xs)} of {len(xs)} pass">'
+                f'{"no fit" if nofit else f"{p:.0f}%"}<small>{passed(xs)}/{len(xs)}</small></div>')
+    heat_rows = ('<div class="hh"></div><div class="hh">Repo S</div><div class="hh">Repo M</div><div class="hh">Repo L</div>'
+                 + "".join(f'<div class="hl"><b>{g}</b><span>{e(sub)}</span></div>'
+                           + "".join(cell([r for r in G_on[g] if r["repo_size"] == s]) for s in "SML") for g, sub in GROUPS))
 
     # ---- reuse by visibility
-    vis = collections.defaultdict(lambda: [0, 0])
-    vis_off = collections.defaultdict(lambda: [0, 0])
-    for src, tgt in ((F, vis), ([off[k] for k in common], vis_off)):
-        for r in src:
+    def vis_counts(rows):
+        v = collections.defaultdict(lambda: [0, 0])
+        for r in rows:
             if r.get("reuse_passed") is None:
                 continue
-            k = ("full source" if r.get("helper_body_in_context") else "a call site" if r.get("helper_usage_in_context")
-                 else "signature only" if r.get("helper_in_context") else "not seen")
-            tgt[k][0] += 1
-            tgt[k][1] += bool(r["reuse_passed"])
-    vis_rows = "".join(f"<tr><td>{k}</td><td class=r>{vis[k][1]}/{vis[k][0]} ({pct(vis[k][1], vis[k][0])})</td>"
-                       f"<td class=r>{vis_off[k][1]}/{vis_off[k][0]} ({pct(vis_off[k][1], vis_off[k][0])})</td></tr>"
-                       for k in ("full source", "a call site", "signature only", "not seen"))
+            k = ("its full source" if r.get("helper_body_in_context") else "a call site" if r.get("helper_usage_in_context")
+                 else "its signature only" if r.get("helper_in_context") else "nothing of it")
+            v[k][0] += 1
+            v[k][1] += bool(r["reuse_passed"])
+        return v
+    v_on, v_off = vis_counts(F), vis_counts(O)
+    VIS = ["its full source", "a call site", "its signature only", "nothing of it"]
+    reuse_rows = []
+    for k in VIS:
+        for tag, v, col in (("on", v_on, "var(--accent)"), ("off", v_off, "color-mix(in srgb, var(--accent) 45%, var(--surface))")):
+            n, y = v[k]
+            reuse_rows.append((f"{k.replace('its ', '').replace(' only', '')} · {tag}", [(100 * y / n if n else 0, col, f"{y} of {n} reused")], f"{pct(y, n)} <span class=small>of {n}</span>"))
+    vf = v_on["its full source"]
+    vn = v_on["nothing of it"]
 
-    # ---- thinking on vs off
-    t_on = collections.Counter(classify(final[k]) for k in common)
-    t_off = collections.Counter(classify(off[k]) for k in common)
-    nc = len(common)
-    think_cls = [("pass", "PASS"), ("invalid", "No usable answer (any harness notices)"),
-                 ("broken", "Code doesn't import (any test run catches it)"),
-                 ("flagged", "Wrong, and the repo's own tests fail (a test loop would flag it)"),
-                 ("silent", "Wrong, but the repo's own tests pass (silent)")]
-    think_rows = "".join(f"<tr><td>{lab}</td><td class=r>{t_off[k]} ({pct(t_off[k], nc)})</td>"
-                         f"<td class=r>{t_on[k]} ({pct(t_on[k], nc)})</td></tr>" for k, lab in think_cls)
-    lv_think = collections.defaultdict(lambda: [0, 0, 0])
+    # ---- thinking, paired
+    common = [k for k in final if k in off and final[k]["level"] != "L-AG"]
+    p_off = sum(outcome(off[k]) == "PASS" for k in common)
+    p_on = sum(outcome(final[k]) == "PASS" for k in common)
+    one_shot = lambda k: final[k]["level"] in ("L1", "L2", "L3", "L4", "L5", "L6")
+    agentic = lambda k: final[k]["level"] in ("L7", "L8")
+    os_n, ag_n = sum(map(one_shot, common)), sum(map(agentic, common))
+    os_off = sum(outcome(off[k]) == "PASS" for k in common if one_shot(k))
+    os_on = sum(outcome(final[k]) == "PASS" for k in common if one_shot(k))
+    ag_off = sum(outcome(off[k]) == "PASS" for k in common if agentic(k))
+    ag_on = sum(outcome(final[k]) == "PASS" for k in common if agentic(k))
+    lv_pair = collections.defaultdict(lambda: [0, 0, 0])
     for k in common:
-        a = lv_think[k[1]]
+        a = lv_pair[final[k]["level"]]
         a[0] += 1
-        a[1] += off[k]["label"] == "ok"
-        a[2] += final[k]["label"] == "ok"
-    think_lv_rows = "".join(f"<tr><td>{l}</td><td class=r>{a[1]}/{a[0]}</td><td class=r>{a[2]}/{a[0]}</td>"
-                            f"<td class=r>{a[2] - a[1]:+d}</td></tr>" for l, a in sorted(lv_think.items()))
-    out_off = sum(off[k]["tokens_out"] for k in common) / nc
-    out_on = sum(final[k]["tokens_out"] for k in common) / nc
+        a[1] += outcome(off[k]) == "PASS"
+        a[2] += outcome(final[k]) == "PASS"
 
-    # ---- latency buckets
-    buckets = ["<1 min", "1-3 min", "3-10 min", ">10 min"]
-    lat = collections.defaultdict(collections.Counter)
+    # ---- tokens
+    tot = lambda xs, f: sum((r.get(f) or 0) for r in xs if sent(r))
+    in_on, out_on, in_off, out_off = tot(F, "tokens_in"), tot(F, "tokens_out"), tot(O, "tokens_in"), tot(O, "tokens_out")
+    big = max(in_on + out_on, in_off + out_off)
+    round_bars = hbars([
+        ("Thinking off", [(in_off, "var(--accent)", f"input {in_off / 1e6:.1f}M"), (out_off, "var(--warn)", f"output {out_off / 1e6:.1f}M")],
+         f"{(in_off + out_off) / 1e6:.0f}M"),
+        ("Thinking on", [(in_on, "var(--accent)", f"input {in_on / 1e6:.1f}M"), (out_on, "var(--warn)", f"output {out_on / 1e6:.1f}M")],
+         f"{(in_on + out_on) / 1e6:.0f}M")], big)
+    tpp = []
+    for g, sub in GROUPS:
+        xs = G_on[g]
+        p = passed(xs)
+        tpp.append((g, (tot(xs, "tokens_in") + tot(xs, "tokens_out")) / p if p else 0, tot(xs, "tokens_in") / p if p else 0, sub))
+    lag_p = passed(lag_on)
+    lag_tpp = (tot(lag_on, "tokens_in") + tot(lag_on, "tokens_out")) / lag_p if lag_p else 0
+    tmax = max(t for _, t, _, _ in tpp)
+    tpp_bars = hbars([(f"{g}", [(ti, "var(--accent)", f"input {ti / 1e3:.0f}k per PASS"), (t - ti, "var(--warn)", f"output {(t - ti) / 1e3:.0f}k per PASS")],
+                       f"{t / 1e3:.0f}k") for g, t, ti, _ in tpp], tmax)
+    tok_rows = []
+    for g, sub in GROUPS:
+        a, b = G_off[g], G_on[g]
+        med = lambda xs, f: st.median((r.get(f) or 0) for r in xs if sent(r)) / 1e3 if xs else 0
+        tok_rows.append(f"<tr><td>{g}</td><td class=r>{med(a, 'tokens_in'):.1f}k</td><td class=r>{med(b, 'tokens_in'):.1f}k</td>"
+                        f"<td class=r>{med(a, 'tokens_out'):.1f}k</td><td class=r>{med(b, 'tokens_out'):.1f}k</td>"
+                        f"<td class=r>{med(b, 'peak_ctx_tokens'):.1f}k</td></tr>")
+    l7_in = (st.median(r["tokens_in"] for r in G_off["L7"]) / 1e3, st.median(r["tokens_in"] for r in G_on["L7"]) / 1e3)
+    ret_tpp = min(t for g, t, _, _ in tpp if g in ("L4", "L5"))
+    l3_tpp = next(t for g, t, _, _ in tpp if g == "L3")
+    l7_tpp = next(t for g, t, _, _ in tpp if g == "L7")
+    l8_tpp = next(t for g, t, _, _ in tpp if g == "L8")
+    usd = lambda tin, tout, k: (tin * PRICES[k][0] + tout * PRICES[k][1]) / 1e6
+
+    # ---- code quality (thinking on): clean pass = passes, keeps the repo tests, judge found nothing
+    q_rows, clean_rate = [], {}
+    for g, sub in GROUPS:
+        xs = G_on[g]
+        hp = [r for r in xs if hard_pass(r)]
+        clean = sum(1 for r in hp if r["run_id"] in pen and not pen[r["run_id"]]["penalties"])
+        clean_rate[g] = 100 * clean / len(xs)
+        q_rows.append((g, [(100 * clean / len(xs), "var(--good)", f"{clean} clean passes"),
+                           (100 * (len(hp) - clean) / len(xs), "color-mix(in srgb, var(--good) 35%, var(--surface))",
+                            f"{len(hp) - clean} passes with a judged defect")],
+                       f"{100 * clean / len(xs):.0f}% <span class=small>clean</span>"))
+
+    # ---- hypotheses evidence
+    by_cfg = collections.defaultdict(list)
     for r in F:
-        s = r["latency_s"]
-        lat[r["level"]]["<1 min" if s < 60 else "1-3 min" if s < 180 else "3-10 min" if s < 600 else ">10 min"] += 1
-    lat_rows = []
-    for l in sorted(lat):
-        xs = [r for r in F if r["level"] == l]
-        okx = [r for r in xs if r["label"] == "ok"]
-        lat_rows.append(f"<tr><td>{l}</td>" + "".join(f"<td class=r>{lat[l][b]}</td>" for b in buckets)
-                        + f"<td class=r>{st.median(r['latency_s'] for r in xs):.0f}</td>"
-                        + f"<td class=r>{(sum(r['latency_s'] for r in xs) / len(okx) / 60):.1f}</td></tr>" if okx else "")
+        by_cfg[level_label(r)].append(r)
+    by_cfg_off = collections.defaultdict(list)
+    for r in O:
+        by_cfg_off[level_label(r)].append(r)
+    pc = lambda lab, d=by_cfg: f"{passed(d.get(lab, []))}/{len(d.get(lab, []))}"
+    sm = lambda g: [r for r in G_on[g] if r["repo_size"] in "SM"]
+    mmed = lambda g: st.median(r["tokens_in"] for r in G_on[g] if r["repo_size"] == "M") / 1e3
+    lr = lambda g: [r for r in G_on[g] if r["repo_size"] == "L"]
+    tail = [r for r in list(final.values()) + list(off.values()) if r.get("tail_check") and r["level"] != "L-AG"]
+    tail_pass = sum(outcome(r) == "PASS" for r in tail)
+    trap = {(level_label(r), r["repo_size"]): r for r in F if r["task_id"] == "trap-001"}
+    trap_fixed = sorted({lab.split()[0] for (lab, s), r in trap.items() if outcome(r) == "PASS" and r.get("reuse_passed")})
+    hyp = [
+        ("The model reuses a helper when it can see the helper's code.", "held",
+         f"Reused with its full source in context: {vf[1]}/{vf[0]}. With nothing of it in context: {vn[1]}/{vn[0]}."),
+        ("An agent does as well as the whole repository, and keeps working when the repository no longer fits.", "held",
+         f"Repos S and M: L3 {passed(sm('L3'))}/{len(sm('L3'))}, L7 {passed(sm('L7'))}/{len(sm('L7'))}. Repo L: L3 doesn't fit, L7 {passed(lr('L7'))}/{len(lr('L7'))}. On repo M both use about the same input with thinking on (median {mmed('L3'):.0f}k for L3, {mmed('L7'):.0f}k for L7)."),
+        ("Search queries written by the model beat searching with the task text.", "partly",
+         f"BM25: model queries {pc('L5 bm25 model_queries')} against task text {pc('L5 bm25 task_vs_code')}. Embeddings: {pc('L5 embed model_queries')} against {pc('L5 embed task_vs_code')}."),
+        ("A map of signatures is enough to write the change.", "with thinking",
+         f"Thinking on: L6 {pc('L6')}, with docstrings {pc('L6+docs')}. Thinking off: {pc('L6', by_cfg_off)} and {pc('L6+docs', by_cfg_off)}."),
+        ("Thinking helps most where the context is thinnest.", "partly",
+         f"The largest gain is at the signature map (L6 {lv_pair['L6'][1]} → {lv_pair['L6'][2]} of {lv_pair['L6'][0]}). Retrieval gains 20 to 25 points, the agents {round(100 * (lv_pair['L7'][2] - lv_pair['L7'][1]) / lv_pair['L7'][0])}. With only the target file (L1) the rate stays low: {lv_pair['L1'][1]} → {lv_pair['L1'][2]} of {lv_pair['L1'][0]}."),
+        ("Richer search tools and a self-managed working set help on a large repository.", "small",
+         f"Thinking on: grep {pc('L7 grep')}, hybrid {pc('L7 hybrid')}, rich {pc('L7 rich')}, selective {pc('L7 selective')}. The differences are within the noise of one sample."),
+        ("Reading code by symbol instead of whole files saves tokens.", "not held",
+         f"L8 reads by symbol and edits in place. It reached the highest pass rate ({pc('L8')}) but used more input per run than L7 (median {st.median(r['tokens_in'] for r in G_on['L8']) / 1e3:.0f}k against {l7_in[1]:.0f}k)."),
+        ("Documentation drift (the trap task) is caught only where the helper's body is in view.", "held",
+         f"Thinking on, the model reused and fixed the helper at {', '.join(trap_fixed)}, and failed at L6 on both repos, where only the signature and docstring are in view."),
+        ("A second chance after a failed check recovers answers.", "held",
+         f"{len(tail)} agent runs ended with a file that didn't parse or failing repository tests and got one more turn. {tail_pass} of them pass."),
+        ("A reuse hint in the prompt raises reuse.", "small",
+         f"Thinking on: L1 {pc('L1')} → {pc('L1 +hint')}, L5 embed {pc('L5 embed task_vs_code')} → {pc('L5 embed task_vs_code +hint')}. Thinking off, the hint scores one run lower in both."),
+    ]
+    vcls = {"held": "v-held", "partly": "v-part", "with thinking": "v-part", "small": "v-part", "not held": "v-not", "no effect": "v-not"}
+    hyp_rows = "".join(f"<tr><td>{e(h)}</td><td><span class='verdict {vcls[v]}'>{e(v)}</span></td><td class=small>{e(ev)}</td></tr>"
+                       for h, v, ev in hyp)
 
-    # ---- cost
-    cost_rows = []
-    for l in sorted({r["level"] for r in F}):
-        xs = [r for r in F if r["level"] == l]
-        okn = sum(r["label"] == "ok" for r in xs)
-        tin = sum(r["tokens_in"] for r in xs)
-        cached = sum((r.get("tokens_cached") or 0) for r in xs)
-        tout = sum(r["tokens_out"] for r in xs)
-        cells = []
-        for pin, pout in PRICES.values():
-            usd = (tin * pin + tout * pout) / 1e6
-            cells.append(f"<td class=r>${usd / okn * 100:.2f}</td>" if okn else "<td class=r>–</td>")
-        cost_rows.append(f"<tr><td>{l}</td><td class=r>{tin / len(xs) / 1000:.1f}k</td>"
-                         f"<td class=r>{cached / len(xs) / 1000:.1f}k</td><td class=r>{tout / len(xs) / 1000:.1f}k</td>"
-                         f"<td class=r>{(tin + tout) / okn / 1000:.1f}k</td>" + "".join(cells) + "</tr>")
-    price_note = "; ".join(f"{name}: ${p[0]:.2f} input / ${p[1]:.2f} output per million tokens" for name, p in PRICES.items())
+    # ---- configuration tables (collapsed)
+    main = lambda D: [r for r in D if (r.get("tool_names") or "harness") == "harness"]   # the side arm has its own section
 
-    # ---- agents
-    agents = []
-    for v in ("grep", "hybrid", "rich", "selective"):
-        xs = [r for r in F if r["level"] == "L7" and r["agent_variant"] == v]
-        if not xs:
-            continue
-        reuse = [r["reuse_passed"] for r in xs if r.get("reuse_passed") is not None]
-        agents.append(f"<tr><td>{v}</td><td class=r>{sum(r['label'] == 'ok' for r in xs)}/{len(xs)}</td>"
-                      f"<td class=r>{sum(reuse)}/{len(reuse)}</td>"
-                      f"<td class=r>{st.median(r['tokens_in'] for r in xs) / 1000:.1f}k</td>"
-                      f"<td class=r>{st.median((r.get('tokens_cached') or 0) for r in xs) / 1000:.1f}k</td>"
-                      f"<td class=r>{st.median(r['tool_calls'] for r in xs):.0f}</td>"
-                      f"<td class=r>{st.median(r['latency_s'] for r in xs):.0f}</td></tr>")
-    sel = [r for r in F if r["level"] == "L7" and r["agent_variant"] == "selective"]
-    sel_drop_runs = sum(1 for r in sel if r.get("drops"))
-    sel_dropped = sum(r.get("dropped_tokens") or 0 for r in sel)
-    sel_saved = sum(r.get("drop_saved_tokens") or 0 for r in sel)
-    sel_in = sum(r["tokens_in"] for r in sel)
-    calls = collections.Counter()
-    for r in [r for r in F if r["level"] == "L7" and r["agent_variant"] in ("rich", "selective")]:
-        p = RESULTS / "runs" / r["run_id"] / "transcript.jsonl"
-        if p.exists():
-            for line in p.open():
-                m = json.loads(line)
-                for c in m.get("tool_calls") or []:
-                    calls[c["function"]["name"]] += 1
+    def cfg_table(D):
+        by = collections.defaultdict(list)
+        for r in main(D):
+            by[level_label(r)].append(r)
+        order = [l for l in LEVEL_ORDER if l in by] + sorted(set(by) - set(LEVEL_ORDER), key=lag_last)
+        rows = []
+        for lab in order:
+            xs = by[lab]
+            reuse = [r["reuse_passed"] for r in xs if r.get("reuse_passed") is not None]
+            rows.append(f"<tr><td>{e(lab)}</td><td class=r>{len(xs)}</td><td class=r>{passed(xs)} ({pct(passed(xs), len(xs))})</td>"
+                        + "".join(f"<td class=r>{passed([r for r in xs if r['repo_size'] == s])}/{sum(r['repo_size'] == s for r in xs)}</td>" for s in "SML")
+                        + f"<td class=r>{(str(sum(reuse)) + '/' + str(len(reuse))) if reuse else '–'}</td>"
+                        f"<td class=r>{st.median(r['tokens_in'] for r in xs) / 1e3:.1f}k</td><td class=r>{st.median(r['tokens_out'] for r in xs) / 1e3:.1f}k</td></tr>")
+        return ("<div class=table-wrap><table><thead><tr><th>Configuration</th><th class=r>Runs</th><th class=r>PASS</th>"
+                "<th class=r>S</th><th class=r>M</th><th class=r>L</th><th class=r>Reuse</th><th class=r>Input</th><th class=r>Output</th></tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody></table></div>")
 
-    # ---- judge
-    agree = collections.Counter()
-    for r in F:
-        g = grades.get(r["run_id"])
-        if g and g.get("correctness") is not None:
-            agree[(r["label"] == "ok", g["correctness"] >= 4)] += 1
-    graded = sum(agree.values())
-    passed_cov = [r for r in F if r["label"] == "ok" and r.get("patch_coverage") is not None]
-    low_cov = [r for r in passed_cov if r["patch_coverage"] < 0.8]
-    tests_added = sum(1 for r in F if (r.get("tests_added") or 0) > 0)
+    side = []
+    for base, alt in (("L7 selective", "L7 selective qwen names"), ("L8", "L8 qwen names")):
+        for lab in (base, alt):
+            xs = by_cfg_off.get(lab, [])
+            hp = [r for r in xs if hard_pass(r)]
+            side.append(dict(lab=lab, names="Qwen's names" if lab == alt else "harness names", n=len(xs), p=passed(xs),
+                             clean=sum(1 for r in hp if r["run_id"] in pen and not pen[r["run_id"]]["penalties"]),
+                             errs=sum(r.get("tool_errors") or 0 for r in xs),
+                             err_runs=sum(1 for r in xs if r.get("tool_errors")),
+                             calls=st.median((r.get("tool_calls") or 0) for r in xs) if xs else 0,
+                             tin=st.median(r["tokens_in"] for r in xs) / 1e3 if xs else 0))
+    side_bars = hbars([(f"{d['lab'].replace(' qwen names', '')} · {d['names']}",
+                        [(100 * d["p"] / d["n"] if d["n"] else 0, "var(--accent)" if "Qwen" in d["names"] else "color-mix(in srgb, var(--accent) 45%, var(--surface))", f"{d['p']} of {d['n']} pass")],
+                        f"{d['p']}/{d['n']}") for d in side], 100)
+    side_rows = "".join(f"<tr><td>{e(d['lab'].replace(' qwen names', ''))}</td><td>{e(d['names'])}</td><td class=r>{d['p']}/{d['n']}</td>"
+                        f"<td class=r>{d['clean']}</td><td class=r>{d['errs']}</td><td class=r>{d['err_runs']}</td>"
+                        f"<td class=r>{d['calls']:.0f}</td><td class=r>{d['tin']:.0f}k</td></tr>" for d in side)
+    s7, q7, s8, q8 = side
+    lag_l78 = max(passed(by_cfg[l]) for l in ("L7 rich", "L7 selective", "L8"))
+    lag_in = st.median(r["tokens_in"] for r in lag_on) / 1e3
+    l8_in = st.median(r["tokens_in"] for r in G_on["L8"]) / 1e3
 
-    # ---- gallery
-    def find(task, lvl, size="M"):
-        return next((r["run_id"] for r in F if r["task_id"] == task and level_label(r) == lvl and r["repo_size"] == size), "")
-    broke = [r for r in F if r["label"] == "ok" and r.get("repo_tests_total") and r["repo_tests_passed"] < r["repo_tests_total"]]
-    oot = next((r for r in F if outcome(r) == "OUT OF TOKENS"), None)
-    dead = [r for r in F if r.get("legacy_used")]
-
-    l7g = by.get("L7 grep", [])
-    l3 = by.get("L3", [])
-    fresh_ratio = (st.median(r["tokens_in"] - (r.get("tokens_cached") or 0) for r in l7g)
-                   / st.median(r["tokens_in"] for r in l3)) if l7g and l3 else 0
-    p = lambda xs: sum(r["label"] == "ok" for r in xs)
-
+    flow = "".join(f'<div class="fstep"><b>{a}</b><span>{b}</span></div>'
+                   for i, (a, b) in enumerate([("Task", "a change request in product language"),
+                                               ("Context builder", "one level, L0 to L8"),
+                                               ("Model", "Qwen 3.8 27B, thinking off or on"),
+                                               ("Patch", "files written, or edits in place"),
+                                               ("Checks", "hidden tests, reuse spy, repo tests, blind judge")]))
     page = _page(f"""
+  <style>
+    .chart {{ width: 100%; height: auto; font-family: var(--font-data); }}
+    .chart .ax {{ font-size: 11px; fill: var(--muted); }} .chart .lb {{ font-size: 13px; font-weight: 600; fill: var(--ink); }}
+    .chart .sb {{ font-size: 10.5px; fill: var(--muted); }} .chart .vl {{ font-size: 12px; fill: var(--ink); }}
+    .chart .nt {{ font-size: 10.5px; fill: var(--muted); font-style: italic; }}
+    .chart-legend {{ display: flex; gap: 18px; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); }}
+    .chart-legend i {{ display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }}
+    .flow {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 18px; }}
+    .fstep {{ position: relative; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; align-content: start; }}
+    .fstep:not(:last-child)::after {{ content: "→"; position: absolute; right: -15px; top: 50%; transform: translateY(-50%); color: var(--muted); font-family: var(--font-data); }}
+    .heat {{ display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); gap: 4px; }}
+    .heat .hh {{ font: 600 0.72rem var(--font-data); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); text-align: center; padding-bottom: 2px; }}
+    .heat .hl {{ display: grid; align-content: center; padding: 6px 4px; }} .heat .hl b {{ font-family: var(--font-data); }}
+    .heat .hl span {{ font-size: 0.8rem; color: var(--muted); line-height: 1.3; }}
+    .heat .hc {{ display: grid; place-content: center; text-align: center; border-radius: 6px; padding: 8px 4px; font: 700 1rem var(--font-data); }}
+    .heat .hc small {{ font-weight: 400; font-size: 0.7rem; opacity: 0.85; }} .heat .na {{ color: var(--muted); }}
+    .callout .small {{ margin-top: 10px; }}
+    section h3 {{ margin: 18px 0 6px; }}
+    .fstep b {{ font-family: var(--font-display); font-size: 0.9rem; }} .fstep span {{ font-size: 0.82rem; color: var(--muted); }}
+    .callout {{ border-left: 4px solid var(--muted); background: var(--subtle); padding: 12px 16px; border-radius: 0 8px 8px 0; }}
+    .twocol {{ display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }}
+    details.more > summary {{ cursor: pointer; font-family: var(--font-data); font-size: 0.9rem; color: var(--accent); }}
+    @media (max-width: 640px) {{ .flow {{ grid-template-columns: 1fr 1fr; }} .fstep::after {{ display: none; }} }}
+  </style>
   <header style="display:grid;gap:12px">
-    <div class="eyebrow">Experiment report · prompt v3 round</div>
+    <div class="eyebrow">Experiment report · prompt v4 round</div>
     <h1>How context building affects generated code</h1>
-    <p class="lede">The same model gets the same coding tasks, and the harness builds its context in eight deliberately
-    simple ways, from no repository at all to a minimal agent loop in which the model explores the repository with tools.
-    Each level is one primitive component of a coding harness, and none of them comes close to a complete agentic
-    harness. The page shows how much even that moves the results. The final round has {n_all} runs, all with thinking on,
-    a cold prefix cache before every run and one sample per configuration.</p>
-    <div class="meta"><span>Qwen 3.8 27B FP8 on vLLM</span><span>20 tasks on repos S and M</span><span>compared with a thinking-off round of the same configurations</span></div>
+    <p class="lede">One model, Qwen 3.8 27B, gets the same 30 coding tasks every time. Only the context changes. The
+    harness builds it in deliberately simple ways, from a single file up to a minimal agent that explores the repository
+    with search tools of its own, and each of those ways is one primitive part of a coding harness. This page reports how far
+    that one choice moved the results in this experiment, and what it cost in tokens.</p>
+    <div class="meta"><span>Qwen 3.8 27B FP8 on vLLM</span><span>30 tasks on repos S, M and L</span><span>{n_runs:,} runs, thinking off and on</span></div>
+    <div class="flow" aria-label="How one run works">{flow}</div>
   </header>
 
   <section class="takeaways breakout" aria-label="Key findings">
-    <div class="takeaway"><b>Thinking beats any context level</b><span>{pct(t_off['pass'], nc)} → {pct(t_on['pass'], nc)} PASS over the same {nc} configurations. Answers with no usable code: {t_off['invalid']} → {t_on['invalid']}.</span></div>
-    <div class="takeaway"><b>The agent leads, the whole repo is close behind</b><span>L7 grep {p(l7g)}/{len(l7g)}, L3 {p(l3)}/{len(l3)}, on {fresh_ratio:.0%} of L3's fresh input per run.</span></div>
-    <div class="takeaway"><b>The model reuses the helper it sees</b><span>Full source in context: {vis['full source'][1]}/{vis['full source'][0]} reused. Not seen: {vis['not seen'][1]}/{vis['not seen'][0]}.</span></div>
-    <div class="takeaway"><b>About one answer in six is silently wrong</b><span>{pct(t_on['silent'], nc)} with thinking, {pct(t_off['silent'], nc)} without: the code is wrong and still passes the repo's own tests, and thinking doesn't help with that.</span></div>
+    <div class="takeaway"><b>Agents lifted results to a new level</b><span>On these tasks L7 and L8 passed {rate(G_on['L7']):.0f}% and {rate(G_on['L8']):.0f}% with thinking on, on every repo size. The best search-based level reached {max(rate(G_on[g]) for g in ('L4', 'L5', 'L6')):.0f}%.</span></div>
+    <div class="takeaway"><b>Context building was the key to higher-quality code</b><span>Clean passes rose from {clean_rate['L1']:.0f}% with one file (L1) to {clean_rate['L8']:.0f}% at L8. Helper reuse went from {pct(vn[1], vn[0])} with the helper out of view to {pct(vf[1], vf[0])} with its source in context.</span></div>
+    <div class="takeaway"><b>Thinking lifted one-shot prompts much more than agents</b><span>Same runs, off → on: the one-shot levels L1 to L6 went from {pct(os_off, os_n)} to {pct(os_on, os_n)} PASS, the agents from {pct(ag_off, ag_n)} to {pct(ag_on, ag_n)}.</span></div>
+    <div class="takeaway"><b>Thinking made the agents read half as much</b><span>L7's median input per run fell from {l7_in[0]:.0f}k to {l7_in[1]:.0f}k tokens, and the thinking-on round used fewer tokens in total ({(in_off + out_off) / 1e6:.0f}M → {(in_on + out_on) / 1e6:.0f}M) despite the extra output.</span></div>
   </section>
 
   <section>
     <div class="eyebrow">Results</div>
-    <h2>Pass rate by context level</h2>
-    <p class="prose">Every bar is one configuration over its tasks. 27 runs means the 20 tasks, 7 of them on both repos (at L0 and L1-L2
-    the harness runs each task once, on its smallest repo). <span class="num-good">PASS</span>: the model gives a valid answer and it passes every hidden test. <span class="num-bad">FAIL</span>:
-    the model gives a valid answer, but it fails a hidden test. Grey: no accepted answer, or the model hit the output limit. Hatched (n/a):
-    tasks the level doesn't run, so that every bar stays on the same scale.</p>
-    <div class="obars">{''.join(bars)}</div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Configuration</th><th class=r>Runs</th><th class=r>PASS</th><th class=r>Reuse</th><th class=r>Repo tests kept</th>
-      <th class=r>Judge rank</th><th class=r>Input</th><th class=r>Output</th><th class=r>Seconds</th></tr></thead>
-      <tbody>{''.join(rows_html)}</tbody></table></div>
-    <p class="small">Reuse: reuse tasks in which the hidden spy saw the new code call the needed helper. Repo tests
-    kept: passing runs whose patch also keeps the repository's own test suite green. Judge rank: mean share
-    of the other candidate patches the blind judge ranked above this configuration's patches (0 = always ranked
-    best, so lower is better). Input, output and seconds are
-    medians per run.</p>
+    <h2>Pass rate climbed with context, and the agents came out on top</h2>
+    <p class="prose">Each row pools every task and repo for one level. The hollow dot marks thinking off, the filled dot
+    thinking on, and PASS means the answer cleared all of the task's hidden tests.</p>
+    <div class="chart-legend"><span><i style="border:2px solid var(--accent)"></i>thinking off</span><span><i style="background:var(--accent)"></i>thinking on</span><span><i style="background:var(--muted)"></i>L-AG, an outside reference</span></div>
+    {dumbbell(ladder)}
+    <p class="small">L1 to L6 open with the file the change belongs in. L2 adds that file's imports and its test, L3 the
+    whole repository, and L4 to L6 whatever search or the signature map turns up. The agents get the file tree instead
+    and choose what to read. L0 had 2 control runs, too few for a row. The Levels page covers every variant.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Repository size</div>
+    <h2>Where each approach held up</h2>
+    <p class="prose">The same pass rates, thinking on, split by repository. S holds about 2k tokens and M about 41k. L
+    reaches 169k and reads like a year of growth, with old code that still carries old names. Darker cells pass more.</p>
+    <div class="heat">{heat_rows}</div>
+    <p class="small">L1 and L2 run each task once, on its smallest repo, so their columns hold different tasks. L3 can't
+    run on repo L at all, since that repository outgrows the model's 98k-token window. On these three repositories,
+    search-based levels slipped as the repository grew, and the agents stayed above 80% on every size.</p>
   </section>
 
   <section>
     <div class="eyebrow">Reuse</div>
-    <h2>What the model saw of the helper decides whether it reuses it</h2>
+    <h2>The model reused what it could see</h2>
+    <p class="prose">On reuse tasks a hidden spy watches whether the new code calls the helper the task needs, and each
+    bar groups those runs by how much of the helper sat in the model's context when it answered.</p>
+    <div class="chart-legend"><span><i style="background:var(--accent);border-radius:2px"></i>thinking on</span><span><i style="background:color-mix(in srgb, var(--accent) 45%, var(--surface));border-radius:2px"></i>thinking off</span></div>
+    {hbars(reuse_rows, 100)}
+    <p class="small">With the full source in view, the model reused the helper in {pct(vf[1], vf[0])} of runs. With thinking, a
+    bare signature worked almost as well ({pct(v_on['its signature only'][1], v_on['its signature only'][0])}), and without
+    thinking it fell to {pct(v_off['its signature only'][1], v_off['its signature only'][0])}. With nothing of the helper in view,
+    the model wrote its own, except in {vn[1] + v_off['nothing of it'][1]} runs that guessed a conventional name from a
+    visible module, the task's wording or the reuse hint (<a href="cases">Case studies</a>). The agents nearly always
+    found the helper, so their reuse came close to 100%.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Tokens</div>
+    <h2>What each level cost</h2>
+    <div>
+      <div>
+        <h3>All runs, per round</h3>
+        <div class="chart-legend"><span><i style="background:var(--accent);border-radius:2px"></i>input</span><span><i style="background:var(--warn);border-radius:2px"></i>output (thinking included)</span></div>
+        {round_bars}
+        <p class="small">In this round thinking cost about {out_on / out_off:.0f}× more output, and with it the agents read
+        less: L7's median input per run dropped from {l7_in[0]:.0f}k to {l7_in[1]:.0f}k. Added up, the thinking-on round
+        spent fewer tokens.</p>
+      </div>
+      <div>
+        <h3>Tokens per PASS, thinking on</h3>
+        {tpp_bars}
+        <p class="small">Every token a level spent, divided by its passing runs. Search-based levels passed cheapest, at
+        {ret_tpp / 1e3:.0f}k. L3 needed {l3_tpp / 1e3:.0f}k on the repos it fits. The agents paid more, {l7_tpp / 1e3:.0f}k for L7
+        and {l8_tpp / 1e3:.0f}k for L8, and passed above 90% on every repo size for it. L1 spent
+        {tpp[0][1] / 1e3:.0f}k per PASS, most of it thinking about code the model couldn't see. L-AG spent {lag_tpp / 1e3:.0f}k.</p>
+      </div>
+    </div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Needed helper in context as</th><th class=r>Reused, thinking on</th><th class=r>Reused, thinking off</th></tr></thead>
-      <tbody>{vis_rows}</tbody></table></div>
-    <p class="prose">With the full source in context, the model almost always uses the helper. With thinking on, a bare
-    signature (the L6 repository map) is enough too. With thinking off it mostly isn't, and the model asks to look first
-    instead of answering, and when the helper isn't in the context at all, the model writes its own.</p>
+      <thead><tr><th>Level</th><th class=r>Input, off</th><th class=r>Input, on</th><th class=r>Output, off</th><th class=r>Output, on</th><th class=r>Largest prompt, on</th></tr></thead>
+      <tbody>{''.join(tok_rows)}</tbody></table></div>
+    <p class="small">Medians per run, counting only runs that reached the model (L3 never did on repo L). The largest
+    prompt is the biggest single request in a run, the number that has to fit the window. An agent's input piles up over
+    many requests, each repeating most of the one before, so a provider with prompt caching would probably bill a good part
+    of it at a discount. At {PRICES['open-weights host'][0]:.2f} and {PRICES['open-weights host'][1]:.2f} USD per million input and output tokens, a typical
+    open-weights price, the whole thinking-on round comes to about {usd(in_on, out_on, 'open-weights host'):.0f} USD. Frontier-API
+    prices of {PRICES['frontier API'][0]:.0f} and {PRICES['frontier API'][1]:.0f} USD would make it about {usd(in_on, out_on, 'frontier API'):.0f} USD.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Quality</div>
+    <h2>How clean the passing code is</h2>
+    <p class="prose">A blind judge (agy) read every passing patch. It never learned which level produced a patch, and it
+    flagged what tests can't see: unrelated edits, re-implemented helpers, broken conventions, logic that looks wrong where
+    no test reaches, and risky code. A clean pass clears the hidden tests, leaves the repository's own tests green and draws no
+    flag from the judge.</p>
+    <div class="chart-legend"><span><i style="background:var(--good);border-radius:2px"></i>clean pass</span><span><i style="background:color-mix(in srgb, var(--good) 35%, var(--surface));border-radius:2px"></i>pass with a judged defect</span></div>
+    {hbars(q_rows, 100)}
+    <p class="small">Share of all thinking-on runs. The agents led here as well, with L8 at {clean_rate['L8']:.0f}% clean.
+    The collapsed penalty tables at the bottom list the judge's codes per configuration.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Reference</div>
+    <h2>Against a commercial agent harness</h2>
+    <div class="callout">
+      <p class="prose">L-AG puts the same model inside Google's Antigravity, a full agent harness with its own prompt, tools
+      and loop, shell commands included. It passed {passed(lag_on)} of {len(lag_on)} with thinking on and {passed(lag_off)} of
+      {len(lag_off)} with thinking off. That's level with the best primitive agents here ({lag_l78} of 57), though it read far
+      more, a median {lag_in:.0f}k input tokens per run against {l8_in:.0f}k for L8.</p>
+      <p class="small">Two caveats apply. Antigravity was built around Gemini, and Qwen often named tool arguments its own
+      way, which left many shell commands empty (the Levels page has the numbers). L-AG also ran one sample per task, like
+      everything else. On these tasks and this model, the primitive agents matched a commercial harness.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Side experiment</div>
+    <h2>Qwen's own tool names</h2>
+    <p class="prose">A side arm, thinking off only, gave the agents' tools the names and parameters of Qwen Code, Qwen's
+    own coding agent (<code>read_file(file_path, offset, limit)</code>, <code>grep_search</code>,
+    <code>edit(file_path, old_string, new_string)</code>, <code>write_file</code>). The capabilities underneath stayed the
+    same. Would this model work better in the tool vocabulary it learned?</p>
+    <div class="chart-legend"><span><i style="background:color-mix(in srgb, var(--accent) 45%, var(--surface));border-radius:2px"></i>harness names</span><span><i style="background:var(--accent);border-radius:2px"></i>Qwen's names</span></div>
+    {side_bars}
+    <div class="table-wrap"><table>
+      <thead><tr><th>Agent</th><th>Tool names</th><th class=r>PASS</th><th class=r>Clean passes</th><th class=r>Failed tool calls</th>
+      <th class=r>Runs with a failed call</th><th class=r>Tool calls</th><th class=r>Input</th></tr></thead>
+      <tbody>{side_rows}</tbody></table></div>
+    <ul class="prose">
+      <li><b>L8 ran smoother with Qwen's names.</b> Failed tool calls fell from {s8['errs']} to {q8['errs']}, and runs with a
+      failed call from {s8['err_runs']} to {q8['err_runs']}. The runs took fewer calls ({s8['calls']:.0f} → {q8['calls']:.0f}) and
+      less input ({s8['tin']:.0f}k → {q8['tin']:.0f}k), and the pass rate moved from {s8['p']} to {q8['p']} of 57.</li>
+      <li><b>L7 selective didn't change</b> ({s7['p']} → {q7['p']} of 57). Only some of its tools have a Qwen Code
+      counterpart, and its failed calls rose ({s7['errs']} → {q7['errs']}), which may come from that mix of the two vocabularies.</li>
+      <li>The pass-rate differences sit within the noise of one sample. Here the names showed up in how smoothly L8 worked,
+      which fits the far stronger tool-call drift Qwen showed inside Antigravity.</li>
+    </ul>
+    <p class="small">Tool calls and input: medians per run. Clean pass: passes the tests, keeps the repository's own tests
+    green, and the judge found no defect.</p>
   </section>
 
   <section>
     <div class="eyebrow">Hypotheses</div>
     <h2>What was expected and what was found</h2>
+    <p class="prose">Each verdict holds for this model, these 30 tasks and this codebase, with one sample per
+    configuration. Read them as observations from this experiment, to test elsewhere before relying on them.</p>
     <div class="table-wrap"><table>
-      <thead><tr><th>Expectation</th><th>Verdict</th><th>Evidence (final round)</th></tr></thead>
-      <tbody>
-        <tr><td>Whether the model reuses the helper depends on whether it sees the helper's code.</td><td><span class="verdict v-held">held</span></td>
-            <td>Full source {vis['full source'][1]}/{vis['full source'][0]}, signature {vis['signature only'][1]}/{vis['signature only'][0]}, not seen {vis['not seen'][1]}/{vis['not seen'][0]}.</td></tr>
-        <tr><td>An agent with tools matches the whole repo, at a fraction of the input.</td><td><span class="verdict v-held">held</span></td>
-            <td>L7 grep {p(l7g)}/{len(l7g)} vs L3 {p(l3)}/{len(l3)}; median fresh input per run {st.median(r['tokens_in'] - (r.get('tokens_cached') or 0) for r in l7g) / 1000:.0f}k vs {st.median(r['tokens_in'] for r in l3) / 1000:.0f}k.</td></tr>
-        <tr><td>Search queries written by the model gain more than a different search engine.</td><td><span class="verdict v-part">partly</span></td>
-            <td>With BM25, model queries {p(by.get('L5 bm25 model_queries', []))}/27 vs task text {p(by.get('L5 bm25 task_vs_code', []))}/27. With embeddings the task text did just as well ({p(by.get('L5 embed task_vs_code', []))}/27).</td></tr>
-        <tr><td>A repository map of signatures is enough for the model to write the change.</td><td><span class="verdict v-part">with thinking</span></td>
-            <td>L6 {p(by.get('L6', []))}/27 with thinking, {lv_think['L6'][1]}/{lv_think['L6'][0]} without (with thinking off, the model asked for code instead of answering).</td></tr>
-        <tr><td>Thinking helps most when the context is thin.</td><td><span class="verdict v-held">held</span></td>
-            <td>Largest gains at L6 ({lv_think['L6'][1]} → {lv_think['L6'][2]}) and L1 ({lv_think['L1'][1]} → {lv_think['L1'][2]}), smallest at L3 ({lv_think['L3'][1]} → {lv_think['L3'][2]}).</td></tr>
-        <tr><td>Richer agent tools and a self-managed working set improve results.</td><td><span class="verdict v-not">not on repo M</span></td>
-            <td>rich {p(by.get('L7 rich', []))}/27, selective {p(by.get('L7 selective', []))}/27 vs grep {p(l7g)}/27. M's files are small, so there's little to save, which repo L tests next.</td></tr>
-        <tr><td>The model catches documentation drift (the trap) only at levels that show the helper's body.</td><td><span class="verdict v-held">held</span></td>
-            <td>The model reused and fixed the helper only at L4 and L7. At the signature-only level (L6) it trusted the docs.</td></tr>
-      </tbody></table></div>
-  </section>
-
-  <section>
-    <div class="eyebrow">Reasoning</div>
-    <h2>Thinking on vs thinking off</h2>
-    <p class="prose">The same {nc} configurations, with and without thinking. With thinking, the model spends about
-    {out_on / out_off:.0f}× the output tokens ({out_off:,.0f} → {out_on:,.0f} per run). What they buy is mostly answers
-    that work at all. With thinking off, a third of the runs produced no usable code, or code that doesn't import. A harness that runs tests would catch exactly those failures, and could retry them. The silently wrong
-    answers, which pass the repo tests, are as common either way. Only tests that cover the behaviour catch those.</p>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Outcome</th><th class=r>Thinking off</th><th class=r>Thinking on</th></tr></thead>
-      <tbody>{think_rows}</tbody></table></div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Level</th><th class=r>PASS, off</th><th class=r>PASS, on</th><th class=r>Change</th></tr></thead>
-      <tbody>{think_lv_rows}</tbody></table></div>
-    <p class="small">The model couldn't run code at any level, so the harness never told it it was wrong. A test loop
-    would likely close part of the gap with thinking off, at the cost of retries. Latency isn't compared here, because the
-    thinking-off round ran 4 requests at a time on a warm cache.</p>
-  </section>
-
-  <section>
-    <div class="eyebrow">Performance</div>
-    <h2>Latency</h2>
-    <p class="prose">Final round only, one request at a time on a cold prefix cache, {list(final.values())[0].get('quant', '')}.</p>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Level</th>{''.join(f'<th class=r>{e(b)}</th>' for b in buckets)}<th class=r>Median s</th><th class=r>Minutes per PASS</th></tr></thead>
-      <tbody>{''.join(lat_rows)}</tbody></table></div>
-    <p class="small">Minutes per PASS: all time spent at that level, divided by its passing runs. The model thinks longest
-    at thin-context levels (L1 runs often burn 10k+ tokens on thinking). Per passing run, though, the agent is the fastest.</p>
-  </section>
-
-  <section>
-    <div class="eyebrow">Performance</div>
-    <h2>Cost</h2>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Level</th><th class=r>Input / run</th><th class=r>Cached / run</th><th class=r>Output / run</th>
-      <th class=r>Tokens per PASS</th>{''.join(f'<th class=r>$ per 100 PASS, {e(n)}</th>' for n in PRICES)}</tr></thead>
-      <tbody>{''.join(cost_rows)}</tbody></table></div>
-    <p class="small">The prices only give a sense of scale, and no provider quoted them: {e(price_note)}. Cached input is
-    counted at the full price here. With prompt caching, the agent's repeated prefixes would cost less (the "cached" column).</p>
-  </section>
-
-  <section>
-    <div class="eyebrow">Agents</div>
-    <h2>Richer tools and a self-managed working set</h2>
-    <div class="table-wrap"><table>
-      <thead><tr><th>L7 variant</th><th class=r>PASS</th><th class=r>Reuse</th><th class=r>Input</th><th class=r>Cached</th>
-      <th class=r>Tool calls</th><th class=r>Seconds</th></tr></thead>
-      <tbody>{''.join(agents)}</tbody></table></div>
-    <p class="prose"><b>grep</b> and <b>hybrid</b>: grep, file reads, references (hybrid adds semantic search).
-    <b>rich</b>: the same tools, richer (search hits come with source, the model can read line ranges and read a function
-    by name). <b>selective</b>: rich plus <code>drop</code>, with which the model removes earlier results from the
-    conversation. On repo M the richer tools gained nothing, because the files are small and whole files are cheap to
-    read, and the model rarely touched <code>read_symbol</code> ({calls['read_symbol']} calls against {calls['read_file']} file
-    reads). With thinking on, the model dropped something in {sel_drop_runs} of {len(sel)} selective runs but saved
-    very little: it dropped {sel_dropped:,} tokens and avoided {sel_saved:,} input tokens in total, about
-    {100 * sel_saved / sel_in:.1f}% of selective's input. Repo L (169k tokens, with files and functions hundreds of lines
-    long) was built to give these tools something to do.</p>
-  </section>
-
-  <section>
-    <div class="eyebrow">Quality</div>
-    <h2>Judged code quality</h2>
-    <p class="prose">A blind judge (agy, rubric v2) compared all candidate patches of a task side by side, with no
-    knowledge of how any of them was made. Its correctness score agrees with the tests almost everywhere. It scored
-    {agree[(False, False)]} failing runs low and none high, and it scored {agree[(True, True)]} passing runs high. The {agree[(True, False)]} passing runs it scored low are where the hidden tests
-    miss something.</p>
-    <div class="table-wrap"><table>
-      <thead><tr><th></th><th class=r>Judge: correctness 4-5</th><th class=r>Judge: 1-3</th></tr></thead>
-      <tbody><tr><td>Hidden tests pass</td><td class=r>{agree[(True, True)]}</td><td class=r>{agree[(True, False)]}</td></tr>
-      <tr><td>Hidden tests fail</td><td class=r>{agree[(False, True)]}</td><td class=r>{agree[(False, False)]}</td></tr></tbody></table></div>
-    <p class="prose">Patch coverage: of {len(passed_cov)} passing patches, {len(low_cov)} had less than 80% of their changed
-    statements run by the hidden tests. {len(broke)} passing patches broke the repository's own tests (the
-    regression check). The model almost never wrote tests of its own, at any level, and the prompt never asks
-    for them ({tests_added} runs added tests).</p>
-  </section>
-
-  <section>
-    <div class="eyebrow">Examples</div>
-    <h2>How failures were observed</h2>
-    <div class="gallery">
-      <div class="card"><h4>The model trusted the docs</h4><p class="small">trap-001: <code>format_weight</code> documents "lb",
-      but returns kg. The repository map showed only the signature and docstring, so the model's patch calls it with "lb".</p>
-      {link(find('trap-001', 'L6'), 'L6 · trap-001 · M')}</div>
-      <div class="card"><h4>The agent reused and fixed it</h4><p class="small">The agent read the helper, spotted the missing branch,
-      fixed <code>packaging.py</code>, and reused the helper from the label code.</p>{link(find('trap-001', 'L7 grep'), 'L7 grep · trap-001 · M')}</div>
-      <div class="card"><h4>Right fix, unrelated edit</h4><p class="small">The model fixed the helper correctly, then gave a dataclass
-      field a default for no reason, after which the module no longer imports.</p>{link(find('trap-001', 'L3'), 'L3 · trap-001 · M')}</div>
-      <div class="card"><h4>Corrupted output</h4><p class="small">Correct fix, but the model garbled a line with duplicated tokens
-      (<code>format_weight(weight_g(weight_g, …</code>), which is a syntax error. About 2% of final-round answers have one.</p>{link(find('trap-001', 'L7 rich'), 'L7 rich · trap-001 · M')}</div>
-      <div class="card"><h4>Passed, but broke the repo</h4><p class="small">The patch passes the hidden tests, but not the repository's own
-      tests. The harness recorded {len(broke)} such runs in the final round.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in broke[:3])}</div>
-      <div class="card"><h4>Out of tokens while thinking</h4><p class="small">With no context at all, the model kept reasoning
-      until it hit the 32k output limit and never wrote the code.</p>{link(oot['run_id'], level_label(oot) + ' · ' + oot['task_id']) if oot else ''}</div>
-      <div class="card"><h4>The model used dead code</h4><p class="small">The patch imports the old, unused <code>common/</code> package (named
-      like the canonical place). That happened in {len(dead)} final-round runs.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in dead[:2])}</div>
-    </div>
+      <thead><tr><th>Expectation</th><th>Verdict</th><th>Evidence</th></tr></thead>
+      <tbody>{hyp_rows}</tbody></table></div>
   </section>
 
   <section>
     <div class="eyebrow">Limits</div>
     <h2>How certain the results are</h2>
     <ul class="prose">
-      <li>There is one model and one sample per configuration, and in the development round repeats flipped about
-      1 run in 5, roughly ±3 per 13 runs of a configuration, so small differences between configurations are noise.</li>
-      <li>The context builders are deliberately simple: each level is one primitive component, far from a production
-      harness, with no planning, no test loop and no memory between tasks. Products combine and tune many such parts,
-      so these results show what a context strategy does on its own. They don't rank products.</li>
-      <li>The tasks use one synthetic repository in two sizes, written for the experiment, and real repositories are messier. Repo L, larger
-      and older, will be added next.</li>
-      <li>There is only one trap task, and the judge is an LLM too, so although its scores agree with the tests, it may share the model's blind spots.</li>
-      <li>The model couldn't run code at any level. Agents with a test loop would recover some failures (see Thinking on
-      vs off).</li>
+      <li>One model and one sample per configuration. Repeating a run flips about 1 outcome in 5, roughly ±3 per 30 runs,
+      so a gap of a few runs between two configurations means little. The gaps between context levels on this page are many
+      times that size.</li>
+      <li>All tasks run on one synthetic shop service, in three sizes, written for this experiment so the model can't have
+      seen it before. Real repositories are messier.</li>
+      <li>The judge is a model too. Its findings rate how clean a passing patch is, and PASS or FAIL comes from the tests alone.</li>
     </ul>
   </section>
 
   <section>
+    <div class="eyebrow">Details</div>
+    <h2>Every configuration</h2>
+    <details class="more"><summary>Thinking on: all configurations</summary>{cfg_table(list(final.values()))}</details>
+    <details class="more"><summary>Thinking off: all configurations</summary>{cfg_table(list(off.values()))}</details>
+    <details class="more"><summary>Judged code quality: penalties per configuration</summary>
+      {penalty_section(main(off.values()), "thinking off")}{penalty_section(main(final.values()), "thinking on", "penalties-on")}</details>
+    <p class="small">S, M, L: passing runs out of runs on each repo. Reuse: reuse tasks where the spy saw the helper called.
+    Input and output: medians per run.</p>
+  </section>
+
+  <section>
     <div class="next-pages">
-      <a href="method"><b>Method</b><span>The levels, the rules that keep the comparison fair, labels and grading.</span></a>
-      <a href="tasks"><b>Tasks</b><span>Every task with its text, hidden tests and reference solution.</span></a>
-      <a href="data"><b>Raw data</b><span>Every run opens with its prompt split into parts, the thinking, the answer, the patch and the test output, and two runs can sit side by side.</span></a>
-      <a href="guide"><b>Running the experiment</b><span>An OpenAI-compatible API, and optionally an embedder, is all it takes.</span></a>
+      <a href="levels"><b>Levels</b><span>Every level and variant, how the agents search and read, and the L-AG harness.</span></a>
+      <a href="method"><b>Method</b><span>The rules that keep the comparison fair, the outcomes and the grading.</span></a>
+      <a href="tasks"><b>Tasks</b><span>Every task with its text, what it tests, its hidden tests and reference solution.</span></a>
+      <a href="cases"><b>Case studies</b><span>Single runs worth reading in full: guessed helpers, an agent caught by its own test, the trap, empty commands.</span></a>
+      <a href="data"><b>Raw data</b><span>Every run with its prompt, thinking, answer, patch and test output, side by side if you like.</span></a>
     </div>
   </section>
 """)
@@ -659,9 +786,9 @@ def build() -> str:
 
 
 INDEX_TITLE = "Context Bench: How Context Building Affects Generated Code"
-INDEX_DESCRIPTION = ("The same coding tasks and the same model (Qwen 3.8 27B), with the context built in eight "
-                     "deliberately simple ways: no repo, one file, hand-picked files, the whole repo, retrieval, a repo "
-                     "map and a minimal agent loop with tools.")
+INDEX_DESCRIPTION = ("The same coding tasks and the same model (Qwen 3.8 27B), with the context built in deliberately "
+                     "simple ways, from one file and the whole repo to retrieval, a repo map and minimal agents with "
+                     "tools, on three repository sizes, with thinking off and on, and what each costs in tokens.")
 
 
 def _page(content: str) -> str:
