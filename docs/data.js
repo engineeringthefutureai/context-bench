@@ -140,13 +140,18 @@
           n++; colPass[ci][1]++;
           if (r.outcome === "PASS") { pass++; colPass[ci][0]++; }
           const off = showDelta && offRun.get(`${id}|${c.label}|${rs}`);
-          if (off) { const d = (r.outcome === "PASS") - (off.outcome === "PASS"); rowD += d; rowPairs++; colDelta[ci][0] += d; colDelta[ci][1]++; }
+          let flip = "";
+          if (off) {
+            const d = (r.outcome === "PASS") - (off.outcome === "PASS"); rowD += d; rowPairs++; colDelta[ci][0] += d; colDelta[ci][1]++;
+            flip = d > 0 ? " mx-up" : d < 0 ? " mx-down" : "";     // the outcome flipped against thinking off
+          }
           const sel = r.run_id === state.a ? " sel-a" : r.run_id === state.b ? " sel-b" : "";
           const tip = `${r.task_id} · ${r.level_label} · repo ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"}\n${r.outcome}`
             + ` · tests ${frac(r.tests_passed, r.tests_total)}${r.reuse_passed == null ? "" : ` · reuse ${yn(r.reuse_passed)}`}`
             + `\nin ${fmt(r.tokens_in)} · out ${fmt(r.tokens_out)} · ${r.latency_s == null ? "–" : Math.round(r.latency_s)} s${r.tool_calls ? ` · ${r.tool_calls} tools` : ""}`
+            + (flip ? `\n${flip === " mx-up" ? "▲ PASS now, " : "▼ not PASS now, "}${off.outcome} with thinking off` : "")
             + `\nopened by click · compared (B) by shift-click`;
-          return `<button class="mx-chip ${OCLS[r.outcome] || "o-invalid"}${sel}${match.has(r.run_id) ? "" : " mx-dim"}" data-run="${r.run_id}" title="${esc(tip)}" aria-label="${esc(tip.split("\n").slice(0, 2).join(", "))}"></button>`;
+          return `<button class="mx-chip ${OCLS[r.outcome] || "o-invalid"}${flip}${sel}${match.has(r.run_id) ? "" : " mx-dim"}" data-run="${r.run_id}" title="${esc(tip)}" aria-label="${esc(tip.split("\n").slice(0, 2).join(", "))}"></button>`;
         }).join("") + `</span>`).join("");
         return `<td class="mx-cell">${stacks}</td>`;
       }).join("");
@@ -154,7 +159,7 @@
     }
     const foot = `<tr class="mx-foot"><th>PASS</th>` + colPass.map(([p, n], ci) => `<td class="mx-sum" title="${p} of ${n} runs">${n ? `${Math.round(100 * p / n)}%` : "–"}${delta(colDelta[ci][0], colDelta[ci][1], true)}</td>`).join("") + `<td></td></tr>`;
     $("#runs").innerHTML = taskIds.length
-      ? `<table class="mx"><thead>${head1}${head2}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`
+      ? `<table class="mx${showDelta ? " mx-flips" : ""}"><thead>${head1}${head2}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`
       : `<p class="empty">No runs match the filters.</p>`;
   }
   const byTaskCat = (id) => (runs.find((r) => r.task_id === id) || {}).category || "control";
@@ -162,7 +167,7 @@
   function renderMatrixLegend() {
     $("#mx-legend").innerHTML = Object.entries(OCLS).map(([o, c]) => `<span><i class="mx-chip ${c}"></i>${esc(o)}</span>`).join("")
       + `<span><i class="mx-chip mx-none"></i>no run</span><span><i class="mx-chip mx-na"></i>task not on this repo</span>`
-      + `<span class="meta">Each cell stacks repos S, M and L from top to bottom${state.round === "all" ? ", with thinking on on the left and off on the right" : ""}. Column labels: q = search queries written by the model, +h = reuse hint, emb = embeddings, hyb = hybrid, sel = selective, qw = Qwen Code tool names. ${(state.round || "final") === "final" ? " Under each PASS total, the change against thinking off is given, counted over the runs both rounds have (columns in percentage points)." : ""} At L0–L2, the harness runs each task once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
+      + `<span class="meta">Each cell stacks repos S, M and L from top to bottom${state.round === "all" ? ", with thinking on on the left and off on the right" : ""}. Column labels: q = search queries written by the model, +h = reuse hint, emb = embeddings, hyb = hybrid, sel = selective, qw = Qwen Code tool names. ${(state.round || "final") === "final" ? " Under each PASS total, the change against thinking off is given, counted over the runs both rounds have (columns in percentage points). A green ▲ beside a run marks a PASS that failed with thinking off, a red ▼ a run that passed with thinking off and doesn't now." : ""} At L0–L2, the harness runs each task once, on the smallest repo it fits. A run is opened by clicking its block, and compared by Shift-clicking.</span>`;
   }
 
   function fillFilters() {

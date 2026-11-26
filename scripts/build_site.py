@@ -322,9 +322,9 @@ def lag_transcript(entries: list[dict], repo: Path | None) -> list[dict]:
         # one turn, which ends with the step that makes tool calls.
         item = item or {"role": "assistant", "content": ""}
         if (t.get("content") or "").strip():
-            item["content"] = "\n\n".join(x for x in (item["content"], scrub(t["content"])) if x)
+            item["content"] = "\n\n".join(x for x in (item["content"], scrub(t["content"]).strip()) if x)
         if t.get("thinking"):
-            item["reasoning"] = "\n\n".join(x for x in (item.get("reasoning"), scrub(t["thinking"])) if x)
+            item["reasoning"] = "\n\n".join(x for x in (item.get("reasoning"), scrub(t["thinking"]).strip()) if x)
         calls = t.get("tool_calls") or []
         if not calls:
             continue

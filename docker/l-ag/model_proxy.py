@@ -14,6 +14,7 @@ request (the harness's OpenAI client has no thinking setting); unset forwards re
 itself asked for (its top-level keys and any thinking fields) is logged with each call.
 L_AG_PROXY_CAPTURE: a file for the first model request's body, written once (to measure the harness's system prompt
 and tool definitions); unset by default.
+L_AG_PROXY_RAW: a file for every model response body, one JSON line each (debugging; unset by default).
 L_AG_PROXY_MAX_TOKENS: caps max_completion_tokens / max_tokens of chat requests (the harness asks for 65,535,
 which leaves a 98k window ~32.8k for the prompt); 0 or unset: as sent.
 L_AG_PROXY_USAGE: a file for one JSON line per model call: status, request size, throttle wait, latency and the
@@ -73,6 +74,7 @@ class Throttle:
 THROTTLE = Throttle(RPM, TPM)
 USAGE_LOG = os.environ.get("L_AG_PROXY_USAGE")           # one JSON line per model call (the proxy's own mount)
 CAPTURE = os.environ.get("L_AG_PROXY_CAPTURE")          # write the first model request's body here, once (opt-in)
+RAW = os.environ.get("L_AG_PROXY_RAW")                  # every model response body, one JSON line each (opt-in, debugging)
 _log_lock = threading.Lock()
 
 
@@ -195,6 +197,9 @@ class Proxy(BaseHTTPRequestHandler):
                           "request_bytes": len(body), "throttle_wait_s": round(waited, 2),
                           "latency_s": round(time.monotonic() - t0, 2), **(usage_of(bytes(received)) or {}),
                           **({"client_asked": client_asked} if client_asked else {})})
+                if RAW:
+                    with _log_lock, open(RAW, "a") as f:
+                        f.write(json.dumps({"status": status, "body": bytes(received).decode(errors="replace")}) + "\n")
 
     do_GET = do_POST = _forward
 
