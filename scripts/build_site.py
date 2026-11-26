@@ -136,6 +136,15 @@ def select_rows() -> list[dict]:
             continue                                                 # original harness (" h1")
         nothink[config_key(r)] = r                                   # latest row per configuration
     out = [dict(r, round="final") for r in final.values()] + [dict(r, round="nothink") for r in nothink.values()]
+    # round "gemini": L-AG on Gemini 3.5 Flash-Lite (results/gemini-l-ag.jsonl, kept apart from results.jsonl),
+    # latest row per cell; its own round in the viewer, never mixed into the Qwen rounds
+    gem = RESULTS / "gemini-l-ag.jsonl"
+    if gem.exists():
+        latest = {}
+        for line in gem.read_text().splitlines():
+            r = json.loads(line)
+            latest[(r["task_id"], r["repo_size"])] = r
+        out += [dict(r, round="gemini") for r in latest.values()]
     return [r for r in out if (RESULTS / "runs" / r["run_id"]).is_dir()]
 
 
@@ -539,7 +548,7 @@ def main() -> int:
         for m in _LEAKS.finditer(f.read_text()):
             leaks.append((f.name, m.group(0)))
     size = sum(f.stat().st_size for f in OUT.rglob("*.json"))
-    rounds = {k: sum(m["round"] == k for m in index) for k in ("final", "nothink")}
+    rounds = {k: sum(m["round"] == k for m in index) for k in ("final", "nothink", "gemini")}
     print(f"{len(index)} runs ({rounds}), {size / 1e6:.1f} MB in {OUT}")
     if leaks:
         print(f"possible leaks: {len(leaks)}; first: {leaks[:5]}")

@@ -13,6 +13,12 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString("en-US"));
   const tok = (chars) => Math.round(chars / 3.6);
+  // rounds: final = Qwen thinking on, nothink = Qwen thinking off, gemini = L-AG on Gemini 3.5 Flash-Lite;
+  // "all" = both Qwen rounds (Gemini is its own round)
+  const ROUND_NAME = {final: "think on", nothink: "think off", gemini: "Gemini"};
+  const roundName = (rd) => ROUND_NAME[rd] || rd;
+  const QWEN = new Set(["final", "nothink"]);
+  const inRound = (r) => !state.round || r.round === state.round || (state.round === "all" && QWEN.has(r.round));
   const cache = new Map();
   let runs = [], byId = new Map(), tasks = new Map(), sortKey = "task_id", sortDir = 1;
 
@@ -35,7 +41,7 @@
   const yn = (v) => (v == null ? "–" : v ? "yes" : "no");
   const frac = (a, b) => (b ? `${a}/${b}` : "–");
   const COLS = [
-    ["round", "Round", (r) => (r.round === "final" ? "think on" : "think off")],
+    ["round", "Round", (r) => roundName(r.round)],
     ["task_id", "Task", (r) => esc(r.task_id)],
     ["level_label", "Level", (r) => esc(r.level_label)],
     ["repo_size", "Repo", (r) => r.repo_size],
@@ -52,7 +58,7 @@
   function filtered() {
     const q = state.q.toLowerCase();
     return runs.filter((r) =>
-      (!state.round || state.round === "all" || r.round === state.round) &&
+      inRound(r) &&
       (!state.task || r.task_id === state.task) &&
       (!state.level || r.level_label === state.level) &&
       (!state.label || r.outcome === state.label) &&
@@ -98,10 +104,10 @@
 
   function renderMatrix() {
     const scope = runs.filter((r) =>
-      (!state.round || state.round === "all" || r.round === state.round) &&
+      inRound(r) &&
       (!state.task || r.task_id === state.task) && (!state.level || r.level_label === state.level));
     const match = new Set(filtered().map((r) => r.run_id));   // outcome and search filters dim the rest
-    const rounds = state.round === "all" ? ["final", "nothink"] : [state.round || "final"];
+    const rounds = state.round === "all" ? ["final", "nothink"] : [state.round || "final"];   // "all" = both Qwen rounds
     const cols = [...new Map(scope.map((r) => [r.level_label, {label: r.level_label, level: r.level}])).values()].sort(levelOrder);
     const cell = new Map(scope.map((r) => [`${r.task_id}|${r.level_label}|${r.repo_size}|${r.round}`, r]));
     // thinking on alone: PASS totals also show the change against thinking off, over the runs both rounds have
@@ -147,7 +153,7 @@
             flip = d > 0 ? " mx-up" : d < 0 ? " mx-down" : "";     // the outcome flipped against thinking off
           }
           const sel = r.run_id === state.a ? " sel-a" : r.run_id === state.b ? " sel-b" : "";
-          const tip = `${r.task_id} · ${r.level_label} · repo ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"}\n${r.outcome}`
+          const tip = `${r.task_id} · ${r.level_label} · repo ${r.repo_size} · ${roundName(r.round)}\n${r.outcome}`
             + ` · tests ${frac(r.tests_passed, r.tests_total)}${r.reuse_passed == null ? "" : ` · reuse ${yn(r.reuse_passed)}`}`
             + `\nin ${fmt(r.tokens_in)} · out ${fmt(r.tokens_out)} · ${r.latency_s == null ? "–" : Math.round(r.latency_s)} s${r.tool_calls ? ` · ${r.tool_calls} tools` : ""}`
             + (flip ? `\n${flip === " mx-up" ? "▲ PASS now, " : "▼ not PASS now, "}${off.outcome} with thinking off` : "")
@@ -492,7 +498,7 @@
   function paneHTML(run, side) {
     const m = run.meta;
     const facts = [
-      ["round", m.round === "final" ? "thinking on" : "thinking off"],
+      ["round", {final: "thinking on", nothink: "thinking off", gemini: "Gemini 3.5 Flash-Lite (L-AG)"}[m.round] || m.round],
       ["tests", frac(m.tests_passed, m.tests_total)],
       ["reuse", m.reuse_passed == null && m.category === "reuse" ? "n/a (code didn't run)" : yn(m.reuse_passed)],
       ["repo tests", frac(m.repo_tests_passed, m.repo_tests_total)], ["format", m.format_status],
@@ -535,7 +541,7 @@
     const twins = runs.filter((r) => r.task_id === m.task_id && r.run_id !== m.run_id)
       .sort((x, y) => x.round.localeCompare(y.round) || byLabel(x.level_label, y.level_label) || x.repo_size.localeCompare(y.repo_size));
     return `<label>Compare A with <select id="twin"><option value="">same task, another run…</option>` +
-      twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${r.round === "final" ? "think on" : "think off"} · ${r.outcome}</option>`).join("") +
+      twins.map((r) => `<option value="${r.run_id}" ${r.run_id === state.b ? "selected" : ""}>${esc(r.level_label)} · ${r.repo_size} · ${roundName(r.round)} · ${r.outcome}</option>`).join("") +
       `</select></label>`;
   }
 
