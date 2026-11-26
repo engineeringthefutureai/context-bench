@@ -1,0 +1,63 @@
+# One L-AG run, confined: the agent sees only the run's repository copy (/workspace, read-write) and its prompt
+# (/out). No other host path is mounted, the image has nothing of the project, the root filesystem is read-only,
+# and no Linux capabilities are left. Internet is allowed (default bridge network).
+#
+# The model is reached through model-proxy (model_proxy.py, its own container): it forwards to the model API (our
+# vLLM on the host, or the Gemini API with L_AG_API=gemini) and adds its key, so the key never enters the agent's
+# container (the harness's OpenAI client has no key setting anyway).
+#
+# The runner sets the variables, runs it under a fresh project name and takes it down afterwards
+# (context_bench/levels/l_ag_antigravity.py). By hand, with the user turn in $OUT/prompt.txt:
+#   export L_AG_WORKSPACE=/tmp/repo-copy L_AG_OUT=/tmp/l-ag-out L_AG_MODEL=Qwen/Qwen3.8-27B \
+#          L_AG_UID=$(id -u) L_AG_GID=$(id -g) L_AG_PROXY_KEY=...   # the model server's key (CBENCH_API_KEY)
+# Gemini: also L_AG_API=gemini L_AG_PROXY_AUTH=goog L_AG_PROXY_UPSTREAM=https://generativelanguage.googleapis.com,
+# L_AG_MODEL=gemini-3.5-flash-lite and the Gemini key (GEMINI_API_KEY) as L_AG_PROXY_KEY.
+#   docker compose -f docker/l-ag/compose.yaml -p l-ag-manual run --rm l-ag
+#   docker compose -f docker/l-ag/compose.yaml -p l-ag-manual down
+# The result lands in $OUT/result.json.
+x-image: &image
+  build: .
+  image: context-bench/l-ag:0.1.24
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  l-ag:
+    <<: *image
+    user: "${L_AG_UID:?}:${L_AG_GID:?}"
+    volumes:
+      - "${L_AG_WORKSPACE:?}:/workspace"
+      - "${L_AG_OUT:?}:/out"
+    environment:
+      L_AG_API: "${L_AG_API:-openai}"
+      L_AG_MODEL: "${L_AG_MODEL:?}"
+      L_AG_BASE_URL: "http://model-proxy:8080/v1"
+      L_AG_MAX_MODEL_CALLS: "${L_AG_MAX_MODEL_CALLS:-100}"
+      L_AG_TIMEOUT_S: "${L_AG_TIMEOUT_S:-3600}"
+      L_AG_COMMAND_TIMEOUT_S: "${L_AG_COMMAND_TIMEOUT_S:-300}"
+    depends_on: [model-proxy]
+    tmpfs:
+      - /tmp:size=2g
+    pids_limit: 512
+    mem_limit: 8g
+    cpus: 4
+
+  model-proxy:
+    <<: *image
+    user: "${L_AG_UID:?}:${L_AG_GID:?}"   # writes the usage log the runner reads
+    entrypoint: ["python", "/opt/l-ag/model_proxy.py"]
+    environment:
+      L_AG_PROXY_UPSTREAM: "${L_AG_PROXY_UPSTREAM:-http://host.docker.internal:8080}"
+      L_AG_PROXY_AUTH: "${L_AG_PROXY_AUTH:-bearer}"
+      L_AG_PROXY_KEY: "${L_AG_PROXY_KEY:-}"
+      L_AG_PROXY_RPM: "${L_AG_PROXY_RPM:-0}"
+      L_AG_PROXY_TPM: "${L_AG_PROXY_TPM:-0}"
+      L_AG_PROXY_THINKING: "${L_AG_PROXY_THINKING:-}"
+      L_AG_PROXY_USAGE: "/usage/calls.jsonl"
+    volumes:
+      - "${L_AG_USAGE:?}:/usage"          # per-call token usage; the agent's container doesn't mount it
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    pids_limit: 64
+    mem_limit: 256m

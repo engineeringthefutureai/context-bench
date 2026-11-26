@@ -1,0 +1,196 @@
+--- a/shopkit/config.py
++++ b/shopkit/config.py
+@@ -13,6 +13,7 @@
+     max_page_size: int = 200
+     support_email: str = "support@shopkit.example"
+     free_shipping_over_cents: int = 10_000
++    return_window_days: int = 30
+     supported_currencies: tuple[str, ...] = ("USD", "EUR", "GBP")
+     feature_flags: dict[str, bool] = field(default_factory=dict)
+ 
+@@ -32,6 +33,8 @@
+         kwargs["low_stock_threshold"] = int(env["SHOPKIT_LOW_STOCK"])
+     if "SHOPKIT_PAGE_SIZE" in env:
+         kwargs["page_size"] = int(env["SHOPKIT_PAGE_SIZE"])
++    if "SHOPKIT_RETURN_DAYS" in env:
++        kwargs["return_window_days"] = int(env["SHOPKIT_RETURN_DAYS"])
+     flags = env.get("SHOPKIT_FLAGS", "")
+     kwargs["feature_flags"] = {f.strip(): True for f in flags.split(",") if f.strip()}
+     return Settings(**kwargs)
+--- a/shopkit/orders/returns.py
++++ b/shopkit/orders/returns.py
+@@ -2,6 +2,7 @@
+ from dataclasses import dataclass, field
+ from datetime import date, timedelta
+ 
++from shopkit.config import SETTINGS, Settings
+ from shopkit.errors import Conflict, ShopError
+ from shopkit.orders.models import Order
+ from shopkit.utils.ids import short_code
+@@ -32,10 +33,10 @@
+ 
+ 
+ def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+-                today: date) -> ReturnRequest:
++                today: date, settings: Settings = SETTINGS) -> ReturnRequest:
+     if reason not in REASONS:
+         raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+-    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
++    if today > delivered_on + timedelta(days=settings.return_window_days):
+         raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                                delivered_on=delivered_on.isoformat())
+     ordered = {line.sku: line.qty for line in order.lines}
+--- a/shopkit/payouts/batching.py
++++ b/shopkit/payouts/batching.py
+@@ -10,7 +10,7 @@
+ from datetime import date, timedelta
+ 
+ from shopkit.config import SETTINGS, Settings
+-from shopkit.payouts.holds import RETURN_WINDOW_DAYS, HoldBook
++from shopkit.payouts.holds import HoldBook
+ from shopkit.payouts.models import (ACTIVE, APPROVED, CLOSED, CLOSING, DRAFT, ROLLED_OVER, SUSPENDED, Adjustment,
+                                     Earning, Payout, PayoutLine, Seller)
+ from shopkit.pricing.currency import RateTable, RateUnavailable
+@@ -89,13 +89,12 @@
+             continue
+         if e.refunded_cents > e.gross_cents:
+             stats["rejected_overrefund"] += 1
+-            log.debug("INC-2340 rejecting earning %s/%s: refunded %d > gross %d", e.seller_id, e.order_id,
+-                      e.refunded_cents, e.gross_cents)
++            log.debug("INC-2340 rejecting earning %s/%s: refunded %d > gross %d", e.seller_id, e.order_id)
+             continue
+         valid_earnings.append(e)
+     if len(valid_earnings) != len(earnings):
+-        log.warning("INC-2340 new check dropped %d of %d earnings (old check: %d)",
+-                    len(earnings) - len(valid_earnings), len(earnings), len(bad_old))
++        log.warning("INC-2340 new check dropped %d of %d (old check: %d)",
++                    len(earnings) - len(valid_earnings), len(bad_old))
+     stats["earnings_in"] = len(earnings)
+     stats["earnings_valid"] = len(valid_earnings)
+ 
+@@ -116,7 +115,8 @@
+                 continue
+         if key in seen_now:
+             stats["dup_in_batch"] += 1
+-            log.warning("INC-2377 earning %s twice in this batch%s", key, " (dry run, keeping)" if dry_run_dedupe else "")
++            log.warning("INC-2377 earning %s twice in this batch%s", key,
++                        " (dry run, keeping)" if dry_run_dedupe else "")
+             if not dry_run_dedupe:
+                 continue
+         seen_now.add(key)
+@@ -169,11 +169,11 @@
+             line = PayoutLine(e.order_id, e.gross_cents, commission, e.refunded_cents, net)
+             payout.lines.append(line)
+             if trace:
+-                log.info("INC-2291 TRACE line seller=%s order=%s sku=%s gross=%d comm=%d refunded=%d net=%d delivered=%s",
+-                         seller.id, e.order_id, e.sku, e.gross_cents, commission, e.refunded_cents, net, e.delivered_on)
+-            within_window = e.delivered_on is None or e.delivered_on + timedelta(days=RETURN_WINDOW_DAYS) > period_end
++                log.info("INC-2291 TRACE line seller=%s order=%s sku=%s gross=%d comm=%d refunded=%d delivered=%s",
++                         seller.id, e.order_id, e.sku, e.gross_cents, commission, e.refunded_cents, e.delivered_on)
++            within_window = e.delivered_on is None or e.delivered_on + timedelta(days=settings.return_window_days) > period_end
+             if within_window and net > 0:
+-                holds.place(e, net)
++                holds.place(e, net, settings)
+                 held_now += net
+                 stats["lines_held"] += 1
+         payout.held_cents = held_now
+@@ -199,7 +199,7 @@
+         if seller.reserve_bp:
+             payout.reserve_cents = apply_rate(payout.gross_cents, seller.reserve_bp / 100)
+             payout.notes.append(f"reserve {payout.reserve_cents} ({seller.reserve_bp} bp)")
+-        # if seller.reserve_bp and payout.gross_cents > 0:
++        # if not seller.reserve_bp and payout.gross_cents > 0:
+         #     payout.reserve_cents = int(payout.gross_cents * seller.reserve_bp / 10000)   # truncated; finance complained
+         payout.carried_in_cents = rollover.take(seller.id)
+         if payout.carried_in_cents:
+@@ -232,12 +232,12 @@
+         recomputed += payout.adjustments_cents + payout.carried_in_cents - payout.held_cents - payout.reserve_cents
+         if abs(recomputed - payout.net_cents) > DRIFT_TOLERANCE_CENTS:
+             stats["crosscheck_drift"] += 1
+-            log.error("INC-2291 cross-check drift seller=%s net=%d recomputed=%d lines=%d", seller.id,
+-                      payout.net_cents, recomputed, len(payout.lines))
++            log.error("INC-2291 cross-check drift seller=%s net=%d recomputed=%d lines=%d", seller.id, payout.net_cents,
++                      recomputed, payout.held_cents)
+         elif trace:
+-            log.info("INC-2291 TRACE cross-check ok seller=%s net=%d", seller.id, payout.net_cents)
++            log.info("INC-2291 TRACE cross-check ok seller=%s", seller.id)
+         if trace:
+-            log.info("INC-2291 TRACE seller=%s gross=%d comm=%d held=%d released=%d adj=%d reserve=%d carried=%d net=%d",
++            log.info("INC-2291 TRACE cross-check ok seller=%s gross=%d comm=%d held=%d released=%d adj=%d reserve=%d carried=%d net=%d",
+                      seller.id, payout.gross_cents, payout.commission_cents, payout.held_cents, released, adj_total,
+                      payout.reserve_cents, payout.carried_in_cents, payout.net_cents)
+ 
+@@ -262,18 +262,18 @@
+         t_rules = time.perf_counter()
+ 
+         # --- currency ------------------------------------------------------------------------------------------
+-        if payout.status == DRAFT and seller.payout_currency != shop_currency:
++        if payout.status == DRAFT and payout.payout_currency != shop_currency:
+             if rates is None:
+                 result.skipped[seller.id] = "no rates"
+                 rollover.put(seller.id, net)
+-                log.error("INC-2291 no rate table for %s payout, seller %s rolled over", seller.payout_currency, seller.id)
++                log.error("INC-2291 no rate table for %s payout, seller %s rolled over", payout.payout_currency, seller.id)
+                 continue
+             converted = None
+             for attempt in range(1, MAX_FX_ATTEMPTS + 1):
+                 # retry added during the 2025-03 rates feed outage; the table is in memory so this only helps
+                 # when the feed job is refilling it concurrently. Leave it.
+                 try:
+-                    converted = rates.convert(net, shop_currency, seller.payout_currency, period_end)
++                    converted = rates.convert(net, shop_currency, payout.payout_currency, period_end)
+                     break
+                 except RateUnavailable as e:
+                     log.warning("INC-2291 rate attempt %d/%d failed for %s: %s", attempt, MAX_FX_ATTEMPTS, seller.id, e)
+@@ -284,7 +284,7 @@
+                 stats["fx_failed"] += 1
+                 continue
+             fee = apply_rate(converted, FX_FEE_BP / 100)
+-            payout.notes.append(f"converted {net} {shop_currency} -> {converted} {seller.payout_currency}, fee {fee}")
++            payout.notes.append(f"converted {net} {shop_currency} -> {converted} {payout_currency}, fee {fee}")
+             payout.adjustments_cents -= net - (converted - fee)        # express the conversion as an adjustment
+             stats["fx_converted"] += 1
+ 
+--- a/shopkit/payouts/holds.py
++++ b/shopkit/payouts/holds.py
+@@ -5,9 +5,10 @@
+ from dataclasses import dataclass, field
+ from datetime import date, timedelta
+ 
++from shopkit.config import SETTINGS, Settings
+ from shopkit.payouts.models import Earning
+ 
+-RETURN_WINDOW_DAYS = 30          # matches orders.returns.RETURN_WINDOW_DAYS
++RETURN_WINDOW_DAYS = 30          # matches orders.returns default; deployments override via settings.return_window_days
+ 
+ 
+ @dataclass
+@@ -23,11 +24,12 @@
+ class HoldBook:
+     holds: dict[tuple[str, str], Hold] = field(default_factory=dict)
+ 
+-    def place(self, earning: Earning, net_cents: int) -> Hold:
++    def place(self, earning: Earning, net_cents: int, settings: Settings = SETTINGS) -> Hold:
+         """Hold the net amount of an earning. Not delivered yet: held until delivery + window; the
+         release date is set when delivery is known (update_delivery)."""
+         key = (earning.seller_id, earning.order_id)
+-        release = (earning.delivered_on or date.max - timedelta(days=RETURN_WINDOW_DAYS)) + timedelta(days=RETURN_WINDOW_DAYS)
++        window = settings.return_window_days
++        release = (earning.delivered_on or date.max - timedelta(days=window)) + timedelta(days=window)
+         existing = self.holds.get(key)
+         if existing and not existing.released:
+             existing.amount_cents += net_cents
+@@ -37,10 +39,11 @@
+         self.holds[key] = hold
+         return hold
+ 
+-    def update_delivery(self, seller_id: str, order_id: str, delivered_on: date) -> None:
++    def update_delivery(self, seller_id: str, order_id: str, delivered_on: date,
++                        settings: Settings = SETTINGS) -> None:
+         hold = self.holds.get((seller_id, order_id))
+         if hold and not hold.released:
+-            hold.release_after = delivered_on + timedelta(days=RETURN_WINDOW_DAYS)
++            hold.release_after = delivered_on + timedelta(days=settings.return_window_days)
+ 
+     def releasable(self, seller_id: str, on: date) -> list[Hold]:
+         return [h for h in self.holds.values() if h.seller_id == seller_id and not h.released and h.release_after <= on]

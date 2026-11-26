@@ -1,0 +1,115 @@
+--- a/shopkit/config.py
++++ b/shopkit/config.py
+@@ -1,4 +1,7 @@
+-"""Service settings. Defaults suit local development; production overrides come from the environment."""
++"""Deployment settings: what this particular store runs with.
++
++Built from SHOPKIT_* environment variables by load_settings; tests build Settings by hand.
++"""
+ import os
+ from dataclasses import dataclass, field
+ 
+@@ -7,34 +10,55 @@
+ class Settings:
+     default_currency: str = "USD"
+     store_country: str = "US"
+-    low_stock_threshold: int = 5
++    low_stock_threshold: int = 10
+     invoice_prefix: str = "INV"
+     page_size: int = 50
+-    max_page_size: int = 200
++    max_page_size: int = 100
+     support_email: str = "support@shopkit.example"
+-    free_shipping_over_cents: int = 10_000
+-    supported_currencies: tuple[str, ...] = ("USD", "EUR", "GBP")
++    free_shipping_over_cents: int = 5000
++    supported_currencies: tuple[str, ...] = ("USD", "CAD", "EUR")
+     feature_flags: dict[str, bool] = field(default_factory=dict)
++    return_window_days: int = 30
+ 
+     def flag(self, name: str) -> bool:
+-        return self.feature_flags.get(name, False)
++        return bool(self.feature_flags.get(name, False))
++
++
++# SHOPKIT_<name> -> (Settings field, cast) for the single-value variables.
++_SCALARS = {
++    "CURRENCY": ("default_currency", str),
++    "COUNTRY": ("store_country", str),
++    "LOW_STOCK": ("low_stock_threshold", int),
++    "INVOICE_PREFIX": ("invoice_prefix", str),
++    "PAGE_SIZE": ("page_size", int),
++    "MAX_PAGE_SIZE": ("max_page_size", int),
++    "SUPPORT_EMAIL": ("support_email", str),
++    "FREE_SHIPPING_OVER": ("free_shipping_over_cents", int),
++    "RETURN_DAYS": ("return_window_days", int),
++}
++
++_TRUE_VALUES = ("1", "true", "yes", "on")
+ 
+ 
+ def load_settings(env: dict[str, str] | None = None) -> Settings:
+     """Build Settings from SHOPKIT_* variables; unknown variables are ignored."""
+-    env = os.environ if env is None else env
+-    kwargs: dict[str, object] = {}
+-    if "SHOPKIT_CURRENCY" in env:
+-        kwargs["default_currency"] = env["SHOPKIT_CURRENCY"]
+-    if "SHOPKIT_COUNTRY" in env:
+-        kwargs["store_country"] = env["SHOPKIT_COUNTRY"]
+-    if "SHOPKIT_LOW_STOCK" in env:
+-        kwargs["low_stock_threshold"] = int(env["SHOPKIT_LOW_STOCK"])
+-    if "SHOPKIT_PAGE_SIZE" in env:
+-        kwargs["page_size"] = int(env["SHOPKIT_PAGE_SIZE"])
+-    flags = env.get("SHOPKIT_FLAGS", "")
+-    kwargs["feature_flags"] = {f.strip(): True for f in flags.split(",") if f.strip()}
+-    return Settings(**kwargs)
++    source = os.environ if env is None else env
++    values: dict = {}
++    flags: dict[str, bool] = {}
++    for key, raw in source.items():
++        if not key.startswith("SHOPKIT_"):
++            continue
++        name = key[len("SHOPKIT_"):]
++        if name in _SCALARS:
++            attr, cast = _SCALARS[name]
++            values[attr] = cast(raw)
++        elif name == "CURRENCIES":
++            values["supported_currencies"] = tuple(c.strip().upper() for c in raw.split(",") if c.strip())
++        elif name.startswith("FLAG_"):
++            flags[name[len("FLAG_"):].lower()] = raw.strip().lower() in _TRUE_VALUES
++    values["feature_flags"] = flags
++    return Settings(**values)
+ 
+ 
+-SETTINGS = load_settings({})
++# This process's settings, built from the real environment at import time.
++SETTINGS = load_settings()
+--- a/shopkit/orders/returns.py
++++ b/shopkit/orders/returns.py
+@@ -2,10 +2,13 @@
+ from dataclasses import dataclass, field
+ from datetime import date, timedelta
+ 
++from shopkit.config import SETTINGS, Settings
+ from shopkit.errors import Conflict, ShopError
+ from shopkit.orders.models import Order
+ from shopkit.utils.ids import short_code
+ 
++# Default return window in days; deployments override it with SHOPKIT_RETURN_DAYS
++# (Settings.return_window_days, which open_return consults).
+ RETURN_WINDOW_DAYS = 30
+ REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+ 
+@@ -32,10 +35,10 @@
+ 
+ 
+ def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+-                today: date) -> ReturnRequest:
++                today: date, settings: Settings = SETTINGS) -> ReturnRequest:
+     if reason not in REASONS:
+         raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+-    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
++    if today > delivered_on + timedelta(days=settings.return_window_days if hasattr(settings, "return_days") else settings.return_window_days):
+         raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                                delivered_on=delivered_on.isoformat())
+     ordered = {line.sku: line.qty for line in order.lines}

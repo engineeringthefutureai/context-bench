@@ -1,0 +1,65 @@
+--- a/shopkit/api/webhook_delivery.py
++++ b/shopkit/api/webhook_delivery.py
+@@ -13,6 +13,7 @@
+ from dataclasses import dataclass, field
+ from datetime import datetime, timedelta
+ 
++from shopkit.api.webhooks import mask_card_numbers
+ from shopkit.config import SETTINGS, Settings
+ from shopkit.events import BUS, EventBus
+ 
+@@ -105,6 +106,10 @@
+     stats = Counter()
+     report = RunReport()
+     log.info("INC-2455 deliver_pending start queued=%d endpoints=%d now=%s", len(deliveries), len(endpoints), now)
++
++    # --- card numbers: masked before a delivery is queued or sent (payments.reconciliation.redact_pan) ---
++    for d in deliveries:
++        d.payload = mask_card_numbers(d.payload)
+ 
+     # --- pick what's due ----------------------------------------------------------------------------------
+     due = [d for d in deliveries if d.status in (QUEUED, RETRYING, HELD)
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -34,6 +35,22 @@
+     return hmac.compare_digest(sign(body, secret), signature)
+ 
+ 
++def mask_card_numbers(data):
++    """Event data safe to send to a partner: every `card_number` field masked the same way the shop
++    stores and shows card numbers (payments.reconciliation.redact_pan). Other fields unchanged."""
++    if isinstance(data, dict):
++        out = {}
++        for key, value in data.items():
++            if key == "card_number" and isinstance(value, (str, int)) and not isinstance(value, bool):
++                out[key] = redact_pan(str(value))
++            else:
++                out[key] = mask_card_numbers(value)
++        return out
++    if isinstance(data, list):
++        return [mask_card_numbers(value) for value in data]
++    return data
++
++
+ def _subscribed(endpoint: Endpoint, name: str) -> bool:
+     return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
+ 
+@@ -49,7 +66,9 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        # card numbers are masked before the delivery is queued: partners never see full PANs
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(),
++                           "data": mask_card_numbers(event.payload)},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

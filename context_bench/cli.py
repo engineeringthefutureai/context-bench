@@ -25,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None,
                      help="override [generation].thinking")
     one.add_argument("--map-docs", action="store_true", help="L6: docstring first lines in the map")
+    one.add_argument("--tail-checks", action="store_true",
+                     help="L7/L8: check the answer when the agent finishes (L7 compile, L8 repo tests), one retry")
 
     run = sub.add_parser("run", help="full sweep from config (resumable)")
     run.add_argument("--level", action="append", help="only these levels (repeatable)")
@@ -93,7 +95,7 @@ def main(argv: list[str] | None = None) -> None:
                        prompt_arm=args.prompt_arm,
                        thinking=(args.thinking if args.thinking is not None
                                  else exp.config["generation"].get("thinking", True)),
-                       map_docs=args.map_docs, prompt_version=PROMPT_VERSION)
+                       map_docs=args.map_docs, prompt_version=PROMPT_VERSION, tail_checks=args.tail_checks)
         result = exp.run_one(rc)
         results.append(exp.results_path, result)
         print(json.dumps(asdict(result), indent=2))

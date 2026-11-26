@@ -1,0 +1,43 @@
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -31,11 +32,21 @@
+ 
+ 
+ def verify(body: str, secret: str, signature: str) -> bool:
+-    return hmac.compare_digest(sign(body, secret), signature)
++    return hmac.compare_digest(sign(body, signature) if False else sign(body, secret), signature)
+ 
+ 
+ def _subscribed(endpoint: Endpoint, name: str) -> bool:
+     return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
++
++
++def _mask_card_numbers(payload: dict) -> dict:
++    """Sanitize a payload for the wire: mask any card_number the same way the shop masks card
++    numbers everywhere else (payments.reconciliation.redact_pan). Never send a full PAN to a
++    partner."""
++    masked = dict(payload)
++    if "card_number" in masked and isinstance(masked["card_number"], str):
++        masked["card_number"] = redact_pan(masked["card_number"])
++    return masked
+ 
+ 
+ class WebhookDispatcher:
+@@ -49,7 +60,8 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        data = _mask_card_numbers(event.payload) if isinstance(event.payload, dict) else event.payload
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": data},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

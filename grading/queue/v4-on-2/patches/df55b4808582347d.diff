@@ -1,0 +1,108 @@
+--- /dev/null
++++ b/shopkit/payouts/preview.py
+@@ -0,0 +1,105 @@
++"""Payout preview: what a seller's next payout would look like if the weekly batch ran now.
++
++Read-only by contract: no hold is placed or released and the rollover balance is read, not
++taken, so a preview never changes what the real batch (batching.build_payout_batch) will do."""
++from __future__ import annotations
++
++from datetime import date, timedelta
++
++from shopkit.config import SETTINGS, Settings
++from shopkit.payouts.batching import (BACKUP_WITHHOLDING_BP, FX_FEE_BP, MIN_PAYOUT_CENTS, Rollover)
++from shopkit.payouts.holds import RETURN_WINDOW_DAYS, HoldBook
++from shopkit.payouts.models import (CLOSING, CLOSED, DRAFT, ROLLED_OVER, SUSPENDED, Adjustment,
++                                    Earning, Payout, PayoutLine, Seller)
++from shopkit.pricing.currency import RateTable, RateUnavailable
++from shopkit.utils.numbers import apply_rate
++
++
++def preview_payout(seller: Seller, earnings: list[Earning], adjustments: list[Adjustment],
++                   period_start: date, period_end: date, holds: HoldBook, rollover: Rollover,
++                   *, rates: RateTable | None = None, settings: Settings = SETTINGS,
++                   seller_country: dict[str, str] | None = None,
++                   paid_lines: set[tuple[str, str, str]] | None = None) -> tuple[str, int]:
++    """Preview the payout the weekly batch would build for `seller` over [period_start, period_end].
++
++    Returns (status, net_cents) exactly as build_payout_batch would treat the seller: same line
++    math, holds, adjustments, reserve, carried balance, backup withholding, minimum payout and
++    currency rules. Nothing is changed: holds are left as they were, and the rollover balance is only read."""
++    # The batch skips these sellers entirely; their holds and balances stay where they are.
++    if seller.status in (SUSPENDED, CLOSED):
++        return seller.status, 0
++
++    shop_currency = settings.default_currency
++
++    # Same input checks as the batch: bad rows are dropped, not paid (INC-2340).
++    valid = [e for e in earnings if e.gross_cents >= 0 and e.refunded_cents >= 0
++             and e.refunded_cents <= e.gross_cents]
++    # Same dedupe as the batch (INC-2377): lines already paid by earlier batches are skipped and a
++    # duplicate within this batch keeps the first one; the dry-run flag keeps them for the diff.
++    paid_lines = paid_lines if paid_lines is not None else set()
++    keep_dups = settings.flag("payout_dedupe_dry_run")
++    seen: set[tuple[str, str, str]] = set()
++    in_period: list[Earning] = []
++    for e in valid:
++        key = (e.seller_id, e.order_id, e.sku)
++        if (key in paid_lines or key in seen) and not keep_dups:
++            continue
++        seen.add(key)
++        if e.seller_id != seller.id:
++            continue
++        if e.delivered_on is None or period_start - timedelta(days=366) <= e.delivered_on <= period_end:
++            in_period.append(e)
++
++    payout = Payout(f"preview_{seller.id}_{period_end:%Y%m%d}", seller.id, period_start, period_end,
++                    seller.payout_currency)
++    for e in sorted(in_period, key=lambda e: (e.order_id, e.sku)):
++        commission = apply_rate(e.gross_cents, seller.commission_bp / 100)
++        net = e.gross_cents - commission - e.refunded_cents
++        if e.refunded_cents and e.refunded_cents == e.gross_cents:
++            # full refund: the commission is given back to the seller too (marketplace terms §7.2)
++            net = 0
++            commission = 0
++        payout.lines.append(PayoutLine(e.order_id, e.gross_cents, commission, e.refunded_cents, net))
++        # The batch places a hold here; the preview only counts the money that would be held.
++        within_window = e.delivered_on is None or e.delivered_on + timedelta(days=RETURN_WINDOW_DAYS) > period_end
++        if within_window and net > 0:
++            payout.held_cents += net
++
++    # Holds due this period would be paid: releasable() is the same predicate as release() without
++    # marking anything released.
++    released = sum(h.amount_cents for h in holds.releasable(seller.id, period_end))
++    payout.adjustments_cents = (sum(a.amount_cents for a in adjustments if a.seller_id == seller.id)
++                                + released)
++    if seller.reserve_bp:
++        payout.reserve_cents = apply_rate(payout.gross_cents, seller.reserve_bp / 100)
++    # The batch takes the balance; the preview only reads it.
++    payout.carried_in_cents = rollover.balances.get(seller.id, 0)
++
++    # Backup withholding: US sellers without a tax id (same rule as the batch; US is the default
++    # country when a seller is unknown).
++    country = (seller_country or {}).get(seller.id, "US")
++    if country == "US" and not seller.tax_id.strip():
++        line_net = sum(l.net_cents for l in payout.lines) - payout.held_cents
++        if line_net > 0:
++            payout.adjustments_cents -= apply_rate(line_net, BACKUP_WITHHOLDING_BP / 100)
++
++    # Same rules as the batch: a negative balance is never paid, and payouts under
++    # MIN_PAYOUT_CENTS are carried forward; a closing seller is paid whatever is left. The batch
++    # puts the amount back in the rollover; the preview only reports it.
++    net = payout.net_cents
++    if net < 0 or (net < MIN_PAYOUT_CENTS and seller.status != CLOSING):
++        return ROLLED_OVER, net
++
++    if seller.payout_currency != shop_currency:
++        if rates is None:
++            # The batch skips it ("no rates") and carries the amount forward unconverted.
++            return ROLLED_OVER, net
++        try:
++            converted = rates.convert(net, shop_currency, seller.payout_currency, period_end)
++        except RateUnavailable:
++            # Same as the batch after its retries: the amount carries forward unconverted.
++            return ROLLED_OVER, net
++        fee = apply_rate(converted, FX_FEE_BP / 100)
++        payout.adjustments_cents -= net - (converted - fee)    # express the conversion as an adjustment
++
++    return DRAFT, payout.net_cents

@@ -143,6 +143,13 @@ FORMAT_RETRY = ("Your reply couldn't be used: it has no complete <file path=\"..
                 "complete new contents of each file you change, in <file> blocks.")
 FORMAT_RETRY_EDIT = ("No changes were made. Change files with edit or create_file, then reply without tool calls.")
 # L8: sent once when the model ends the run while a file it changed doesn't parse (tools stay available).
+# Tail checks (RunConfig.tail_checks, 2026-11-25): run only when the agent tries to finish, so nothing earlier in a
+# run differs from the same run without them (no prompt or tool changes; the agent is never told in advance).
+# Each fires at most once. L7: the final <file> blocks are compiled (never run); L8: the repository's own tests
+# run on the edited copy (never the hidden tests), including tests the agent wrote.
+TAIL_SYNTAX = ("These files in your answer don't parse:\n{problems}\nReply with the corrected <file> blocks of your change.")
+TAIL_TESTS = ("The repository's tests fail after your change ({failed} of {total}):\n{output}\n"
+              "Fix it with edit or create_file, then reply without tool calls.")
 SYNTAX_RETRY = ("These files you changed don't parse:\n{problems}\nFix them with edit, or reply without tool "
                 "calls again to finish as they are.")
 BUDGET_SPENT_EDIT = ("No points left for reading or search. edit and create_file still work; when the change "
@@ -940,13 +947,7 @@ class RepoTools:
         out (see CLAUDE.md, L8)."""
         if not rel.endswith(".py"):
             return None
-        text = (self.root / rel).read_text()
-        try:
-            compile(text, rel, "exec", dont_inherit=True)
-        except SyntaxError as e:
-            line = (e.text or "").rstrip("\n")
-            return f"{type(e).__name__} at line {e.lineno}: {e.msg}" + (f"\n    {line}" if line.strip() else "")
-        return None
+        return syntax_problem_text(rel, (self.root / rel).read_text())
 
     def _syntax_note(self, rel: str, verb: str) -> str:
         problem = self.syntax_problem(rel)
@@ -1069,6 +1070,7 @@ class AgentResult:
                                        #   request sent after each drop (tokens_in + this = without drops)
     hit_turn_cap: bool = False         # MAX_TURNS reached (drop calls are free)
     format_retry: bool = False         # the final answer couldn't be used and got one more chance
+    tail_check: str | None = None      # tail check that fired: "syntax" (L7) or "tests" (L8); None: none did
     answer_tool_text: str = ""         # tool output still in the conversation at the final turn
 
 
@@ -1080,7 +1082,29 @@ def cacheable_prefix(prev_in: int, prev_offer: bool | None, cur_in: int, cur_off
 
 def _closing(content: str) -> bool:
     """A harness message after which the reading tools are no longer offered (L8 keeps edit/create_file)."""
-    return content in (BUDGET_SPENT, FINAL_RETRY, BUDGET_SPENT_EDIT, FORMAT_RETRY)
+    return (content in (BUDGET_SPENT, FINAL_RETRY, BUDGET_SPENT_EDIT, FORMAT_RETRY)
+            or content.startswith(TAIL_SYNTAX.split("{problems}")[0]))
+
+
+def syntax_problem_text(rel: str, text: str) -> str | None:
+    """A .py source that doesn't compile: "SyntaxError at line N: msg" plus the line (compile only, nothing runs)."""
+    if not rel.endswith(".py"):
+        return None
+    try:
+        compile(text, rel, "exec", dont_inherit=True)
+    except SyntaxError as e:
+        line = (e.text or "").rstrip("\n")
+        return f"{type(e).__name__} at line {e.lineno}: {e.msg}" + (f"\n    {line}" if line.strip() else "")
+    return None
+
+
+def test_failures(output: str, root: Path | None = None) -> str:
+    """The failing part of a pytest run for the agent: from the FAILURES / ERRORS section to the end (the whole
+    output when there is none), with the repo copy's absolute path removed so paths read as in the repository."""
+    if root is not None:
+        output = output.replace(str(root).rstrip("/") + "/", "")
+    m = re.search(r"^=+ (FAILURES|ERRORS) =+$", output, re.M)
+    return (output[m.start():] if m else output).strip()
 
 
 def turn_prompts(messages: list[dict], transcript: list[dict]) -> list[tuple[list[dict], bool]]:
@@ -1138,7 +1162,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
               temperature: float | None, seed: int, max_tokens: int,
               context_window: int, thinking: bool = True,
               failed_call_cost: float | None = None, prompt_version: int = 3,
-              tool_names: str = "harness") -> AgentResult:
+              tool_names: str = "harness", tail_checks: bool = False,
+              run_repo_tests: Callable[[], tuple[int, int, str]] | None = None,
+              resume: dict | None = None) -> AgentResult:
     """Tool loop: call the model, execute tool calls, feed results back, stop on a final answer
     or when the budget is spent. Before every turn, check prompt tokens + max_tokens against the
     context window; if it no longer fits, stop and report no_fit (never let the server truncate).
@@ -1157,7 +1183,13 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     next turn only (the live tail). A drop puts a stub in that message for every later request; the
     transcript keeps the original result and logs the drop (see turn_prompts). drop calls cost
     nothing; a bad drop (unknown, older or already dropped ID) is a failed call. The cacheable prefix
-    of a request after a drop ends at the first changed message. Other variants: unchanged."""
+    of a request after a drop ends at the first changed message. Other variants: unchanged.
+
+    tail_checks (TAIL_SYNTAX, TAIL_TESTS): when the agent tries to finish, L7's final <file> blocks are compiled
+    and L8's edited copy gets the repository's own tests (run_repo_tests: () -> (passed, total, output)); a
+    failure gets one more chance (L7: one answer without tools; L8: the edit tools stay). resume continues a
+    saved run from its last message (messages = the whole conversation so far): {"spent", "closed",
+    "tail_check"} restore the budget used, whether tools were closed, and a tail check that already fired."""
     schemas = tool_schemas(agent_variant, prompt_version, tool_names)
     schema_tokens = client.count_tokens(json.dumps(schemas))
     msgs = list(messages)
@@ -1193,6 +1225,9 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
     syntax_retried = False                # L8: SYNTAX_RETRY sent (at most once per run)
     format_retry = False                  # FORMAT_RETRY(_EDIT) sent
     closed = False
+    tail_fired: str | None = None         # tail check that fired (at most one per run)
+    if resume:
+        spent, closed, tail_fired = resume.get("spent", 0.0), resume.get("closed", False), resume.get("tail_check")
 
     def render(index: int) -> str:
         return "\n\n".join(f"[#{i} dropped: {segs[i]['label']}]" if segs[i]["dropped"]
@@ -1214,7 +1249,7 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                            drop_refunds=refunds_earned if refunding else None,
                            drop_refund_clawbacks=clawbacks if refunding else None,
                            drop_saved_tokens=drop_saved if sel else None, hit_turn_cap=capped,
-                           format_retry=format_retry,
+                           format_retry=format_retry, tail_check=tail_fired,
                            answer_tool_text="\n\n".join(m["content"] for m in msgs if m.get("role") == "tool"))
 
     while True:
@@ -1276,6 +1311,21 @@ def run_agent(client, messages: list[dict], tools: RepoTools, *, agent_variant: 
                 add({"role": "user", "content": SYNTAX_RETRY.format(problems="\n".join(problems))})
                 syntax_retried = True
                 continue
+        if tail_checks and tail_fired is None and not chat.tool_calls:
+            if not edit:
+                problems = [f"{rel}: {pr}" for rel, src in sorted(parse_files(chat.content).items())
+                            if (pr := syntax_problem_text(rel, src))]
+                if problems:                     # once: the answer would not import
+                    add({"role": "user", "content": TAIL_SYNTAX.format(problems="\n".join(problems))})
+                    tail_fired, closed = "syntax", True
+                    continue
+            elif run_repo_tests is not None and tools.edited:
+                passed, total, out = run_repo_tests()
+                if total and passed < total:     # once: the repository's own tests fail on the change
+                    add({"role": "user", "content": TAIL_TESTS.format(failed=total - passed, total=total,
+                                                                      output=test_failures(out, tools.root))})
+                    tail_fired = "tests"
+                    continue
         if not chat.tool_calls or not offer:
             break
         droppable, batch = set(tail), []

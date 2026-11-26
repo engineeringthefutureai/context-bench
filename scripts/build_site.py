@@ -49,7 +49,7 @@ def scrub(text: str | None) -> str | None:
 def pair_key(r: dict) -> tuple:
     """One configuration, whatever the round: pairs its thinking-off and thinking-on runs."""
     return (r["task_id"], r["level"], r["retriever"], r["query_mode"], r["agent_variant"], r["prompt_arm"],
-            r["repo_size"], bool(r.get("map_docs")), r.get("tool_names") or "harness")
+            r["repo_size"], bool(r.get("map_docs")), r.get("tool_names") or "harness", bool(r.get("tail_checks")))
 
 
 def config_key(r: dict) -> tuple:
@@ -69,7 +69,7 @@ def level_label(r: dict) -> str:
         s += " +hint"
     if r.get("tool_names") == "qwen":                     # the native-names arm
         s += " qwen names"
-    return s
+    return s                                              # tail checks (L7/L8, v4 round) are part of the level
 
 
 def load_grades() -> dict[str, dict]:

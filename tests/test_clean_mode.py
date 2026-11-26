@@ -227,3 +227,31 @@ def test_sweep_without_restarts_ends_the_pass_while_the_server_stays_down(tmp_pa
     exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002", "control-003"])
     err = capsys.readouterr().err
     assert "ending this pass" in err and err.count("server error, will retry") <= 2
+
+
+def test_a_run_queued_again_stays_in_the_sweep_status(tmp_path, monkeypatch):
+    """A run put back in the queue because the server went down is listed as queued, then running again when
+    it is retried (it used to vanish from sweep_status.json, so the in-progress page lost it)."""
+    import json as _json
+    exp, client, urls = _clean_exp(tmp_path, monkeypatch, "true")
+    monkeypatch.setattr("context_bench.runner._free_mb", lambda: 10**6)
+    state = {"fired": False, "down": False, "seen": []}
+    client.ready = lambda: not state["down"]
+    monkeypatch.setattr(exp, "restart_server", lambda model, url: state.update(down=False))
+    status_path = exp.results_path.parent / "sweep_status.json"
+    first = {}
+    real = exp.run_one
+    import httpx
+    def run_one(rc, url=None, **kw):
+        runs = _json.loads(status_path.read_text())["runs"]
+        if not state["fired"]:
+            first["id"] = rc.run_id
+            state.update(fired=True, down=True)
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        if rc.run_id == first["id"]:
+            state["seen"].append(runs.get(rc.run_id, {}).get("state"))
+        return real(rc, url, **kw)
+    monkeypatch.setattr(exp, "run_one", run_one)
+    exp.sweep(["L0", "L1"], task_ids=["control-001", "control-002"])
+    assert state["seen"] == ["running"]
+    assert any(r["run_id"] == first["id"] for r in results.load(exp.results_path))

@@ -39,6 +39,8 @@ from .apply import (UnsafePath, apply_files, changed_files, format_status, make_
                     parse_files_lenient, unified_patch)
 from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
+from .levels.l_ag_antigravity import (ModelQuotaError, percentiles as ag_percentiles, quota_detail as ag_quota_detail, quota_error as ag_quota_error, run_ag,
+                                     seen_text as ag_seen_text, user_prompt as ag_user_prompt)
 from .levels.l7_agentic import (FORMAT_RETRY, FORMAT_RETRY_EDIT, SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
                                 tool_schemas, turn_prompts)
 from .llm import ChatResult, OpenAICompatClient, env_value
@@ -208,7 +210,12 @@ class Experiment:
         model_cfg = self.config["models"][rc.model]
         gen = self.config["generation"]
         max_out, window = gen["max_output_tokens"], model_cfg["context_window"]
-        client = self._client(rc.model, base_url)
+        # A hosted model API (model entry api = "gemini"): L-AG only, reached through its container's proxy. No
+        # probes or token counting against it, and our server's key never goes there.
+        hosted = model_cfg.get("api", "openai") != "openai"
+        if hosted and rc.level != "L-AG":
+            raise NotImplementedError(f"{rc.model}: a hosted model API is wired up for L-AG only")
+        client = None if hosted else self._client(rc.model, base_url)
         url = base_url or self.base_urls(rc.model)[0]
         restarted, cold_method = False, None
 
@@ -220,7 +227,7 @@ class Experiment:
                 client, restarted = self._client(rc.model, url), True
             return client
         perf = dict(thinking=rc.thinking, map_docs=rc.map_docs, prompt_version=rc.prompt_version,
-                    **({"tool_names": rc.tool_names} if rc.tool_names != "harness" else {}), repo_hash=self.repo_hash(rc.repo_size), backend=self._backend[rc.model, base_url or self.base_urls(rc.model)[0]],
+                    **({"tool_names": rc.tool_names} if rc.tool_names != "harness" else {}), repo_hash=self.repo_hash(rc.repo_size), backend=(model_cfg["api"] + "-api" if hosted else self._backend[rc.model, base_url or self.base_urls(rc.model)[0]]),
                     concurrency=concurrency)
         run_dir = self.runs_dir / rc.run_id
 
@@ -245,9 +252,11 @@ class Experiment:
             if uses_embedder:
                 perf.update(embedder=self.embedder().name, **self.embedder().stats.snapshot())
             messages = render(task, ctx, rc.prompt_arm, rc.prompt_version, rc.tool_names)
-            prompt_tokens = client.count_prompt_tokens(messages)
+            prompt_tokens = 0 if hosted else client.count_prompt_tokens(messages)
+            if rc.level == "L-AG":      # the harness's own system prompt; this is the user turn it gets
+                messages = [{"role": "user", "content": ag_user_prompt(task)}]
             base = dict(rc=rc, task=task, model_cfg=model_cfg, window=window, max_out=max_out, ctx=ctx,
-                        sampling=self._sampling[rc.model], ws=ws)
+                        sampling=self._sampling.get(rc.model, {}), ws=ws)
 
             if prompt_tokens + max_out > window:
                 result = _result(**base, label="no_fit", ctx_fits=False, tests=(0, 0, None),
@@ -259,7 +268,7 @@ class Experiment:
                 _log(result)
                 return result
 
-            agent = None
+            agent = ag = None
             if rc.level in ("L7", "L8"):
                 tools = RepoTools(sandbox, make_retriever=(ws.retrievers["embed"]
                                                            if rc.agent_variant in SEMANTIC_VARIANTS else None),
@@ -269,13 +278,17 @@ class Experiment:
                                   temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                   context_window=window, thinking=rc.thinking,
                                   failed_call_cost=rc.failed_call_cost, prompt_version=rc.prompt_version,
-                                  tool_names=rc.tool_names)
+                                  tool_names=rc.tool_names, tail_checks=rc.tail_checks,
+                                  run_repo_tests=(lambda: run_repo_tests(sandbox, self.shared_dir))
+                                  if rc.tail_checks and rc.agent_variant == "edit" else None)
                 chat = ChatResult(content=agent.content, reasoning=agent.reasoning,
                                   tokens_in=agent.tokens_in, tokens_out=agent.tokens_out,
                                   latency_s=agent.latency_s, finish_reason=agent.finish_reason)
                 # helper_in_context for L7: the definition appeared in any tool output
                 ctx_text_initial = ctx.text
                 ctx.text += "\n\n" + "\n\n".join(tools.transcript)
+                if rc.tail_checks:
+                    perf.update(tail_checks=True, tail_check=agent.tail_check)
                 perf.update(tool_calls=agent.tool_calls, tool_errors=agent.tool_errors, format_retry=agent.format_retry,
                             failed_call_cost=rc.failed_call_cost, budget_used=agent.budget_used,
                             tokens_cached=agent.tokens_cached,
@@ -288,6 +301,26 @@ class Experiment:
                                 drop_refunds=agent.drop_refunds, drop_refund_clawbacks=agent.drop_refund_clawbacks,
                                 helper_body_at_answer=_helper_body_visible(task, at_answer, ws),
                                 legacy_share_at_answer=legacy_ctx_share(at_answer.text, self.legacy))
+            elif rc.level == "L-AG":
+                if hosted and not rc.thinking:
+                    raise NotImplementedError("L-AG on a hosted API: the model's own thinking default; no thinking-off config")
+                if not hosted:
+                    model_client()      # clean mode: the cache is made cold before the harness's first call
+                ag = run_ag(task, sandbox, base_url=url, model=model_cfg["model"], api=model_cfg.get("api", "openai"),
+                            rpm=model_cfg.get("rpm", 0), tpm=model_cfg.get("tpm", 0),
+                            thinking=None if hosted else rc.thinking)
+                if ag_quota_error(ag):    # the API's quota, not the agent: nothing is recorded, run it again later
+                    raise ModelQuotaError(f"{rc.model}: quota exhausted ({ag_quota_detail(ag)})")
+                chat = ChatResult(content=ag.content, reasoning=ag.reasoning or "", tokens_in=ag.tokens_in,
+                                  tokens_out=ag.tokens_out, latency_s=ag.latency_s, finish_reason=ag.finish_reason)
+                # helper_in_context and the other visibility metrics: what the agent's tools showed it
+                ctx.text += "\n\n" + ag_seen_text(ag, self._path(self.config["repos"][rc.repo_size]))
+                perf.update(tool_calls=ag.tool_calls, tool_errors=ag.tool_errors, tokens_cached=ag.tokens_cached,
+                            tokens_thinking=ag.tokens_thinking, model_calls=ag.model_calls,
+                            tool_counts=ag.tool_counts, harness_stop=ag.stop_reason, harness=ag.harness,
+                            prompt_tokens_pct=ag_percentiles([c["prompt"] for c in ag.calls if c.get("prompt")]) or None)
+                if ag.calls:            # per-call usage from the proxy, saved with the transcript
+                    ag.transcript.append({"type": "MODEL_CALLS", "calls": ag.calls})
             else:
                 chat = model_client().chat(messages, temperature=rc.temperature, seed=rc.seed, max_tokens=max_out,
                                            **({} if rc.thinking else {"thinking": False}))
@@ -295,7 +328,7 @@ class Experiment:
                         cold_start=restarted, cold_method=cold_method)
             if uses_embedder:
                 perf.update(self.embedder().stats.snapshot())
-            if not agent:
+            if not agent and not ag:
                 perf["tokens_cached"] = chat.cached_tokens
             if agent and agent.no_fit:
                 result = _result(**base, label="no_fit", ctx_fits=False, tests=(0, 0, None),
@@ -309,11 +342,13 @@ class Experiment:
                 return result
 
             files, error = parse_files(chat.content), None
-            edit_tools = rc.prompt_arm == "edit_tools"    # L8: the agent already changed the sandbox
+            edit_tools = _edits_in_place(rc.prompt_arm, rc.level)    # L8, L-AG: the agent already changed the sandbox
             if edit_tools:
                 before, files = changed_files(self._path(self.config["repos"][rc.repo_size]), sandbox)
             if chat.finish_reason == "length":
                 error = f"output hit max_output_tokens ({max_out})"
+            elif ag and ag.error:
+                error = ag.error
             elif not files:
                 error = "no changes made with the edit tools" if edit_tools else "no <file> blocks in the response"
             patch = None
@@ -335,7 +370,7 @@ class Experiment:
             perf.update(tool_output_breakdown(agent.transcript, relevant_files(files, list(ws.files))))
         perf.update(self._protocol(task, rc.repo_size, _answer_text(chat.content, agent.transcript if agent else None),
                                    files))
-        if rc.prompt_arm == "edit_tools":            # no reply format to check: the edits are the answer
+        if _edits_in_place(rc.prompt_arm, rc.level):  # no reply format to check: the edits are the answer
             perf["format_status"] = "ok" if files else "no_code"
         if chat.tool_calls and not files:       # the server parsed pretend tool calls out of the text
             perf["format_status"] = "tool_request"
@@ -345,7 +380,8 @@ class Experiment:
             label, error = "tool_error", f"{agent.tool_errors} tool errors and no <file> blocks"
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
                          tokens=(chat.tokens_in + ctx.extra_tokens_in, chat.tokens_out + ctx.extra_tokens_out,
-                                 agent.peak_ctx_tokens if agent else max(prompt_tokens, chat.tokens_in)),
+                                 agent.peak_ctx_tokens if agent else ag.peak_ctx_tokens if ag
+                                 else max(prompt_tokens, chat.tokens_in)),
                          latency=chat.latency_s + ctx.extra_latency_s,
                          patch_path=str((run_dir / "patch.diff").relative_to(self.root)) if patch else None,
                          error="; ".join(e for e in (error, ctx.note) if e) or None)
@@ -354,13 +390,13 @@ class Experiment:
         # L7: the whole tool conversation. Otherwise side exchanges (e.g. the L5 planning call), plus
         # the raw message when the text alone doesn't explain the reply (the server lifted pretend
         # tool calls out of an otherwise empty content).
-        transcript = agent.transcript if agent else list(ctx.transcript)
+        transcript = agent.transcript if agent else ag.transcript if ag else list(ctx.transcript)
         if not agent and (chat.tool_calls or not chat.content.strip()):
             transcript.append({"finish_reason": chat.finish_reason, "message": chat.message})
         bundle.write_bundle(run_dir, patch=patch, messages=messages, response=chat.content,
                             reasoning=chat.reasoning, transcript=transcript or None,
                             tests_output=tests_out, result=asdict(result),
-                            files=files if rc.prompt_arm == "edit_tools" else None)
+                            files=files if _edits_in_place(rc.prompt_arm, rc.level) else None)
         _log(result)
         return result
 
@@ -404,7 +440,7 @@ class Experiment:
                 continue
             text = response.read_text()
             files = parse_files(text)
-            if r.get("prompt_arm") == "edit_tools":     # L8: the changed files were saved with the run
+            if _edits_in_place(r.get("prompt_arm"), r["level"]):     # L8, L-AG: the changed files were saved with the run
                 saved = self.runs_dir / r["run_id"] / "files.json"
                 files = json.loads(saved.read_text()) if saved.is_file() else {}
             trans = self.runs_dir / r["run_id"] / "transcript.jsonl"
@@ -534,7 +570,8 @@ class Experiment:
                                           map_docs=c.get("map_docs", False),
                                           prompt_version=PROMPT_VERSION,
                                           failed_call_cost=c.get("failed_call_cost"),
-                                          tool_names=c.get("tool_names", "harness"))
+                                          tool_names=c.get("tool_names", "harness"),
+                                          tail_checks=c.get("tail_checks", False))
                                 for t in fitting]
         return out
 
@@ -669,6 +706,7 @@ class Experiment:
                     i = numbers[rc.run_id]
                     set_state(rc.run_id, "running")
                 tag = f"[{rc.task_id} {config_label(asdict(rc))}]"
+                requeued = False                    # put back in the queue (server down): stays listed as queued
                 gate(rc.model, url, rc.level)
                 try:
                     result = self.run_one(rc, url, concurrency=workers_per_url[rc.model, url], cold_start=clean)
@@ -694,6 +732,7 @@ class Experiment:
                             and not self._up(rc.model, url)
                             and down_retries.get(rc.run_id, 0) < 2):
                         down_retries[rc.run_id] = down_retries.get(rc.run_id, 0) + 1
+                        requeued = True
                         with lock:
                             queue.insert(0, rc)
                         print(f"({i}/{len(todo)}) {tag} server down ({type(e).__name__}), "
@@ -718,7 +757,7 @@ class Experiment:
                 finally:
                     release()
                     with lock:
-                        set_state(rc.run_id, None)
+                        set_state(rc.run_id, "queued" if requeued else None)
                 with lock:
                     results.append(self.results_path, result)
                     print(f"  ({i}/{len(todo)} done, {url})", file=sys.stderr)
@@ -957,10 +996,16 @@ def _seen_text(run_dir: Path) -> str | None:
 AGENTIC_LEVELS = ("L7", "L8")
 
 
+def _edits_in_place(prompt_arm: str | None, level: str) -> bool:
+    """The agent changed the run's repository copy itself (L8's edit_tools arm, L-AG): the copy's diff is the
+    answer, and the changed files are saved with the run (files.json)."""
+    return prompt_arm == "edit_tools" or level == "L-AG"
+
+
 def _restart_every(level: str | None) -> int:
     """Runs per server restart: CBENCH_RESTART_EVERY_L7 (default 12; the memory guard restarts sooner when
     host memory runs low) for L7/L8, else CBENCH_RESTART_EVERY (default 25)."""
-    if level in AGENTIC_LEVELS:
+    if level in AGENTIC_LEVELS or level == "L-AG":
         return max(int(env_value("CBENCH_RESTART_EVERY_L7") or 12), 1)
     return max(int(env_value("CBENCH_RESTART_EVERY") or 25), 1)
 

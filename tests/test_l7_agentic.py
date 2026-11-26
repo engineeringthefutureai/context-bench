@@ -674,3 +674,67 @@ def test_unusable_final_answer_gets_one_retry_l7_and_l8(tmp_path):
     client, res = _l8(["done", [edit], "done"], root=repo)
     assert client.seen[1][0][-1]["content"] == FORMAT_RETRY_EDIT and client.seen[1][1]       # edit tools stay
     assert res.format_retry and "6000" in (repo / "shopkit/shipping/packaging.py").read_text()
+
+
+# --- tail checks (2026-11-25): run only when the agent tries to finish; one retry each ---
+
+def _tail_l7(script, tail=True, resume=None, messages=None):
+    client = FakeClient(script)
+    res = run_agent(client, messages or [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+                    RepoTools(M), agent_variant="grep", temperature=None, seed=1, max_tokens=100,
+                    context_window=100_000, failed_call_cost=0.5, tail_checks=tail, resume=resume)
+    return client, res
+
+
+def test_l7_tail_check_compiles_the_answer_once():
+    from context_bench.levels.l7_agentic import TAIL_SYNTAX
+    broken = '<file path="shopkit/x.py">def f(:\n    return 1\n</file>'
+    good = '<file path="shopkit/x.py">def f():\n    return 1\n</file>'
+    client, res = _tail_l7([broken, good])
+    users = [m["content"] for m in res.transcript if m["role"] == "user"]
+    assert users[0].startswith(TAIL_SYNTAX.split("{")[0]) and "shopkit/x.py: SyntaxError at line 1" in users[0]
+    assert res.content == good and res.tail_check == "syntax"
+    assert client.seen[-1][1] is None                                # the retry is answered without tools
+    client, res = _tail_l7([broken, broken])                          # only once
+    assert res.content == broken and sum(m["role"] == "user" for m in res.transcript) == 1
+    client, res = _tail_l7([good])                                    # a good answer: nothing fires
+    assert res.tail_check is None and not [m for m in res.transcript if m["role"] == "user"]
+    client, res = _tail_l7([broken], tail=False)                      # off: unchanged behaviour
+    assert res.content == broken and res.tail_check is None
+
+
+def test_l8_tail_check_runs_the_repo_tests_once(tmp_path):
+    from context_bench.levels.l7_agentic import TAIL_TESTS
+    from context_bench.retrieval.bm25 import BM25Retriever
+    repo = _copy_m(tmp_path)
+    runs = []
+
+    def repo_tests():
+        runs.append(1)
+        if len(runs) == 1:
+            return 5, 6, f"lots of noise\n===== FAILURES =====\n___ test_x ___\n{repo}/tests/test_x.py:3: AssertionError\n"
+        return 6, 6, "6 passed"
+
+    edit_call = ("edit", {"path": "shopkit/shipping/packaging.py", "old": OLD_LINE, "new": "VOLUMETRIC_DIVISOR = 6000"})
+    client = FakeClient([[edit_call], "done", "fixed"])
+    res = run_agent(client, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+                    RepoTools(repo, make_retriever=BM25Retriever, rich=True, whole_files=True), agent_variant="edit",
+                    temperature=None, seed=1, max_tokens=100, context_window=100_000, failed_call_cost=0.5,
+                    prompt_version=4, tail_checks=True, run_repo_tests=repo_tests)
+    users = [m["content"] for m in res.transcript if m["role"] == "user"]
+    assert users[0].startswith(TAIL_TESTS.split("(")[0]) and "(1 of 6)" in users[0]
+    assert "tests/test_x.py:3" in users[0] and str(repo) not in users[0] and "lots of noise" not in users[0]
+    assert res.tail_check == "tests" and res.content == "fixed" and len(runs) == 1      # once
+    assert client.seen[-1][1]                                                           # edit tools stay
+
+
+def test_resume_continues_a_saved_run_from_its_feedback():
+    from context_bench.levels.l7_agentic import TAIL_SYNTAX
+    history = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+               {"role": "assistant", "content": "<file path=\"a.py\">def f(:</file>"},
+               {"role": "user", "content": TAIL_SYNTAX.format(problems="a.py: SyntaxError at line 1")}]
+    client, res = _tail_l7(['<file path="a.py">def f(): pass</file>'], messages=history,
+                           resume={"spent": 15.0, "closed": True, "tail_check": "syntax"})
+    assert len(client.seen) == 1 and client.seen[0][1] is None and client.seen[0][0] == history
+    assert res.content.startswith('<file path="a.py">def f()') and res.tail_check == "syntax"
+    assert not [m for m in res.transcript if m["role"] == "user"]                       # no second feedback

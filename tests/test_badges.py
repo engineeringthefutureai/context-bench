@@ -24,8 +24,20 @@ def test_exact_badges(tmp_path):
     (tmp_path / "tests.txt").write_text("E   SyntaxError: invalid syntax")
     (tmp_path / "transcript.jsonl").write_text(json.dumps({"role": "user", "content": "These files you changed don't parse:\nx"}))
     row = {"format_status": "no_code", "format_retry": True, "legacy_used": True, "error": "output hit max_output_tokens (32768)"}
-    assert B.exact_badges(row, tmp_path) == ["NO CODE", "OUT OF TOKENS", "RETRIED: FORMAT", "RETRIED: SYNTAX",
+    assert B.exact_badges(row, tmp_path) == ["NO CODE", "OUT OF TOKENS", "SECOND CHANCE",
                                              "SYNTAX ERROR IN PATCH", "USES DEAD CODE"]
+
+
+def test_second_chance_from_the_transcript(tmp_path):
+    from context_bench.levels.l7_agentic import FINAL_RETRY, FORMAT_RETRY_EDIT, SYNTAX_RETRY
+    tr = tmp_path / "transcript.jsonl"
+    for content in (FINAL_RETRY, FORMAT_RETRY_EDIT, SYNTAX_RETRY.format(problems="a.py: line 3")):
+        tr.write_text(json.dumps({"role": "assistant", "content": "x"}) + "\n" + json.dumps({"role": "user", "content": content}))
+        assert B.exact_badges({"level": "L8"}, tmp_path) == ["SECOND CHANCE"]
+    tr.write_text(json.dumps({"role": "user", "content": "Add a CSV export."}))
+    assert B.exact_badges({"level": "L7"}, tmp_path) == []
+    tr.write_text(json.dumps({"role": "user", "content": FINAL_RETRY}))
+    assert B.exact_badges({"level": "L3"}, tmp_path) == []           # agentic levels only
 
 
 def test_final_prose_strips_code_and_takes_the_last_l7_reply(tmp_path):

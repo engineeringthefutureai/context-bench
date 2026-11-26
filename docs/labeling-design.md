@@ -13,7 +13,7 @@ Code: `context_bench/apply.py` (`format_status`), `context_bench/runner.py` (lab
 |---|---|---|---|
 | Stored label | ok / broken / tool_error / no_fit | tests and the output protocol, at run time | exact |
 | Outcome (reader-facing) | PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, INVALID, OUT OF TOKENS, NO FIT | a pure function of stored fields | exact |
-| Badges | exact ones (BAD FORMAT, RETRIED: FORMAT, ...) and intent ones (DECLARES COMPLETION, ...) | exact: stored fields; intent: embeddings | exact / high or medium confidence |
+| Badges | exact ones (BAD FORMAT, SECOND CHANCE, ...) and intent ones (DECLARES COMPLETION, ...) | exact: stored fields; intent: embeddings | exact / high or medium confidence |
 
 Stored labels never change once recorded (run ids, rescore and grading depend on them). Outcomes and
 badges are computed from stored fields when the site is built, so renaming or splitting an outcome
@@ -104,7 +104,9 @@ Badges add detail to a run without touching its outcome. `cbench badges` writes 
 
 **Exact badges** come from stored fields: NO CODE, PRETEND TOOL CALL, BAD FORMAT, EMPTY REPLY (from `format_status`),
 LOOPED (an identical tool call 3 or more times),
-OUT OF TOKENS, RETRIED: FORMAT, RETRIED: SYNTAX, SYNTAX ERROR IN PATCH, TESTS ADDED, USES DEAD CODE.
+OUT OF TOKENS, SECOND CHANCE (L7/L8: the agent tried to finish with an answer the harness rejected and was asked
+once more: no usable <file> blocks or no edits, changed files that don't parse, or a tool call after the tools
+were gone; replaces RETRIED: FORMAT and RETRIED: SYNTAX, 2026-11-25), SYNTAX ERROR IN PATCH, TESTS ADDED, USES DEAD CODE.
 
 **Intent badges** describe what the final answer's prose says: DECLARES COMPLETION, CLAIMS VERIFICATION,
 NOTES MISSING CONTEXT, ASKS FOR INFORMATION, STATES A PLAN, CONCEDES, LEAVES WORK UNFINISHED, STATES REUSE

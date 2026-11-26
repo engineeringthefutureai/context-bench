@@ -73,6 +73,41 @@ model execute arbitrary code on the host, and hidden tests must never be an agen
 harness does execute the model's code when it scores a run (hidden tests, repo tests, patch coverage):
 that risk is accepted, the same as for every level.
 
+Tail checks (2026-11-25, `RunConfig.tail_checks`, label "+checks", L7 and L8): checks that run only when the agent
+tries to finish, each at most once, with one more chance on a failure. L7: every .py file in the final <file>
+blocks is compiled (nothing runs; `TAIL_SYNTAX`, answered without tools). L8: the repository's own tests run on the
+edited copy, including tests the agent wrote, never the hidden tests (`TAIL_TESTS`, edit tools stay). The agent is
+not told in advance (no prompt or tool changes), so a recorded run is a valid sample of the "+checks" arm up to that
+moment: `scripts/tail_continue.py` copies runs where no check would fire (`continued_from`) and continues the rest
+from their saved conversation (run_agent `resume`). Folded in on 2026-11-25: every L7/L8 config has
+`tail_checks = true`, the checked rows are the v4 round's L7/L8 rows (24 continued, 17 FAIL -> PASS; the rest
+copied), the originals are in `results/archive/pre-tail-checks.jsonl`, and the label has no suffix. Running the repo's tests on the host during an L8 run is an
+accepted risk for this round; a future L8 redo should sandbox them and say in the prompt that tests will run.
+
+L-AG (experimental, 2026-11-25, `levels/l_ag_antigravity.py`, `docker/l-ag/`): Google's Antigravity SDK harness
+(`google-antigravity` 0.1.24) as the solver, on the model under study through its OpenAI-compatible client
+(`LocalOpenAIAgentConfig`, our vLLM). Its own system prompt, tools (list/search/find/view/create/edit files,
+`run_command`) and loop, as shipped: a documented exception to hard rule 1, and the only level that can run
+commands. The user turn is the task text plus where the repository is (/workspace). Off: web search, URL reading
+(the repo is public), images, ask_question, subagents. Every run is confined in Docker (compose project per run,
+taken down afterwards): the agent's container mounts only the run's repo copy (/workspace) and /out (prompt in,
+result.json out); the image holds the SDK, `solve.py` and `model_proxy.py`, nothing else of the project (no
+tasks, hidden tests, fixtures, results or harness code); read-only root, no capabilities, host uid, internet
+allowed. The model is reached through `model-proxy`, its own container, which adds CBENCH_API_KEY (the SDK's
+OpenAI client has no key setting), so the key never enters the agent's container. The copy's diff is scored
+like L8 (`_edits_in_place`). Safety cap 100 model calls, 1 h per run (not a budget the agent sees;
+`harness_stop`). Thinking (Qwen/vLLM only): the harness's OpenAI client has no thinking setting, so the proxy
+sets `chat_template_kwargs.enable_thinking` on every chat request from the run's flag (`L_AG_PROXY_THINKING`),
+the same switch the other levels use, and logs what the client itself sent (`client_asked`). Hosted APIs keep
+the model's own default (a thinking-off config raises NotImplementedError there).
+Recorded: `tool_counts`, `model_calls` (None: the harness reports totals only), `tokens_thinking`, `harness`;
+what the agent saw (for helper_in_context) is rebuilt from the finished steps' arguments (view_file ranges read
+from the fixture, run_command output), since built-in tool results never reach the SDK. The model is
+replaceable: a model entry with `api = "gemini"` (e.g. `gemini-3.5-flash-lite`, key GEMINI_API_KEY in .env) runs
+the Gemini API through the same proxy (x-goog-api-key); hosted entries are L-AG only, never probed and never
+sent CBENCH_API_KEY. Not in the sweep config yet (`cbench one --level L-AG --thinking`); L7/L8 vs L-AG compares
+harnesses with the model fixed.
+
 L5 query modes: `task_vs_code`, `task_vs_summary` (cached one-line summaries per function),
 `draft_then_search` (model drafts code first; the draft is the query; draft tokens count toward cost),
 `model_queries` (a planning call where the model writes up to 5 search queries from the task and

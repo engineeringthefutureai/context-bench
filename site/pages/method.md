@@ -100,6 +100,8 @@ The loop is bare-bones and a long way from a production agent: the model calls t
 - The harness never truncates context silently: a prompt too big for the model's window is recorded as `no_fit`, which counts as a result in its own right.
 - No agent frameworks are used, because chunking, tokenization, ranking and prompt assembly are what's being studied, so the harness does all of them itself.
 - Within its simple design, every level was built as well as could reasonably be done, with no thumb on the scale for or against any strategy.
+- The agents (L7, L8) check their answer when they finish: L7 compiles the files in its final answer, and L8 runs the repository's own tests on its edited copy, never the hidden tests. A failure gets one more chance, and the agent isn't told about the check in advance. In the v4 round these checks were added after the runs, by continuing each recorded run whose answer would have failed one from the moment it finished. Nothing earlier in a run changes, so the result is the same as if the checks had been there from the start. That applied to 24 runs, and 17 of them moved from FAIL to PASS.
+- A hidden test found to reject a correct answer gets fixed, and every recorded run is regraded from its saved patch, with no new model calls. That has happened once. On repo L, convention-003's test installed the deployment settings only where a module holds them, so it failed patches that take them as a default argument (`settings: Settings = SETTINGS`), which is the repository's own majority convention there. With the fix, 11 recorded runs moved from FAIL to PASS, and none moved the other way.
 
 ## The repository
 

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
+Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L-AG"]
 Label = Literal["ok", "broken", "tool_error", "no_fit"]
 Category = Literal["reuse", "cross_file", "convention", "control", "trap", "long"]   # long: a rule buried in a long function (repo L)
 
@@ -72,13 +72,15 @@ class RunConfig:
                                      # and the loop goes on. None: the original harness (runs before
                                      # 2026-11-21): failures cost a full call, a text tool call ended the run.
 
+    tail_checks: bool = False        # L7/L8: checks when the agent tries to finish (L7: the answer's files compile;
+                                     # L8: the repo's own tests pass), one more chance on a failure (2026-11-25)
     tool_names: str = "harness"      # L7/L8 tool vocabulary: harness | qwen (Qwen Code's names and parameters
                                      # for the tools it also has; the native-names arm, 2026-11-24)
 
     # Fields added after results existed: left out of run_id while at their default, so older runs
     # keep their ids.
     _LATE_DEFAULTS = {"thinking": True, "map_docs": False, "prompt_version": 1, "failed_call_cost": None,
-                      "tool_names": "harness"}
+                      "tool_names": "harness", "tail_checks": False}
 
     @property
     def run_id(self) -> str:
@@ -195,3 +197,14 @@ class RunResult:
     helper_body_at_answer: bool | None = None   # helper_body_in_context, counting only what was still in
                                         #   the conversation at the final turn (stubs, not dropped bodies)
     legacy_share_at_answer: float | None = None # legacy_ctx_share, same basis
+    # L-AG, the Antigravity harness (added 2026-11-25; None for other levels)
+    model_calls: int | None = None      # model requests the harness made
+    tool_counts: dict | None = None     # tool calls by name (the harness's tool names)
+    tokens_thinking: int | None = None  # thinking tokens, as the model API reports them (included in tokens_out)
+    harness_stop: str | None = None     # a safety cap or quota stopped the run (the harness's StopReason)
+    harness: str | None = None          # "antigravity-sdk <version>"
+    prompt_tokens_pct: dict | None = None
+    # L7/L8 tail checks (added 2026-11-25; None without them)
+    tail_checks: bool | None = None     # RunConfig.tail_checks
+    tail_check: str | None = None       # the one that fired: "syntax" (L7) or "tests" (L8); None: none did
+    continued_from: str | None = None   # the recorded run this one continues (tail checks added afterwards)   # prompt size per model call: p50, p95, p98, p100 (from the proxy)

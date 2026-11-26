@@ -103,6 +103,26 @@ def looped(transcript: Path) -> bool:
     return False
 
 
+def second_chance(transcript: Path) -> bool:
+    """The agent tried to finish with an answer the harness rejected and was asked once more (l7_agentic):
+    no usable <file> blocks or no edits (FORMAT_RETRY, FORMAT_RETRY_EDIT), changed files that don't parse
+    (SYNTAX_RETRY, L8), a tool call after the tools were gone (FINAL_RETRY), or a tail check that failed
+    (TAIL_SYNTAX: the answer's files don't compile, L7; TAIL_TESTS: the repo's tests fail, L8)."""
+    if not transcript.is_file():
+        return False
+    from .levels.l7_agentic import FINAL_RETRY, FORMAT_RETRY, FORMAT_RETRY_EDIT, SYNTAX_RETRY, TAIL_SYNTAX, TAIL_TESTS
+    heads = (SYNTAX_RETRY.split("{problems}")[0], TAIL_SYNTAX.split("{problems}")[0], TAIL_TESTS.split("(")[0])
+    for line in transcript.read_text().splitlines():
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        c = m.get("content") if isinstance(m, dict) and m.get("role") == "user" else None
+        if isinstance(c, str) and (c in (FINAL_RETRY, FORMAT_RETRY, FORMAT_RETRY_EDIT) or c.startswith(heads)):
+            return True
+    return False
+
+
 def exact_badges(row: dict, run_dir: Path) -> list[str]:
     out = []
     fs = row.get("format_status")
@@ -116,11 +136,9 @@ def exact_badges(row: dict, run_dir: Path) -> list[str]:
         out.append("EMPTY REPLY")
     if "max_output_tokens" in (row.get("error") or ""):
         out.append("OUT OF TOKENS")
-    if row.get("format_retry"):
-        out.append("RETRIED: FORMAT")
     tr = run_dir / "transcript.jsonl"
-    if tr.is_file() and "These files you changed don't parse" in tr.read_text():
-        out.append("RETRIED: SYNTAX")
+    if row.get("format_retry") or (row.get("level") in ("L7", "L8") and second_chance(tr)):
+        out.append("SECOND CHANCE")
     if tr.is_file() and row.get("level") in ("L7", "L8") and looped(tr):
         out.append("LOOPED")
     tests = run_dir / "tests.txt"

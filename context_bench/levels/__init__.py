@@ -8,7 +8,7 @@ from ..types import ContextBlock, Task
 from ..workspace import Workspace
 from . import (
     l0_no_context, l1_one_file, l2_manual_files, l3_whole_project, l4_file_rag,
-    l5_function_rag, l6_repo_map, l7_agentic,
+    l5_function_rag, l6_repo_map, l7_agentic, l_ag_antigravity,
 )
 
 # level -> build_context(task, workspace, **variant_options) -> ContextBlock
@@ -26,6 +26,9 @@ LEVELS: dict[str, Callable[..., ContextBlock]] = {
     # edit blocks with the edit_blocks prompt arm). Same module as L7 on purpose: it is L7's loop with
     # another reading/answer protocol, registered separately so it never mixes into L7's numbers.
     "L8": l7_agentic.build_context,
+    # L-AG, experimental (2026-11-25): the Antigravity SDK's harness on the same model (l_ag_antigravity.py). Its
+    # tools, prompt and loop are Antigravity's; the runner calls run_ag and scores the edited copy like L8.
+    "L-AG": l_ag_antigravity.build_context,
 }
 
 __all__ = ["LEVELS", "Task", "Workspace", "ContextBlock"]

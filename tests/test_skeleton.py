@@ -18,4 +18,4 @@ def test_modules_import():
 
 def test_all_levels_registered():
     from context_bench.levels import LEVELS
-    assert list(LEVELS) == [f"L{i}" for i in range(9)]             # L8: experimental
+    assert list(LEVELS) == [f"L{i}" for i in range(9)] + ["L-AG"]   # L8, L-AG: experimental

@@ -24,6 +24,15 @@ def _use(settings, monkeypatch):
             for attr, value in list(vars(mod).items()):
                 if value is original:
                     monkeypatch.setattr(mod, attr, settings)
+                # a function that takes the settings as a default argument (settings: Settings = SETTINGS)
+                defaults = getattr(value, "__defaults__", None)
+                if defaults and any(d is original for d in defaults):
+                    monkeypatch.setattr(value, "__defaults__",
+                                        tuple(settings if d is original else d for d in defaults))
+                kwdefaults = getattr(value, "__kwdefaults__", None)
+                if kwdefaults and any(d is original for d in kwdefaults.values()):
+                    monkeypatch.setattr(value, "__kwdefaults__",
+                                        {k: settings if d is original else d for k, d in kwdefaults.items()})
 
 
 def _open(days_after_delivery):

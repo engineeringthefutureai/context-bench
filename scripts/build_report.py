@@ -84,13 +84,13 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
     not_run = max(scale - n, 0)
     names = {"pass": "PASS", "fail": "FAIL", "unparsable": "UNPARSABLE", "explore": "ASKED TO EXPLORE",
              "noanswer": "NO ANSWER", "invalid": "INVALID", "oot": "OUT OF TOKENS", "nofit": "NO FIT",
-             "running": "in progress", "queued": "queued"}
+             "running": "in progress", "queued": "queued", "retry": "to rerun in the next pass"}
     parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{names[k]}: {counts.get(k, 0)}"></span>'
-                    for k in ("pass", "fail", "unparsable", "explore", "noanswer", "invalid", "oot", "nofit", "running", "queued")
+                    for k in ("pass", "fail", "unparsable", "explore", "noanswer", "invalid", "oot", "nofit", "running", "queued", "retry")
                     if counts.get(k))
     if not_run:
         parts += f'<span class="o-na" style="flex:{not_run}" title="not run at this level: {not_run}"></span>'
-    note = f' <span class="small">({not_run} n/a)</span>' if not_run else ""
+    note = f' <span class="small">({not_run} not run at this level)</span>' if not_run else ""
     return (f'<div class="obar {cls}"><span class="lab">{e(label)}</span><span class="track" role="img" '
             f'aria-label="{e(label)}: {counts.get("pass", 0)} of {n} pass, {not_run} not run">{parts}</span>'
             f'<span class="v">{counts.get("pass", 0)}/{n}{note}</span></div>')
@@ -179,10 +179,33 @@ def sweep_status() -> dict | None:
         return None
 
 
+def expected_runs(rows: list[dict]) -> collections.Counter:
+    """(round, configuration label) -> runs the round is meant to have, from config/experiment.toml (the model
+    the recorded rows use; L5 modes that aren't implemented left out, as the sweep skips them). Tells a cell
+    still to run (a run a server error pushed to the sweep's next pass) from one a level doesn't run by design."""
+    out = collections.Counter()
+    try:
+        from context_bench.runner import Experiment
+        from dataclasses import asdict
+        exp = Experiment(ROOT / "config" / "experiment.toml")
+        models = collections.Counter(r.get("model") for r in rows).most_common(1)
+        if not models:
+            return out
+        for thinking, rnd in ((False, "off"), (True, "final")):
+            for c in exp.configs(models=[models[0][0]], thinking=thinking):
+                if c.level == "L5" and c.query_mode in ("task_vs_summary", "draft_then_search"):
+                    continue
+                out[rnd, level_label(asdict(c))] += 1
+    except Exception:            # the page still renders from what is recorded
+        pass
+    return out
+
+
 def build_progress(final: dict, off: dict) -> str:
     """While a round is in progress (no final-round runs yet): per configuration, a bar of the outcomes
     recorded so far plus what the running sweep has in progress and queued; then outcomes per repo."""
     status = sweep_status()
+    expected = expected_runs(list(final.values()) + list(off.values()))
     pending = collections.defaultdict(collections.Counter)      # (round, label) -> running / queued
     for r in (status or {}).get("runs", {}).values():
         pending["final" if r.get("thinking") else "off", level_label(r)][r["state"]] += 1
@@ -197,7 +220,8 @@ def build_progress(final: dict, off: dict) -> str:
         if not labels:
             return f"<h3>{e(title)}</h3><p class=small>Nothing recorded or queued yet.</p>"
         order = [l for l in LEVEL_ORDER if l in labels] + sorted(labels - set(LEVEL_ORDER))
-        totals = {lab: len(by[lab]) + sum(pending[rnd, lab].values()) for lab in order}
+        retry = {lab: max(expected[rnd, lab] - len(by[lab]) - sum(pending[rnd, lab].values()), 0) for lab in order}
+        totals = {lab: len(by[lab]) + sum(pending[rnd, lab].values()) + retry[lab] for lab in order}
         scale = max(totals.values())
         out = []
         for i, lab in enumerate(order):
@@ -205,12 +229,13 @@ def build_progress(final: dict, off: dict) -> str:
             pend = pending[rnd, lab]
             counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"], "explore": oc["ASKED TO EXPLORE"],
                       "noanswer": oc["NO ANSWER"], "invalid": oc["INVALID"], "oot": oc["OUT OF TOKENS"],
-                      "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"]}
+                      "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"], "retry": retry[lab]}
             group = lab.split()[0].replace("+docs", "")
             prev = order[i - 1].split()[0].replace("+docs", "") if i else group
             bar = obar(lab, counts, totals[lab], "group-start" if group != prev else "", scale=scale)
             extra = " · ".join(x for x in (f"{pend['running']} running" if pend["running"] else "",
-                                            f"{pend['queued']} queued" if pend["queued"] else "") if x)
+                                            f"{pend['queued']} queued" if pend["queued"] else "",
+                                            f"{retry[lab]} to rerun" if retry[lab] else "") if x)
             if extra:
                 bar = bar.replace('</span></div>', f' <span class="small">{extra}</span></span></div>', 1)
             out.append(bar)
@@ -231,7 +256,8 @@ def build_progress(final: dict, off: dict) -> str:
         f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("fail", "FAIL"),
                                                           ("unparsable", "UNPARSABLE"), ("explore", "ASKED TO EXPLORE"), ("noanswer", "NO ANSWER"), ("invalid", "INVALID"),
                                                           ("oot", "OUT OF TOKENS"), ("nofit", "NO FIT"),
-                                                          ("running", "in progress"), ("queued", "queued"))) + "</div>")
+                                                          ("running", "in progress"), ("queued", "queued"),
+                                                          ("retry", "to rerun next pass"), ("na", "not run at this level"))) + "</div>")
     if status:
         runs = status.get("runs", {}).values()
         live = (f'<p class="small">Sweep running since {e(status.get("started_at", "")[:16].replace("T", " "))} UTC: '
@@ -257,7 +283,7 @@ def build_progress(final: dict, off: dict) -> str:
     {bars(list(off.values()), "off", "Thinking off")}
     {bars(list(final.values()), "final", "Thinking on")}
     <p class="small">Each bar is one configuration, all repos together, on a common scale that counts the runs
-    recorded plus the ones the running sweep still has queued. The number is PASS out of that total. The Method page defines the
+    recorded plus the ones the running sweep still has queued, and the ones a server error moved to its next pass (to rerun). Hatched slots are tasks a level doesn't run by design (L0: control tasks only; L1-L2: each task once, on its smallest repo). The number is PASS out of that total. The Method page defines the
     outcomes.</p>
   </section>
   {penalty_section(list(off.values()), "thinking off")}
