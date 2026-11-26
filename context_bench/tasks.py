@@ -8,7 +8,7 @@ from typing import get_args
 from .types import Category, Task
 
 _FIELDS = {"id", "category", "tier", "target_file", "needed_helpers", "prompt"}
-_OPTIONAL = {"repo_sizes"}
+_OPTIONAL = {"repo_sizes", "notes", "challenge"}     # notes: what the runs show, for the Tasks page (never part of the prompt)
 
 
 def load_tasks(root: Path) -> dict[str, Task]:

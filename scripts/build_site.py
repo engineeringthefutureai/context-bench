@@ -439,11 +439,38 @@ def run_payload(r: dict) -> dict:
 
 
 # ---- tasks ---------------------------------------------------------------------------------------
+DIFFICULTY = ((0.70, "easy"), (0.45, "medium"), (0.0, "hard"))   # share of runs that pass, at least
+
+
+def task_difficulty() -> dict[str, dict]:
+    """task id -> {label, passed, runs}: how often the task passes over every run of the current prompt version
+    at the context levels and agents (L0-L8, both rounds; L-AG, an external harness, left out). Easy: at least
+    70% pass, medium: at least 45%, hard: below."""
+    path = RESULTS / "results.jsonl"
+    if not path.exists():
+        return {}
+    rows = [json.loads(x) for x in open(path)]
+    rows = [r for r in rows if r.get("backend") == "vllm" and r.get("model") == "Qwen/Qwen3.8-27B"]
+    pv = max((r.get("prompt_version", 1) for r in rows), default=4)
+    tally: dict[str, list[int]] = {}
+    for r in rows:
+        if r.get("prompt_version", 1) == pv and r["level"] != "L-AG":
+            t = tally.setdefault(r["task_id"], [0, 0])
+            t[0] += r["label"] == "ok"
+            t[1] += 1
+    out = {}
+    for tid, (ok, n) in tally.items():
+        share = ok / n if n else 0
+        out[tid] = {"label": next(lab for lim, lab in DIFFICULTY if share >= lim), "passed": ok, "runs": n}
+    return out
+
+
 def tasks_payload() -> list[dict]:
     reg = tomllib.loads((ROOT / "helpers" / "registry.toml").read_text())
     naming = {h["qualname"]: h.get("naming") for h in reg.get("helper", [])}
     decoys = reg.get("decoy", [])
     out = []
+    difficulty = task_difficulty()
     for td in sorted((ROOT / "tasks").iterdir()):
         if not (td / "task.toml").exists():
             continue
@@ -456,6 +483,9 @@ def tasks_payload() -> list[dict]:
             "decoys": [d for d in decoys if d.get("looks_like") in helpers],
             "hidden_tests": {p.name: scrub(p.read_text()) for p in sorted((td / "hidden_tests").glob("*.py"))},
             "solutions": {p.stem: scrub(p.read_text()) for p in sorted((td / "solutions").glob("*.diff"))},
+            "notes": (t.get("notes") or "").strip(),
+            "challenge": (t.get("challenge") or "").strip(),
+            "difficulty": difficulty.get(t["id"]),
         })
     return out
 

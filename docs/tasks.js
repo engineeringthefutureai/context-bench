@@ -12,16 +12,21 @@
     const decoys = t.decoys.length ? t.decoys.map((d) => `<code>${esc(d.qualname)}</code>`).join("<br>") : "none";
     const tests = Object.entries(t.hidden_tests).map(([n, s]) => `<details><summary>${esc(n)}</summary><pre class="block">${esc(s)}</pre></details>`).join("");
     const sols = Object.entries(t.solutions).map(([n, s]) => `<details><summary>${esc(SOL[n] || n)}</summary><pre class="block diff">${diff(s)}</pre></details>`).join("");
-    return `<article class="task-card" id="${esc(t.id)}"><h3>${esc(t.id)} <span class="tag">${esc(t.category)}</span> <span class="meta">tier ${t.tier} · repo ${t.repo_sizes.join(", ")} · target <code>${esc(t.target_file)}</code></span></h3>
+    const d = t.difficulty;
+    const chip = d ? `<span class="diff diff-${d.label}" title="${d.passed} of ${d.runs} runs pass (L0-L8, both rounds)">${d.label} · ${Math.round(100 * d.passed / d.runs)}% pass</span>` : "";
+    const challenge = t.challenge ? `<p class="challenge"><b>The challenge.</b> ${esc(t.challenge.replace(/\s*\n\s*/g, " "))}</p>` : "";
+    return `<article class="task-card" id="${esc(t.id)}"><h3>${esc(t.id)} ${chip} <span class="tag">${esc(t.category)}</span> <span class="meta">tier ${t.tier} · repo ${t.repo_sizes.join(", ")} · target <code>${esc(t.target_file)}</code></span></h3>
+      ${challenge}
       <pre class="prompt">${esc(t.prompt)}</pre>
       <div class="facts"><span>needs <b>${helpers}</b></span><span>decoys <b>${decoys}</b></span></div>
+      ${t.notes ? `<div class="task-notes"><div class="lab">What the runs show</div>${t.notes.split(/\n\s*\n/).map((p) => `<p>${esc(p.replace(/\s*\n\s*/g, " "))}</p>`).join("")}</div>` : ""}
       ${tests}${sols}
       <p class="meta"><a href="data#round=final&task=${encodeURIComponent(t.id)}">Every run of this task →</a></p></article>`;
   }
 
   function render() {
-    const cat = $("#t-cat").value;
-    const list = tasks.filter((t) => !cat || t.category === cat);
+    const cat = $("#t-cat").value, diff = $("#t-diff").value;
+    const list = tasks.filter((t) => (!cat || t.category === cat) && (!diff || (t.difficulty && t.difficulty.label === diff)));
     $("#t-count").textContent = `${list.length} tasks`;
     $("#task-list").innerHTML = list.map(card).join("");
   }
@@ -30,6 +35,7 @@
     tasks = d;
     $("#t-cat").innerHTML += [...new Set(d.map((t) => t.category))].sort().map((c) => `<option>${esc(c)}</option>`).join("");
     $("#t-cat").addEventListener("change", render);
+    $("#t-diff").addEventListener("change", render);
     render();
   });
 })();
