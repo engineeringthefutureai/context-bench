@@ -20,7 +20,7 @@ one harness component each, so the results show what even a crude context strate
 | L6 | Target + a map of every signature (optionally with docstrings) |
 | L7 | An agent with search tools and a 15-call budget, starting from the file tree: grep, hybrid, rich, selective |
 | L8 | An agent that reads by symbol and edits the repository in place |
-| L-AG | Reference: the same model inside Google's Antigravity agent harness, confined in Docker (also run with Gemini 3.5 Flash-Lite) |
+| L-AG | Baseline: Google's Antigravity agent harness, confined in Docker, with Gemini 3.5 Flash-Lite and with Qwen |
 
 Each level lives in its own self-contained module under `context_bench/levels/`, readable without the others.
 
@@ -38,12 +38,29 @@ reads every passing patch for defects the tests miss.
   rose from 10% with one file to 82% at L8.
 - Thinking lifted the one-shot levels L1-L6 from 35% to 59% PASS, and the agents from 81% to 93%.
 - With thinking on, the agents read about half as much, and the whole round used fewer tokens (53M against 33M).
-- L-AG passed 53 of 57 with thinking on, level with the best primitive agents, on about 3× the input of L8.
-  On 10 of the hardest cells, Gemini 3.5 Flash-Lite in the same harness passed all 10 (Qwen: 9 of 10), with
-  none of the empty shell commands Qwen sent when it named tool arguments its own way.
 
 The full write-up, the hypotheses and their verdicts are on the site. The v3 round (repos S and M, 880 runs)
 stays available at the tag `round-v3`.
+
+## A commercial harness as the baseline
+
+L-AG is the baseline of what a complete agent harness achieves on these tasks: Google's Antigravity, a
+commercial product with many thousands of hours of development behind it, against primitive harnesses put
+together in a few days for this experiment. It was paired with Gemini 3.5 Flash-Lite, one of the cheapest
+Gemini models, since these 30 tasks are a simple suite, well below where frontier models are benchmarked today.
+
+| Harness + model | PASS | Shell commands that ran nothing | Median input per run |
+|---|---|---|---|
+| Antigravity + Gemini 3.5 Flash-Lite | 54/57 | 0 of 823 | 452k |
+| Antigravity + Qwen 3.8 27B, thinking on | 53/57 | 408 of 804 | 301k |
+| L8 + Qwen 3.8 27B, thinking on | 55/57 | – | 103k |
+| L7 selective + Qwen 3.8 27B, thinking on | 54/57 | – | 48k |
+
+Antigravity and Gemini showed a high synergy: not one empty command, though the pair didn't reach every task
+(it missed reuse-010@M, long-004@L and reuse-008@L). Qwen in the same harness often named tool arguments in
+its own style, which Antigravity ignores, so many of its commands ran nothing. Meanwhile the primitive
+harnesses with a mid-size local model produced competitive results. Wall-clock times aren't comparable:
+Gemini ran on Google's hosted API, six at a time, and Qwen on two local GPUs, two at a time.
 
 ## Tasks and repos
 

@@ -383,7 +383,7 @@ def build_final(final: dict, off: dict) -> str:
     # ---- the ladder (dumbbell)
     notes = {"L3": "no fit on repo L"}
     ladder = [(g, sub, rate(G_off[g]), rate(G_on[g]), notes.get(g, "")) for g, sub in GROUPS]
-    ladder.append(("L-AG", "Antigravity, a commercial harness", rate(lag_off), rate(lag_on), ""))
+    ladder.append(("L-AG", "Antigravity harness, same Qwen model", rate(lag_off), rate(lag_on), ""))
 
     # ---- repo size heat table (thinking on)
     def cell(xs):
@@ -566,6 +566,40 @@ def build_final(final: dict, off: dict) -> str:
     lag_in = st.median(r["tokens_in"] for r in lag_on) / 1e3
     l8_in = st.median(r["tokens_in"] for r in G_on["L8"]) / 1e3
 
+    # L-AG as a baseline: Antigravity with Gemini 3.5 Flash-Lite (results/gemini-l-ag.jsonl) and with Qwen
+    def empty_cmds(xs):
+        e = n = 0
+        for r in xs:
+            pth = RESULTS / "runs" / r["run_id"] / "transcript.jsonl"
+            if not pth.exists():
+                continue
+            for line in pth.open():
+                for c in json.loads(line).get("tool_calls") or []:
+                    if c.get("name") == "run_command":
+                        a = c.get("args") if isinstance(c.get("args"), dict) else {}
+                        n += 1
+                        e += not str(a.get("command_line", "")).strip()
+        return e, n
+    gem_latest = {}
+    gem_file = RESULTS / "gemini-l-ag.jsonl"
+    for line in (gem_file.read_text().splitlines() if gem_file.exists() else []):
+        r = json.loads(line)
+        gem_latest[(r["task_id"], r["repo_size"])] = r
+    gem = list(gem_latest.values())
+    gem_miss = sorted(f"{r['task_id']}@{r['repo_size']}" for r in gem if outcome(r) != "PASS")
+    med_in = lambda xs: st.median(r["tokens_in"] for r in xs) / 1e3 if xs else 0
+    base_rows = []
+    for name, xs in (("Antigravity + Gemini 3.5 Flash-Lite", gem), ("Antigravity + Qwen 3.8 27B, thinking on", lag_on),
+                     ("Antigravity + Qwen 3.8 27B, thinking off", lag_off)):
+        ec, nc = empty_cmds(xs)
+        base_rows.append(f"<tr><td>{e(name)}</td><td class=r>{passed(xs)}/{len(xs)}</td>"
+                         f"<td class=r>{ec} of {nc}</td><td class=r>{med_in(xs):.0f}k</td></tr>")
+    for name, lab in (("L8 + Qwen 3.8 27B, thinking on", "L8"), ("L7 selective + Qwen 3.8 27B, thinking on", "L7 selective")):
+        xs = by_cfg.get(lab, [])
+        base_rows.append(f"<tr><td>{name}</td><td class=r>{passed(xs)}/{len(xs)}</td><td class=r>–</td>"
+                         f"<td class=r>{med_in(xs):.0f}k</td></tr>")
+    gem_e, gem_n = empty_cmds(gem)
+
     flow = "".join(f'<div class="fstep"><b>{a}</b><span>{b}</span></div>'
                    for i, (a, b) in enumerate([("Task", "a change request in product language"),
                                                ("Context builder", "one level, L0 to L8"),
@@ -700,20 +734,27 @@ def build_final(final: dict, off: dict) -> str:
 
   <section>
     <div class="eyebrow">Reference</div>
-    <h2>Against a commercial agent harness</h2>
-    <div class="callout">
-      <p class="prose">L-AG puts the same model inside Google's Antigravity, a full agent harness with its own prompt, tools
-      and loop, shell commands included. It passed {passed(lag_on)} of {len(lag_on)} with thinking on and {passed(lag_off)} of
-      {len(lag_off)} with thinking off. That's level with the best primitive agents here ({lag_l78} of 57), though it read far
-      more, a median {lag_in:.0f}k input tokens per run against {l8_in:.0f}k for L8.</p>
-      <p class="prose">Gemini 3.5 Flash-Lite, the cheapest model of Gemini's previous generation and the family Antigravity
-      was built around, ran the same harness on 10 of the hardest task cells. It passed all 10, against 9 of 10 for Qwen
-      in each round, and none of its 141 shell commands ran empty. It also read more, a median 734k input tokens per
-      run on those cells, against 483k for Qwen with thinking on.</p>
-      <p class="small">Two caveats apply. Antigravity was built around Gemini, and Qwen often named tool arguments its own
-      way, which left many shell commands empty (the Levels page has the numbers). L-AG also ran one sample per task, like
-      everything else. On these tasks and this model, the primitive agents matched a commercial harness.</p>
-    </div>
+    <h2>A commercial agent harness as the baseline</h2>
+    <p class="prose">L-AG served as a baseline of what a complete agent harness achieves on these tasks. It runs Google's
+    Antigravity, a commercial product with many thousands of hours of development behind it: its own system prompt, its
+    own tools, shell commands included, and its own loop. The primitive levels on this page are harnesses put together in
+    a few days for this experiment.</p>
+    <p class="prose">For the baseline, Antigravity was paired with Gemini 3.5 Flash-Lite, one of the cheapest Gemini models.
+    These 30 tasks are a simple test suite, well below the level at which frontier models are benchmarked today, so a
+    small, inexpensive model was enough to show what the harness itself contributes. The same harness also ran with Qwen
+    3.8 27B, the model under study everywhere else.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Harness + model</th><th class=r>PASS</th><th class=r>Shell commands that ran nothing</th><th class=r>Median input per run</th></tr></thead>
+      <tbody>{''.join(base_rows)}</tbody></table></div>
+    <p class="prose">The pairing of Antigravity and Gemini showed a high synergy. None of Gemini's {gem_n} shell commands ran empty, and
+    the pair passed {passed(gem)} of {len(gem)}, though it didn't reach every task: it missed {', '.join(gem_miss)}. Qwen in
+    the same harness often named tool arguments in its own style, which Antigravity ignores, so many of its commands ran
+    nothing (the Levels page has the details).</p>
+    <p class="prose">The primitive harnesses paired with a mid-size local model held their own. On these tasks, L8 with Qwen
+    passed {passed(by_cfg.get('L8', []))} of 57 and L7 selective {passed(by_cfg.get('L7 selective', []))}, on less input per
+    run than either Antigravity pairing.</p>
+    <p class="small">Wall-clock times can't be compared: Gemini ran on Google's hosted API, six runs at a time, while Qwen
+    ran on two local GPUs, two at a time. Every pairing ran one sample per task.</p>
   </section>
 
   <section>
