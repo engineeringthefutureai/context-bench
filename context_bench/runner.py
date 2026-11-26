@@ -40,7 +40,7 @@ from .apply import (UnsafePath, apply_files, changed_files, format_status, make_
 from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
 from .levels import LEVELS
 from .levels.l_ag_antigravity import (ModelQuotaError, percentiles as ag_percentiles, quota_detail as ag_quota_detail,
-                                     server_error as ag_server_error, quota_error as ag_quota_error, run_ag,
+                                     server_error as ag_server_error, container_error as ag_container_error, quota_error as ag_quota_error, run_ag,
                                      seen_text as ag_seen_text, user_prompt as ag_user_prompt)
 from .levels.l7_agentic import (FORMAT_RETRY, FORMAT_RETRY_EDIT, SEMANTIC_VARIANTS, RICH_VARIANTS, RepoTools, cacheable_prefix, run_agent,
                                 tool_schemas, turn_prompts)
@@ -309,7 +309,10 @@ class Experiment:
                     model_client()      # clean mode: the cache is made cold before the harness's first call
                 ag = run_ag(task, sandbox, base_url=url, model=model_cfg["model"], api=model_cfg.get("api", "openai"),
                             rpm=model_cfg.get("rpm", 0), tpm=model_cfg.get("tpm", 0),
-                            thinking=None if hosted else rc.thinking)
+                            thinking=None if hosted else rc.thinking,
+                            max_output_tokens=0 if hosted else max_out)
+                if ag_container_error(ag):    # the container gave no result (killed, failed to start): retried
+                    raise RuntimeError(f"L-AG: {(ag.error or '')[:200]}")
                 if ag_server_error(ag):   # the model server failed mid-run: the sweep retries it, nothing recorded
                     raise httpx.RemoteProtocolError(f"L-AG: model server error ({(ag.error or '')[:200]})")
                 if ag_quota_error(ag):    # the API's quota, not the agent: nothing is recorded, run it again later

@@ -335,3 +335,19 @@ def test_prompt_names_a_file_the_change_creates(tmp_path):
     (tmp_path / "shopkit/utils").mkdir(parents=True)
     (tmp_path / "shopkit/utils/units.py").write_text("")
     assert "File:" not in ag.user_prompt(t, tmp_path)
+
+
+def test_proxy_caps_the_output_tokens(monkeypatch):
+    monkeypatch.setenv("L_AG_PROXY_MAX_TOKENS", "32768")
+    spec = importlib.util.spec_from_file_location("l_ag_proxy5", ROOT / "docker" / "l-ag" / "model_proxy.py")
+    proxy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(proxy)
+    body = json.dumps({"model": "q", "messages": [], "max_completion_tokens": 65535}).encode()
+    assert json.loads(proxy.apply_thinking(body, "")[0])["max_completion_tokens"] == 32768
+    small = json.dumps({"model": "q", "messages": [], "max_completion_tokens": 1000}).encode()
+    assert proxy.apply_thinking(small, "")[0] == small                     # under the cap: forwarded as sent
+
+
+def test_container_errors_are_not_results():
+    assert ag.container_error(ag.AgRun(finish_reason="error", error="no result from the container (exit 137): ..."))
+    assert not ag.container_error(ag.AgRun(finish_reason="error", error="AntigravityExecutionError: boom"))

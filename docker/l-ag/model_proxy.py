@@ -14,6 +14,8 @@ request (the harness's OpenAI client has no thinking setting); unset forwards re
 itself asked for (its top-level keys and any thinking fields) is logged with each call.
 L_AG_PROXY_CAPTURE: a file for the first model request's body, written once (to measure the harness's system prompt
 and tool definitions); unset by default.
+L_AG_PROXY_MAX_TOKENS: caps max_completion_tokens / max_tokens of chat requests (the harness asks for 65,535,
+which leaves a 98k window ~32.8k for the prompt); 0 or unset: as sent.
 L_AG_PROXY_USAGE: a file for one JSON line per model call: status, request size, throttle wait, latency and the
 token usage the API reported (prompt, cached, output, thinking). On the proxy's own mount, not the agent's.
 
@@ -107,6 +109,7 @@ def log_call(record: dict) -> None:
     with _log_lock, open(USAGE_LOG, "a") as f:
         f.write(json.dumps(record) + "\n")
 THINKING = os.environ.get("L_AG_PROXY_THINKING", "")    # "on" / "off": set on OpenAI-compatible chat requests; "" = as sent
+MAX_TOKENS = int(os.environ.get("L_AG_PROXY_MAX_TOKENS") or 0)   # cap on the output tokens a chat request asks for; 0 = as sent
 
 
 def apply_thinking(body: bytes, thinking: str = THINKING) -> tuple[bytes, dict]:
@@ -123,10 +126,17 @@ def apply_thinking(body: bytes, thinking: str = THINKING) -> tuple[bytes, dict]:
     for k in ("chat_template_kwargs", "reasoning_effort", "thinking"):
         if k in doc:
             seen[k] = doc[k]
-    if thinking not in ("on", "off"):
-        return body, seen
-    doc["chat_template_kwargs"] = {**(doc.get("chat_template_kwargs") or {}), "enable_thinking": thinking == "on"}
-    return json.dumps(doc).encode(), seen
+    changed = False
+    # The harness asks for 65,535 output tokens on every call; with a 98k window that rejects any prompt over ~32.8k.
+    # Cap it at the experiment's max_output_tokens (the limit every other level runs with).
+    for k in ("max_completion_tokens", "max_tokens"):
+        if MAX_TOKENS and isinstance(doc.get(k), int) and doc[k] > MAX_TOKENS:
+            doc[k] = MAX_TOKENS
+            changed = True
+    if thinking in ("on", "off"):
+        doc["chat_template_kwargs"] = {**(doc.get("chat_template_kwargs") or {}), "enable_thinking": thinking == "on"}
+        changed = True
+    return (json.dumps(doc).encode() if changed else body), seen
 
 
 DROP = {"connection", "keep-alive", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",

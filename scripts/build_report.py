@@ -152,8 +152,8 @@ def penalty_section(rows: list[dict], title: str) -> str:
     <p class="prose">The hidden tests decide PASS or FAIL, and the judge never changes that. For each passing
     patch, a blind judge (agy) looks for defects the tests wouldn't catch, using only the codes below, and has to
     quote a changed line of the patch for each one. The harness keeps a penalty only if that quote really is a
-    changed line. Points range from 0 (nothing found) to the cap of -40, and they say how good a pass is, not
-    whether it passed. Failing runs aren't graded.</p>
+    changed line. Points range from 0 (nothing found) to the cap of -40. They rate how clean a passing patch is, and
+    PASS or FAIL still comes from the tests alone. Failing runs aren't graded.</p>
     <div class="table-wrap"><table>
       <thead><tr><th>Code</th><th>Defect</th><th class=r>Points</th></tr></thead>
       <tbody>{catalogue}</tbody></table></div>
@@ -275,8 +275,8 @@ def build_progress(final: dict, off: dict) -> str:
     <div class="eyebrow">Round in progress · preview</div>
     <h1>How context building affects generated code</h1>
     <p class="lede">The same model gets the same coding tasks, and only the way the harness builds its context
-    varies, with deliberately simple builders. Each level is one primitive component of a coding harness, not a
-    complete agentic harness. What this page shows is how much even a primitive implementation moves the results.</p>
+    varies, with deliberately simple builders. Each level is one primitive component of a coding harness, and none
+    of them is a complete agentic harness. This page shows how much even such a primitive implementation moves the results.</p>
     <p class="small">The current round is still running, and this page shows what the harness has recorded so far. The
     full write-up will follow when the thinking-on round is finished (clean-mode cost and latency figures are
     reported separately). The runs can be browsed in the raw-data viewer.</p>
@@ -461,9 +461,9 @@ def build() -> str:
     <h1>How context building affects generated code</h1>
     <p class="lede">The same model gets the same coding tasks, and the harness builds its context in eight deliberately
     simple ways, from no repository at all to a minimal agent loop in which the model explores the repository with tools.
-    Each level is one primitive component of a coding harness, nowhere near a complete agentic harness, and the page
-    shows how much even that moves the results. {n_all} final-round runs, all with thinking on, a cold prefix cache before
-    every run and one sample per configuration.</p>
+    Each level is one primitive component of a coding harness, and none of them comes close to a complete agentic
+    harness. The page shows how much even that moves the results. The final round has {n_all} runs, all with thinking on,
+    a cold prefix cache before every run and one sample per configuration.</p>
     <div class="meta"><span>Qwen 3.8 27B FP8 on vLLM</span><span>20 tasks on repos S and M</span><span>compared with a thinking-off round of the same configurations</span></div>
   </header>
 
@@ -489,7 +489,7 @@ def build() -> str:
     <p class="small">Reuse: reuse tasks in which the hidden spy saw the new code call the needed helper. Repo tests
     kept: passing runs whose patch also keeps the repository's own test suite green. Judge rank: mean share
     of the other candidate patches the blind judge ranked above this configuration's patches (0 = always ranked
-    best, so lower is better). Input, output, seconds:
+    best, so lower is better). Input, output and seconds are
     medians per run.</p>
   </section>
 
@@ -563,8 +563,8 @@ def build() -> str:
       <thead><tr><th>Level</th><th class=r>Input / run</th><th class=r>Cached / run</th><th class=r>Output / run</th>
       <th class=r>Tokens per PASS</th>{''.join(f'<th class=r>$ per 100 PASS, {e(n)}</th>' for n in PRICES)}</tr></thead>
       <tbody>{''.join(cost_rows)}</tbody></table></div>
-    <p class="small">Illustrative prices, not quotes: {e(price_note)}. Cached input is counted at the full price here;
-    with prompt caching, the agent's repeated prefixes would cost less (the "cached" column).</p>
+    <p class="small">The prices only give a sense of scale, and no provider quoted them: {e(price_note)}. Cached input is
+    counted at the full price here. With prompt caching, the agent's repeated prefixes would cost less (the "cached" column).</p>
   </section>
 
   <section>
@@ -620,7 +620,7 @@ def build() -> str:
       <div class="card"><h4>Out of tokens while thinking</h4><p class="small">With no context at all, the model kept reasoning
       until it hit the 32k output limit and never wrote the code.</p>{link(oot['run_id'], level_label(oot) + ' · ' + oot['task_id']) if oot else ''}</div>
       <div class="card"><h4>The model used dead code</h4><p class="small">The patch imports the old, unused <code>common/</code> package (named
-      like the canonical place). {len(dead)} final-round runs.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in dead[:2])}</div>
+      like the canonical place). That happened in {len(dead)} final-round runs.</p>{''.join('<br>' + link(r['run_id'], level_label(r) + ' · ' + r['task_id']) for r in dead[:2])}</div>
     </div>
   </section>
 
@@ -632,7 +632,7 @@ def build() -> str:
       1 run in 5, roughly ±3 per 13 runs of a configuration, so small differences between configurations are noise.</li>
       <li>The context builders are deliberately simple: each level is one primitive component, far from a production
       harness, with no planning, no test loop and no memory between tasks. Products combine and tune many such parts,
-      so these results show the effect of a context strategy, not a ranking of products.</li>
+      so these results show what a context strategy does on its own. They don't rank products.</li>
       <li>The tasks use one synthetic repository in two sizes, written for the experiment, and real repositories are messier. Repo L, larger
       and older, will be added next.</li>
       <li>There is only one trap task, and the judge is an LLM too, so although its scores agree with the tests, it may share the model's blind spots.</li>
@@ -645,7 +645,7 @@ def build() -> str:
     <div class="next-pages">
       <a href="method"><b>Method</b><span>The levels, the rules that keep the comparison fair, labels and grading.</span></a>
       <a href="tasks"><b>Tasks</b><span>Every task with its text, hidden tests and reference solution.</span></a>
-      <a href="data"><b>Raw data</b><span>Every run: prompt by part, thinking, answer, patch and test output, side by side.</span></a>
+      <a href="data"><b>Raw data</b><span>Every run opens with its prompt split into parts, the thinking, the answer, the patch and the test output, and two runs can sit side by side.</span></a>
       <a href="guide"><b>Running the experiment</b><span>An OpenAI-compatible API, and optionally an embedder, is all it takes.</span></a>
     </div>
   </section>

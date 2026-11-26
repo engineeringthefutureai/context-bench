@@ -117,7 +117,7 @@ def proxy_env(api: str, base_url: str) -> dict[str, str]:
 
 
 def run_ag(task: Task, sandbox: Path, *, base_url: str, model: str, api: str = "openai", rpm: float = 0, tpm: float = 0,
-           thinking: bool | None = None,
+           thinking: bool | None = None, max_output_tokens: int = 0,
            max_model_calls: int = MAX_MODEL_CALLS, timeout_s: float = TIMEOUT_S) -> AgRun:
     """One Antigravity session in the l-ag container on the repository copy at `sandbox` (changed in place).
     Each run is its own compose project (the agent and its model proxy), taken down afterwards. api: "openai"
@@ -135,6 +135,7 @@ def run_ag(task: Task, sandbox: Path, *, base_url: str, model: str, api: str = "
                "L_AG_MODEL": model, **proxy_env(api, base_url), "L_AG_PROXY_RPM": str(rpm or 0),
                "L_AG_PROXY_TPM": str(tpm or 0),
                "L_AG_PROXY_THINKING": "" if thinking is None else ("on" if thinking else "off"),
+               "L_AG_PROXY_MAX_TOKENS": str(max_output_tokens or 0),
                "L_AG_MAX_MODEL_CALLS": str(max_model_calls), "L_AG_TIMEOUT_S": str(timeout_s),
                "L_AG_COMMAND_TIMEOUT_S": str(COMMAND_TIMEOUT_S),
                "L_AG_UID": str(os.getuid()), "L_AG_GID": str(os.getgid())}
@@ -208,6 +209,11 @@ def quota_error(run: AgRun) -> bool:
 
 SERVER_MARKERS = ("connection refused", "Connection refused", "connection reset", "EOF", "502", "503",
                   "Bad Gateway", "Service Unavailable", "model API unreachable", "RemoteDisconnected")
+
+
+def container_error(run: AgRun) -> bool:
+    """The container produced no result (killed, failed to start): not a result, the run is retried."""
+    return run.finish_reason == "error" and (run.error or "").startswith(("no result from the container", "container killed"))
 
 
 def server_error(run: AgRun) -> bool:

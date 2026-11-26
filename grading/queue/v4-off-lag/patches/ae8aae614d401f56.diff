@@ -1,0 +1,48 @@
+--- a/shopkit/orders/returns.py
++++ b/shopkit/orders/returns.py
+@@ -1,13 +1,16 @@
+ """Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+ from dataclasses import dataclass, field
+ from datetime import date, timedelta
++from decimal import Decimal
+ 
+ from shopkit.errors import Conflict, ShopError
+ from shopkit.orders.models import Order
+ from shopkit.utils.ids import short_code
++from shopkit.utils.numbers import apply_rate
+ 
+ RETURN_WINDOW_DAYS = 30
+ REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
++RESTOCKING_FEE_PCT = Decimal("12.5")
+ 
+ 
+ class ReturnNotAllowed(Conflict):
+@@ -30,6 +33,12 @@
+         prices = {line.sku: line.unit_cents for line in order.lines}
+         return sum(prices[sku] * qty for sku, qty in self.items.items())
+ 
++    def restocking_fee_cents(self, order: Order) -> int:
++        """12.5% of the refund for changed-mind returns, 0 for every other reason."""
++        if self.reason != "changed_mind":
++            return 0
++        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
++
+ 
+ def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                 today: date) -> ReturnRequest:
+--- a/tests/test_returns.py
++++ b/tests/test_returns.py
+@@ -24,3 +24,13 @@
+         open_return(ORDER, date(2026, 9, 1), {"A": 1}, "damaged", today=date(2026, 11, 10))
+     with pytest.raises(InvalidReturn):
+         open_return(ORDER, date(2026, 11, 1), {"A": 3}, "damaged", today=date(2026, 11, 2))
++
++
++def test_restocking_fee():
++    # 12.5% of $25.00 = $3.125 -> rounded half-up to 313 cents
++    r = open_return(ORDER, date(2026, 11, 1), {"A": 2, "B": 1}, "changed_mind", today=date(2026, 11, 2))
++    assert r.refund_cents(ORDER) == 2500
++    assert r.restocking_fee_cents(ORDER) == 313
++    # no restocking fee for other reasons
++    d = open_return(ORDER, date(2026, 11, 1), {"A": 1}, "damaged", today=date(2026, 11, 2))
++    assert d.restocking_fee_cents(ORDER) == 0
