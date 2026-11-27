@@ -19,7 +19,42 @@
   const roundName = (rd) => ROUND_NAME[rd] || rd;
   const QWEN = new Set(["final", "nothink"]);
   const inRound = (r) => !state.round || r.round === state.round || (state.round === "all" && QWEN.has(r.round));
+  // ---------- loading indicator ----------
+  // A status line over a slim bar. The bar fills when the response's size is known (no compression); behind gzip
+  // the server's Content-Length is the compressed size, so the bar slides and the line counts what has arrived.
+  const loader = (label) => `<div class="loading" role="status" aria-live="polite"><span class="loading-text">${esc(label)}</span>`
+    + `<span class="loading-bar"><i></i></span></div>`;
+  const mb = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} kB`);
+  function progressTo(box, label) {
+    return (got, total) => {
+      const el = box && box.querySelector(".loading");
+      if (!el) return;
+      el.querySelector(".loading-text").textContent = `${label} ${total ? `${Math.round(100 * got / total)}%` : mb(got)}`;
+      if (total) { el.querySelector(".loading-bar").classList.add("det"); el.querySelector(".loading-bar i").style.width = `${Math.min(100, 100 * got / total)}%`; }
+    };
+  }
+  async function fetchJSON(url, onProgress) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+    if (!onProgress || !r.body || !window.TextDecoder) return r.json();
+    const enc = (r.headers.get("content-encoding") || "identity").toLowerCase();
+    const total = enc === "identity" ? Number(r.headers.get("content-length")) || 0 : 0;
+    const reader = r.body.getReader(), parts = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      got += value.length;
+      onProgress(got, total);
+    }
+    const buf = new Uint8Array(got);
+    let at = 0;
+    for (const p of parts) { buf.set(p, at); at += p.length; }
+    return JSON.parse(new TextDecoder().decode(buf));
+  }
   const cache = new Map();
+  let paneTicket = 0;       // the latest pane render; a slower earlier fetch must not overwrite it
   let runs = [], byId = new Map(), tasks = new Map(), sortKey = "task_id", sortDir = 1;
 
   // ---------- state ----------
@@ -188,8 +223,12 @@
   }
 
   // ---------- one run ----------
-  async function load(id) {
-    if (!cache.has(id)) cache.set(id, fetch(`raw/runs/${id}.json`).then((r) => r.json()));
+  async function load(id, onProgress) {
+    if (!cache.has(id)) {
+      const p = fetchJSON(`raw/runs/${id}.json`, onProgress);
+      cache.set(id, p);
+      p.catch(() => cache.delete(id));    // a failed fetch is retried the next time the run is opened
+    }
     return cache.get(id);
   }
 
@@ -556,7 +595,22 @@
       $("#twin-wrap").innerHTML = "";
       return;
     }
-    const [a, b] = await Promise.all([load(state.a), state.b ? load(state.b) : null]);
+    const ticket = ++paneTicket;
+    const ids = [state.a, state.b].filter(Boolean);
+    const pending = ids.filter((id) => !cache.has(id));
+    if (pending.length) {
+      el.className = "panes";
+      el.innerHTML = loader(pending.length > 1 ? "Loading both runs…" : "Loading the run…");
+    }
+    const progress = progressTo(el, pending.length > 1 ? "Loading both runs…" : "Loading the run…");
+    let a, b;
+    try {
+      [a, b] = await Promise.all([load(state.a, progress), state.b ? load(state.b, progress) : null]);
+    } catch (e) {
+      if (ticket === paneTicket) el.innerHTML = `<p class="empty">The run couldn't be loaded: ${esc(e.message)}. Opening it again retries.</p>`;
+      return;
+    }
+    if (ticket !== paneTicket) return;      // another run was opened meanwhile
     $("#twin-wrap").innerHTML = twinOptions(a);
     el.className = b ? "panes two" : "panes";
     el.innerHTML = paneHTML(a, "a") + (b ? paneHTML(b, "b") : "");
@@ -602,8 +656,9 @@
   async function init() {
     readHash();
     $("#legend").innerHTML = Object.entries(KINDS).map(([k, t]) => `<span class="k-${k}"><i></i>${t}</span>`).join("");
-    [runs] = await Promise.all([fetch("raw/index.json").then((r) => r.json()),
-      fetch("raw/tasks.json").then((r) => r.json()).then((ts) => { tasks = new Map(ts.map((x) => [x.id, x])); }).catch(() => {})]);
+    $("#runs").innerHTML = loader("Loading the run index…");
+    [runs] = await Promise.all([fetchJSON("raw/index.json", progressTo($("#runs"), "Loading the run index…")),
+      fetchJSON("raw/tasks.json").then((ts) => { tasks = new Map(ts.map((x) => [x.id, x])); }).catch(() => {})]);
     byId = new Map(runs.map((r) => [r.run_id, r]));
     if (state.a && !byId.has(state.a)) state.a = null;
     if (state.b && !byId.has(state.b)) state.b = null;
@@ -611,5 +666,8 @@
     wire();
     render();
   }
-  init().catch((e) => { $("#panes").innerHTML = `<p class="empty">The data couldn't be loaded: ${esc(e.message)}</p>`; });
+  init().catch((e) => {
+    $("#runs").innerHTML = "";
+    $("#panes").innerHTML = `<p class="empty">The data couldn't be loaded: ${esc(e.message)}. Reloading the page retries.</p>`;
+  });
 })();

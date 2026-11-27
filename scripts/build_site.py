@@ -543,7 +543,8 @@ def main() -> int:
     for r in rows:
         p = run_payload(r)
         (OUT / "runs" / f"{r['run_id']}.json").write_text(json.dumps(p, separators=(",", ":")))
-        index.append(p["meta"])
+        # the viewer's index row: the run's meta without the per-test list (the run's own file carries it)
+        index.append({k: v for k, v in p["meta"].items() if k != "known_tests_broken"})
     index.sort(key=lambda m: (m["task_id"], m["level_label"], m["repo_size"], m["round"]))
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
     (OUT / "tasks.json").write_text(json.dumps(tasks_payload(), separators=(",", ":")))

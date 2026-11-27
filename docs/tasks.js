@@ -6,6 +6,8 @@
   const diff = (t) => esc(t).split("\n").map((l) => l.startsWith("@@") ? `<span class="hunk">${l}</span>` : l.startsWith("+") ? `<span class="add">${l}</span>` : l.startsWith("-") ? `<span class="del">${l}</span>` : l).join("\n");
   const SOL = { reference: "Reference solution (passes)", context_blind: "Written without the repository (fails)", trusting: "Trusts the docs (fails)" };
   let tasks = [];
+  const loader = (label) => `<div class="loading" role="status" aria-live="polite"><span class="loading-text">${esc(label)}</span>`
+    + `<span class="loading-bar"><i></i></span></div>`;
   // A task prompt as flowing paragraphs: the line breaks of the task file's hard wrapping are joined, blank lines
   // between paragraphs kept, so the text fills its box at any width.
   const reflow = (text) => String(text).trim().split(/\n\s*\n/).map((p) => p.replace(/\s*\n\s*/g, " ")).join("\n\n");
@@ -34,7 +36,8 @@
     $("#task-list").innerHTML = list.map(card).join("");
   }
 
-  fetch("raw/tasks.json").then((r) => r.json()).then((d) => {
+  $("#task-list").innerHTML = loader("Loading the tasks…");
+  fetch("raw/tasks.json").then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }).then((d) => {
     tasks = d;
     $("#t-cat").innerHTML += [...new Set(d.map((t) => t.category))].sort().map((c) => `<option>${esc(c)}</option>`).join("");
     $("#t-cat").addEventListener("change", render);
@@ -47,5 +50,7 @@
     };
     toHash();
     window.addEventListener("hashchange", toHash);
+  }).catch((e) => {
+    $("#task-list").innerHTML = `<p class="empty">The tasks couldn't be loaded: ${esc(e.message)}. Reloading the page retries.</p>`;
   });
 })();
