@@ -1,0 +1,119 @@
+I need to create the file `shopkit/utils/units.py` with a `parse_weight` function. Let me trace through the requirements:
+
+- Input: number (int or decimal with "."), optional whitespace, unit (g/kg/lb/oz), case-insensitive
+- Leading/trailing whitespace ignored
+- 1 lb = 453.59237 g, 1 oz = 28.349523125 g
+- Round to nearest gram
+- Raise ValueError for: missing number, missing/unknown unit, negative values, "," as decimal separator
+
+Let me consider edge cases:
+- "1.5 kg" -> 1500
+- "2 lb" -> round(2 * 453.59237) = 907 (907.18474 rounds to 907)
+- "8 oz" -> 8 * 28.349523125 = 226.796... -> 227
+- "  5g  " -> 5
+- "5,5 kg" -> ValueError (comma as decimal separator)
+- "-3 kg" -> ValueError (negative)
+- "kg" -> ValueError (missing number)
+- "5" -> ValueError (missing unit)
+- "5 st" -> ValueError (unknown unit)
+
+I need to be careful with the regex. The number must be an integer or a decimal using ".". The comma must be rejected — but note that a comma appearing where a number or unit should be will naturally fail the regex match, which is the cleanest way to reject it. I'll use a strict fullmatch so anything not exactly `number optional-whitespace unit` fails.
+
+Negative values: I'll reject a leading `-` or `+`. Actually, should I allow a leading `+`? The task says "negative values" raise, and doesn't mention `+`. A `+` sign would make the number malformed per the spec (integer or decimal using "."), so rejecting `+` is consistent. I'll only allow digits and a single decimal point.
+
+For rounding: "round to the nearest gram". I should use `round()` which does banker's rounding in Python. To be safe about "nearest", standard rounding is fine; the test cases given are unambiguous. I'll use `round()` on the float result. Actually, to be precise about half-up behavior, but the spec just says "nearest gram". Let me use `round()`. Given exact conversion factors, exact .5 boundaries are unlikely in tests. I'll go with `round`.
+
+Let me write it carefully with a regex using fullmatch and a named/capturing approach.
+
+I'll parse:
+```
+pattern = r"^\s*(\d+(?:\.\d+)?)\s*(g|kg|lb|oz)\s*$" with re.IGNORECASE
+```
+Then fullmatch. Then compute.
+
+Let me verify "5,5 kg": the number part `\d+(?:\.\d+)?` matches "5", then `\s*` matches "", then unit must match "kg" but next char is "," -> fails. Good. fullmatch fails -> ValueError.
+
+Let me make sure fullmatch with the pattern anchors works. I'll use `re.fullmatch`.
+
+Now I should double check: what about something like "1.2.3 kg"? `\d+(?:\.\d+)?` matches "1.2", then needs `\s*(unit)` but next is "." -> fails. Good.
+
+What about ".5 kg" (no leading digit)? The spec says "an integer or a decimal using '.' as separator". ".5" — is that a decimal? Ambiguous. My regex requires a leading digit before the decimal point, so ".5 kg" would fail. That's a reasonable strict interpretation. I'll keep requiring at least one digit. This is the most consistent with "a number (an integer or a decimal)". Most people would type "0.5". I'll keep it strict.
+
+Let me finalize.
+
+The conversions:
+- g: *1
+- kg: *1000
+- lb: *453.59237
+- oz: *28.349523125
+
+```python
+"""Unit conversion for package weights typed in by warehouse staff."""
+import re
+
+_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*(g|kg|lb|oz)", re.IGNORECASE)
+
+_TO_GRAMS = {"g": 1.0, "kg": 1000.0, "lb": 453.59237, "oz": 28.349523125}
+
+
+def parse_weight(text: str) -> int:
+    """Whole-gram weight from staff-typed text like "1.5 kg", "2 lb" or "8 oz".
+
+    The unit may be g, kg, lb or oz (case-insensitive); whitespace around the value and
+    between the number and unit is ignored. Rounds to the nearest gram.
+    Raises ValueError for a missing number or unit, an unknown unit, a "," decimal
+    separator or a negative value."""
+    if not isinstance(text, str):
+        raise ValueError(f"expected a weight string, got {type(text).__name__}")
+    m = _PATTERN.fullmatch(text.strip())
+    if m is None:
+        raise ValueError(f"invalid weight {text!r}")
+    value, unit = float(m.group(1)), m.group(2).lower()
+    return round(value * _TO_GRAMS[unit])
+```
+
+Wait, `text.strip()` then fullmatch — but the pattern has no anchors and I'm using fullmatch which implies anchors over the whole string. Good. The `\s*` inside handles the gap between number and unit. But after strip, leading/trailing whitespace is already gone, so that's fine.
+
+Actually, since I strip, the internal `\s*` handles the space between number and unit. But what about whitespace between the number and unit like "5 kg"? After strip "5 kg", fullmatch: `\d+(?:\.\d+)?` -> "5", `\s*` -> " ", `(g|kg|lb|oz)` -> "kg". 
+
+One concern: the alternation order. In regex alternation, `g|kg` — for input "kg", at the position, `g` fails (k is not g... wait "kg", first char is 'k', `g` doesn't match 'k'), then `kg` matches. For input "g", `g` matches first. Good. For "lb", `lb`. For "oz". All fine.
+
+Let me double check negative: "-3 kg" -> after strip "-3 kg", fullmatch fails because `-` is not `\d`. ValueError. Good.
+
+Check the `isinstance` check — the signature says `text: str`. It's reasonable to validate. But maybe tests pass non-str? Unlikely. The check is safe and aligns with "validate untrusted input". However, if a test passes something like bytes, it'd raise ValueError which is appropriate. I'll keep it but it's a minor addition. Actually, to keep it minimal and avoid surprising behavior, I'll keep the isinstance guard since "fail clearly on invalid input" is a stated value.
+
+Let me finalize and verify a couple computations:
+- "2 lb" = 2 * 453.59237 = 907.18474 -> round -> 907
+- "8 oz" = 226.796185 -> 227
+- "1.5 kg" = 1500
+- "5 g" = 5
+
+Good. The file is new.
+
+<file path="shopkit/utils/units.py">
+"""Unit conversion for package weights typed in by warehouse staff."""
+import re
+
+# A whole number or a decimal ("." only), optional whitespace, then the unit.
+# fullmatch over the stripped input rejects anything else, including "," decimals,
+# a missing number or unit and an unknown unit.
+_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*(g|kg|lb|oz)", re.IGNORECASE)
+
+_TO_GRAMS = {"g": 1.0, "kg": 1000.0, "lb": 453.59237, "oz": 28.349523125}
+
+
+def parse_weight(text: str) -> int:
+    """Whole-gram weight from staff-typed text like "1.5 kg", "2 lb" or "8 oz".
+
+    The unit may be g, kg, lb or oz (case-insensitive); whitespace around the value and
+    between the number and unit is ignored. The result is rounded to the nearest gram.
+    Raises ValueError for a missing number or unit, an unknown unit, a "," as the decimal
+    separator and negative values."""
+    if not isinstance(text, str):
+        raise ValueError(f"expected a weight string, got {type(text).__name__}")
+    match = _PATTERN.fullmatch(text.strip())
+    if match is None:
+        raise ValueError(f"invalid weight {text!r}")
+    value, unit = float(match.group(1)), match.group(2).lower()
+    return round(value * _TO_GRAMS[unit])
+</file>

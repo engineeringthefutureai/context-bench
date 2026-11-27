@@ -1,0 +1,129 @@
+Let me carefully read the change request.
+
+The request: when a customer adds the same product twice, the order should show one line instead of two. Add `Order.add_line(sku, qty, unit_cents)` that returns the order line it touched. If the order already has a line with the same SKU and same unit price, increase that line's quantity, otherwise add a new line.
+
+Target file: shopkit/orders/models.py
+
+Current file:
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+```
+
+I need to add an `add_line` method to `Order`:
+
+```python
+def add_line(self, sku: str, qty: int, unit_cents: int) -> OrderLine:
+    """Add `qty` units of `sku` at `unit_cents` each.
+
+    Merges with an existing line for the same SKU and unit price, so adding
+    the same product twice shows as one line.
+    """
+    for line in self.lines:
+        if line.sku == sku and line.unit_cents == unit_cents:
+            line.qty += qty
+            return line
+    line = OrderLine(sku=sku, qty=qty, unit_cents=unit_cents)
+    self.lines.append(line)
+    return line
+```
+
+Considerations:
+- The line dataclass is mutable (not frozen), so `line.qty += qty` works.
+- Return the touched line (either the merged one or the new one).
+- Matching condition: same SKU AND same unit price. If same SKU but different unit price, add a new line (which preserves the ability to order the same SKU at different prices, e.g. different variants or prices).
+- Edge cases: qty could be zero or negative? The request doesn't specify validation. Codebase style: OrderLine has no validation; checkout raises NotPurchasable etc. The change request is simple and says "increase that line's quantity; otherwise add a new line." I shouldn't add validation not asked for — keep the change small. But should I consider qty=0 merging: if a line with qty 0 exists and you add 0, it merges and returns the line. That's fine and consistent with the spec.
+
+Wait — one subtle point: what if the existing line's qty is 0 (e.g. after a full refund)? The spec says "if the order already has a line with the same SKU and same unit price, increase that line's quantity." So even with qty 0 we merge. Keep it simple and follow the spec literally.
+
+- Naming and style: the file is minimal, with property `total_cents`. The method fits. Docstring: keep it concise and match the style of other modules (short first line in docstring). Other docstrings in the codebase are one line or two.
+
+Should I use `sum` style? Not needed.
+
+Also check: does anything else in the codebase rely on `Order` having no methods other than total_cents? Adding a method is additive, no problem.
+
+Type annotations: `def add_line(self, sku: str, qty: int, unit_cents: int) -> OrderLine:`.
+
+Placement: after `total_cents` property, or before? Either works. I'll put it after the property.
+
+One more consideration: should I use list comprehension find, or a loop. A loop is clearest.
+
+Let me double-check for any other `Order` class` in the repo... There's `shopkit/common/OrderManager.py`, which is a different legacy system (dict-based, `createOrder`, `addItem`). The target file is explicitly shopkit/orders/models.py, and it's used by checkout, subscriptions, returns, etc. The task says to add to `Order` in the target file. Good.
+
+Also check `shopkit/orders/subscriptions.py` `generate_order` — creates Order with lines directly; not affected.
+
+`shopkit/promotions/rules.py` `BuyXGetY.discount(self, order: Order)` — probably sums qty per SKU across lines. Not affected by the new method.
+
+Final file:
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+
+    def add_line(self, sku: str, qty: int, unit_cents: int) -> OrderLine:
+        """Add `qty` units of `sku` to the order.
+
+        Merges into an existing line with the same SKU and unit price so the
+        same product shows once; returns the line it touched.
+        """
+        for line in self.lines:
+            if line.sku == sku and line.unit_cents == unit_cents:
+                line.qty += qty
+                return line
+        line = OrderLine(sku=sku, qty=qty, unit_cents=unit_cents)
+        self.lines.append(line)
+        return line
+```
+
+Trace:
+1. Empty order, add_line("A", 2, 1000): no lines → new line, appended, returned. total_cents = 2000. ✓
+2. add_line("A", 1, 1000): finds line with sku A, unit 1000 → qty 3, returns that line. total 3000. One line. ✓
+3. add_line("A", 1, 1200): sku matches but unit price differs → new line appended. Two lines. ✓ (preserves different pricing)
+4. add_line("B", 5, 99): new line. ✓
+5. Returned line is the actual object in self.lines (either the mutated existing one or the appended one) — "the order line it touched." ✓
+
+No new imports needed. Style consistent.
+
+Output format: only the file block, nothing else.

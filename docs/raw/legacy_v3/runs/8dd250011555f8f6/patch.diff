@@ -1,0 +1,179 @@
+--- a/shopkit/catalog/models.py
++++ b/shopkit/catalog/models.py
+@@ -7,6 +7,7 @@
+     title: str
+     price_cents: int
+     active: bool = True
++    weight_g: int = 0  # grams per unit
+ 
+     def is_purchasable(self) -> bool:
+         return self.active and self.price_cents > 0
+--- /dev/null
++++ b/shopkit/fulfillment.py
+@@ -0,0 +1,166 @@
++"""Fulfillment helpers for parcel calculations."""
++
++from collections.abc import Mapping
++
++__all__ = ["parcel_weight_g"]
++
++_SKU_KEYS = ("sku", "product_sku", "code", "id")
++_QUANTITY_KEYS = ("quantity", "qty", "units", "count", "amount", "number")
++_PARCEL_CONTAINER_ATTRS = ("lines", "items", "contents", "products")
++
++
++def parcel_weight_g(parcel, products) -> int:
++    """Return the total shipping weight, in grams, of a parcel's contents.
++
++    `products` maps SKU to the corresponding Product. `parcel` may be a mapping
++    from SKU to quantity, an iterable of SKUs or line items, or an object that
++    exposes its line items through a common collection attribute.
++    """
++    total_g = 0
++    for sku, quantity in _iter_parcel_lines(parcel):
++        quantity = _coerce_quantity(quantity)
++        total_g += quantity * products[sku].weight_g
++    return total_g
++
++
++def _iter_parcel_lines(parcel):
++    if parcel is None:
++        return
++    if isinstance(parcel, str):
++        yield parcel, 1
++        return
++
++    lines = _find_lines(parcel)
++    if isinstance(lines, Mapping):
++        for sku, quantity in lines.items():
++            yield sku, _quantity_from_mapping_value(quantity)
++        return
++
++    for line in lines:
++        yield _line_sku(line), _line_quantity(line)
++
++
++def _find_lines(parcel):
++    if isinstance(parcel, Mapping):
++        return parcel
++
++    for attr in _PARCEL_CONTAINER_ATTRS:
++        value = getattr(parcel, attr, None)
++        if value is None:
++            continue
++
++        if callable(value):
++            try:
++                value = value()
++            except TypeError:
++                continue
++            if value is None:
++                continue
++
++        return value
++
++    return parcel
++
++
++def _line_sku(line):
++    if isinstance(line, str):
++        return line
++    if isinstance(line, (int, float)) and not isinstance(line, bool):
++        return line
++
++    if isinstance(line, Mapping):
++        for key in _SKU_KEYS:
++            if key in line:
++                return _sku_from_value(line[key])
++        return _sku_from_value(line.get("product"))
++
++    if isinstance(line, (list, tuple)):
++        if not line:
++            raise ValueError("parcel line does not identify a SKU")
++        return _sku_from_value(line[0])
++
++    for attr in _SKU_KEYS:
++        value = getattr(line, attr, None)
++        if value is not None and not callable(value):
++            return _sku_from_value(value)
++
++    return _sku_from_value(getattr(line, "product", None))
++
++
++def _sku_from_value(value):
++    if value is None:
++        raise ValueError("parcel line does not identify a SKU")
++    if isinstance(value, str):
++        return value
++    if isinstance(value, bool):
++        raise ValueError("parcel line does not identify a SKU")
++
++    if isinstance(value, Mapping):
++        for key in _SKU_KEYS:
++            if key in value:
++                return value[key]
++
++    for attr in _SKU_KEYS:
++        attr_value = getattr(value, attr, None)
++        if attr_value is not None and not callable(attr_value):
++            return attr_value
++
++    if isinstance(value, (list, tuple, set, dict, frozenset)):
++        raise ValueError("parcel line does not identify a SKU")
++
++    return value
++
++
++def _line_quantity(line):
++    if isinstance(line, str):
++        return 1
++
++    if isinstance(line, Mapping):
++        for key in _QUANTITY_KEYS:
++            if key in line:
++                return line[key]
++        return 1
++
++    if isinstance(line, (list, tuple)):
++        if len(line) >= 2:
++            return line[1]
++        return 1
++
++    for attr in _QUANTITY_KEYS:
++        value = getattr(line, attr, None)
++        if value is not None and not callable(value):
++            return value
++
++    return 1
++
++
++def _quantity_from_mapping_value(value):
++    try:
++        return _coerce_quantity(value)
++    except ValueError:
++        if isinstance(value, Mapping):
++            for key in _QUANTITY_KEYS:
++                if key in value:
++                    return _coerce_quantity(value[key])
++            return 1
++
++        if getattr(value, "weight_g", None) is not None:
++            return 1
++
++        raise
++
++
++def _coerce_quantity(value):
++    if isinstance(value, bool):
++        raise ValueError("parcel quantity must be an integer")
++
++    if isinstance(value, float) and value.is_integer():
++        value = int(value)
++
++    if not isinstance(value, int):
++        raise ValueError("parcel quantity must be an integer")
++
++    if value < 0:
++        raise ValueError("parcel quantity must be non-negative")
++
++    return value

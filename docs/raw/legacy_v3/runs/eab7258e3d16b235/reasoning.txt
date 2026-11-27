@@ -1,0 +1,140 @@
+To understand the structure, let's explore the repository, particularly the fulfillment module and the API's product representation.
+
+
+let's dig even deeper.
+
+
+Let's check the catalog, shipping (fulfillment?), and orders directories, plus the api directory.
+
+
+The fulfillment module is at shopkit/orders/fulfillment.py. Let's read it, and additionally read the serializer (for the API product representation), the orders model, and the catalog importer (which might be constructing Product).
+
+
+Okay, let's check the other files that might need to be updated:
+1. `shopkit/shipping/packaging.py` - format_weight
+2. `tests/test_shipping.py` - to understand the test patterns
+3. `shopkit/api/routes.py` and `handlers.py` - how product is used in the API
+
+Let's also check where `parcel_weight_g` might be placed — the task says "fulfillment module," i.e., `shopkit/orders/fulfillment.py`. Let's take a look at packaging and tests.
+
+
+Let me organize the change contents:
+
+1. **`shopkit/catalog/models.py`**: Add `weight_g: int = 0` to `Product`. This is the target file.
+
+2. **`shopkit/orders/fulfillment.py`**: Add `parcel_weight_g(parcel, products)` — the total weight of the parcel's contents. `parcel` is a `Parcel` with `items: list[tuple[str, int]]` (sku, qty). `products` maps SKU to Product. So it's `sum(products[sku].weight_g * qty for sku, qty in parcel.items)`.
+
+Question: What if the SKU doesn't exist in the `products` mapping? The codebase style: `handlers.py` lets exceptions propagate to ShopError. routes uses `self._by_sku[sku]`, and if it doesn't exist, KeyError propagates. The task says "products maps SKU to product". Simplest, reasonable implementation: `sum(products[sku].weight_g * qty for sku, qty in parcel.items)`. If the SKU is missing, KeyError occurs. Alternatively, use `.get` and skip? "Never silently return incorrect data" — using `products[sku]` fails clearly with KeyError. This is consistent with routes.py's behavior (`self._by_sku[sku]` raises KeyError). Going with direct indexing.
+
+Return type: `int`. The parcel's items are a list of (sku, qty) tuples.
+
+3. **`shopkit/api/serializers.py`**: The product representation must include weight as `weight_g`. Add `"weight_g": p.weight_g` to `product()`.
+
+Are there other places where products get serialized? Let me check what I know: `shopkit/api/serializers.py` has `product()`. What about `reports/` or `export.py`? I haven't read `shopkit/orders/export.py` or `shopkit/reports/`. The task says "the product representation the API returns must include weight as weight_g". The API's product representation is `serializers.product()`. That's the clear target.
+
+Should I double-check `catalog/seo.py`, `catalog/search.py`, `catalog/variants.py`? The API routes use `search` from `catalog.search` and serialize with `serializers.product`. All product output in the API flows through `serializers.product`. So just updating that covers the API.
+
+Now, `weight_g` in the serializer: place it in the dict — where? Add after price or after active. Current: `{"sku", "title", "price", "active", "purchasable"}`. Adding `"weight_g": p.weight_g`. Logically placing it after "price" makes sense (product attribute before the flag). Insert after "price": `{"sku", "title", "price", "weight_g", "active", "purchasable"}. Adding to the end would also be safe, but the order within a dict is not semantically significant. For readability, insert after price.
+
+Next, the `Product` dataclass: add `weight_g: int = 0` after `active: bool = True`. The task says "add `weight_g: int = 0` (grams per unit)". Field order: fields with defaults come after those without. Since `active` already has a default, `weight_g: int = 0` goes after `active`. Existing code uses keyword arguments, or uses `Product(sku, title, price_cents, active)` — positional argument usage: the importer uses kwargs. Tests probably construct with positional args? Since `weight_g` is appended at the end, positional compatibility is preserved.
+
+Next, `parcel_weight_g` in fulfillment.py:
+
+```python
+def parcel_weight_g(parcel: Parcel, products: dict[str, Product]) -> int:
+    """Total grams of a parcel's contents: each line's quantity times the product's unit weight."""
+    return sum(products[sku].weight_g * qty for sku, qty in parcel.items)
+```
+
+Need to import `Product` in fulfillment.py: `from shopkit.catalog.models import Product`.
+
+Check for circular imports: `shopkit.catalog.models` only imports `dataclasses`. fulfillment already imports from `shopkit.orders.models` and `shopkit.shipping.packaging`. Importing catalog.models is safe.
+
+Type hint: `dict[str, Product]` — matches the codebase style (`list[Order]`, `set[str] | None`). Good.
+
+Where to place the function? Logical order in the file: `Parcel` dataclass, then functions. `parcel_weight_g` is related to Parcel; place it after `split_into_parcels` and before `packing_slip`, or after `pick_list`. Since `packing_slip` takes `weight_g`, placing `parcel_weight_g` right before `packing_slip` flows naturally: compute the weight, then build the slip. Add after `split_into_parcels`, before `packing_slip`.
+
+Docstring style: short, double quotes, ends with a period. Example: `"""Slip packed inside each parcel: order, parcel number, contents and weight."""`. Mine: `"""Total grams of a parcel's contents (quantity times the product's unit weight)."""`.
+
+The module docstring says "Picking and packing. Builds pick lists for the warehouse and splits orders into parcels." — leave it as is.
+
+Empty parcel: sum of empty items → 0. Good.
+
+Serializer change:
+
+```python
+def product(p: Product) -> dict:
+    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents), "weight_g": p.weight_g,
+            "active": p.active, "purchasable": p.is_purchasable()}
+```
+
+Wait — is `weight_g` needed elsewhere? The task: "the product representation the API returns must include weight as `weight_g`". The API returns products via `serializers.product` (routes: list_products, get_product, search_products). That's the sole product representation in the API. Good.
+
+Now, are there other files that construct Product positionally with 4 arguments? Adding a 5th field with a default is safe.
+
+Files to change:
+1. `shopkit/catalog/models.py` — add the field.
+2. `shopkit/orders/fulfillment.py` — add import + `parcel_weight_g`.
+3. `shopkit/api/serializers.py` — add `weight_g` to product dict.
+
+Full file contents:
+
+**models.py:**
+```python
+from dataclasses import dataclass
+
+
+@dataclass
+class Product:
+    sku: str
+    title: str
+    price_cents: int
+    active: bool = True
+    weight_g: int = 0       # grams per unit
+
+    def is_purchasable(self) -> bool:
+        return self.active and self.price_cents > 0
+```
+
+Hmm, comment style: the codebase uses inline comments like `# (sku, qty)` or `# row 1 is the header`. A brief comment `# grams per unit` reflects the task. Good, but maybe unnecessary. The task says grams per unit, so it helps intent. Include it.
+
+**fulfillment.py:**
+```python
+"""Picking and packing. Builds pick lists for the warehouse and splits orders into parcels."""
+from dataclasses import dataclass, field
+
+from shopkit.catalog.models import Product
+from shopkit.orders.models import Order
+from shopkit.shipping.packaging import format_weight
+from shopkit.utils.collections import chunked, group_by
+```
+
+Wait, the actual import is: `from shopkit.utils.collections import chunked, group_by`. Preserve that. Add `from shopkit.catalog.models import Product` at the top of the import group (roughly alphabetical: catalog < orders < shipping < utils; the existing order is dataclasses, then shopkit.orders.models, shopkit.shipping.packaging, shopkit.utils.collections — roughly alphabetical by module path: orders, shipping, utils. So catalog comes first among the shopkit imports).
+
+```python
+def parcel_weight_g(parcel: Parcel, products: dict[str, Product]) -> int:
+    """Total grams of a parcel's contents: each line's quantity times the product's unit weight."""
+    return sum(products[sku].weight_g * qty for sku, qty in parcel.items)
+```
+
+**serializers.py:** Add `"weight_g": p.weight_g`.
+
+Line length in the serializer:
+```python
+def product(p: Product) -> dict:
+    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents), "weight_g": p.weight_g,
+            "active": p.active, "purchasable": p.is_purchasable()}
+```
+This line is somewhat long: `    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents), "weight_g": p.weight_g,` — count: 4 + ... the original line 1 was `    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents), "active": p.active,`, about 88 characters. Adding `weight_g` makes it longer, about 100 characters. The original file already exceeds 88 characters (the original line: `    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents), "active": p.active,` = let me count: 4 spaces + "return {" = 10, + '"sku": p.sku, ' = 14 → 24, '"title": p.title, ' = 17 → 41, '"price": money(p.price_cents), ' = 30 → 71, '"active": p.active,' = 18 → 89). So the original line was 89 characters. Adding `weight_g` on that line makes it about 105. To keep the line reasonable, restructure:
+
+```python
+def product(p: Product) -> dict:
+    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents),
+            "weight_g": p.weight_g, "active": p.active, "purchasable": p.is_purchasable()}
+```
+
+Line 2: 12 + '"weight_g": p.weight_g, "active": p.active, "purchasable": p.is_purchasable()}' = 12 + 18 + 18 + 35 = about 83. No problem.
+
+All checked. No other API product representation. The `reports` module might include product data, but the task clearly states "the product representation the API returns", which is `serializers.product`.
+
+Final answer: three file blocks.

@@ -1,0 +1,78 @@
+Let me understand the task:
+
+1. Add `by_email(customers) -> dict[str, Customer]` to `shopkit/reports/customers_report.py`.
+2. The key should be the email address trimmed and lowercased.
+3. Build it the same way the shop builds other lookup tables.
+
+Looking at how other lookup tables are built: in `shopkit/api/routes.py`, `self._by_sku = index_by(products, key=lambda p: p.sku)`. So "the same way" means using `index_by` from `shopkit.utils.collections`.
+
+`index_by` raises `ValueError` on duplicate keys instead of silently overwriting. This is important: two customers with the same email address (after trim/lowercasing) would raise `ValueError`. This is consistent with "built the same way the shop builds other lookup tables."
+
+Also note: in `service.py`, `find_by_email` does `email = email.strip().lower()`. So the trimming and lowercasing convention matches.
+
+Should I handle the case where the email is None? Let me think. `Customer` model - I don't have the full model, but `c.joined` can be None, `c.tier` exists, `c.marketing_opt_in` exists, `c.email` presumably exists (used in `find_by_email` and `getCustomerByEmail`). The email field probably always exists as a string. I'll assume `c.email` is a string.
+
+So the implementation:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return index_by(customers, key=lambda c: c.email.strip().lower())
+```
+
+And I'll add the import: `from shopkit.utils.collections import group_by, index_by`.
+
+Let me double-check imports: currently `from shopkit.utils.collections import group_by`. I need to add `index_by`.
+
+Should the function handle missing/None email addresses? The task says "keyed by the email address trimmed and lowercased." The `find_by_email` service does the same. I'll keep it simple and consistent.
+
+Edge cases:
+- Empty list → empty dict. `index_by` handles it fine.
+- Duplicate emails (case-insensitive or with whitespace difference) → `ValueError` from `index_by`. This is the "same way" behavior, which is desirable for a CRM sync lookup — fail clearly on invalid data rather than silently pick one.
+- Case/whitespace variations of the same email get normalized before collision detection. Good.
+
+Type annotations: `dict[str, Customer]` matches the existing style (`dict[str, int]`, `list[Customer]`).
+
+Docstring: other functions in the file don't have docstrings, except... actually, none of the functions in `customers_report.py` have docstrings. Hmm, `index_by` has a docstring. The functions in the target file have no docstrings. To match the surrounding style, I won't add a docstring... but the guidelines say to add docstrings/comments where the intent isn't obvious. The key normalization is obvious from `.strip().lower()`. The duplicate behavior is inherited from `index_by`. I think matching the file style (no docstring) is fine. Actually, let me reconsider — a short comment might help, but the file's style has zero docstrings or comments. I'll keep it clean without a docstring, to match.
+
+Actually wait — should I double-check: does `Customer` have `.email` as a lowercase-stored attribute? In `find_by_email`: `email = email.strip().lower(); return next((c for c in self._by_id.values() if c.email == email), None)`. So it compares the normalized input against `c.email`, suggesting stored emails are already lowercased. But the task explicitly says the key should be trimmed and lowercased, so I do that anyway — idempotent if already normalized.
+
+Final file:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by, index_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = [c for c in customers if c.joined]
+    groups = group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))
+    return {m: len(cs) for m, cs in sorted(groups.items())}
+
+
+def opt_in_rate(customers: list[Customer]) -> float:
+    return safe_ratio(sum(c.marketing_opt_in for c in customers), len(customers))
+
+
+def tier_mix(customers: list[Customer]) -> dict[str, int]:
+    return {t: len(cs) for t, cs in sorted(group_by(customers, key=lambda c: c.tier).items())}
+
+
+def active_since(customers: list[Customer], since: date) -> list[Customer]:
+    return [c for c in customers if c.joined and c.joined >= since]
+
+
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return index_by(customers, key=lambda c: c.email.strip().lower())
+```
+
+Where to place `by_email`? Probably at the end, or logically near the other lookups. Adding at the end is the minimal change. That's fine.
+
+One consideration: `index_by` signature: `def index_by(items: Iterable[T], key: Callable[[T], K]) -> dict[K, T]`. So `index_by(customers, key=lambda c: c.email.strip().lower())` returns `dict[str, Customer]`.
+
+Verify the import: `from shopkit.utils.collections import group_by, index_by` — both exist in the shown `collections.py` (`index_by` on lines 24–32, `group_by` on lines 35–39, and the tests import `chunked, dedupe, group_by, index_by`). Good.
+
+Everything checks out. Output the file block.

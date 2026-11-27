@@ -87,11 +87,11 @@ def obar(label: str, counts: dict, n: int, cls: str = "", scale: int = 0) -> str
     the tier-1 tasks, L1-L2 each task once on its smallest repo) are drawn as "not run", so a bar's
     length is comparable across levels."""
     not_run = max(scale - n, 0)
-    names = {"pass": "PASS", "fail": "FAIL", "unparsable": "UNPARSABLE", "explore": "ASKED TO EXPLORE",
+    names = {"pass": "PASS", "breaks": "BROKE KNOWN TESTS", "fail": "FAIL", "unparsable": "UNPARSABLE", "explore": "ASKED TO EXPLORE",
              "noanswer": "NO ANSWER", "stopped": "STOPPED EARLY", "invalid": "INVALID", "oot": "OUT OF TOKENS",
              "time": "OUT OF TIME", "nofit": "NO FIT", "running": "in progress", "queued": "queued", "retry": "to rerun in the next pass"}
     parts = "".join(f'<span class="o-{k}" style="flex:{counts.get(k, 0)}" title="{names[k]}: {counts.get(k, 0)}"></span>'
-                    for k in ("pass", "fail", "unparsable", "explore", "noanswer", "stopped", "invalid", "oot", "time", "nofit", "running", "queued", "retry")
+                    for k in ("pass", "breaks", "fail", "unparsable", "explore", "noanswer", "stopped", "invalid", "oot", "time", "nofit", "running", "queued", "retry")
                     if counts.get(k))
     if not_run:
         parts += f'<span class="o-na" style="flex:{not_run}" title="not run at this level: {not_run}"></span>'
@@ -235,7 +235,7 @@ def build_progress(final: dict, off: dict) -> str:
         for i, lab in enumerate(order):
             oc = collections.Counter(outcome(r) for r in by[lab])
             pend = pending[rnd, lab]
-            counts = {"pass": oc["PASS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"], "explore": oc["ASKED TO EXPLORE"],
+            counts = {"pass": oc["PASS"], "breaks": oc["BROKE KNOWN TESTS"], "fail": oc["FAIL"], "unparsable": oc["UNPARSABLE"], "explore": oc["ASKED TO EXPLORE"],
                       "noanswer": oc["NO ANSWER"], "stopped": oc["STOPPED EARLY"], "invalid": oc["INVALID"],
                       "oot": oc["OUT OF TOKENS"], "time": oc["OUT OF TIME"], "nofit": oc["NO FIT"], "running": pend["running"], "queued": pend["queued"], "retry": retry[lab]}
             group = lab.split()[0].replace("+docs", "")
@@ -253,16 +253,16 @@ def build_progress(final: dict, off: dict) -> str:
         by = collections.defaultdict(collections.Counter)
         for r in rows:
             by[r["repo_size"]][outcome(r)] += 1
-        cols = ["PASS", "FAIL", "UNPARSABLE", "ASKED TO EXPLORE", "NO ANSWER", "STOPPED EARLY", "INVALID", "OUT OF TOKENS",
+        cols = ["PASS", "BROKE KNOWN TESTS", "FAIL", "UNPARSABLE", "ASKED TO EXPLORE", "NO ANSWER", "STOPPED EARLY", "INVALID", "OUT OF TOKENS",
                 "OUT OF TIME", "NO FIT"]
         body = "".join(f"<tr><td>{s}</td>" + "".join(f"<td class=r>{c[k]}</td>" for k in cols)
                        + f"<td class=r>{sum(c.values())}</td></tr>" for s, c in sorted(by.items()))
         return (f"<h3>{e(title)}</h3><div class=table-wrap><table><thead><tr><th>Repo</th>"
                 + "".join(f"<th class=r>{k}</th>" for k in cols) + "<th class=r>Runs</th></tr></thead>"
-                f"<tbody>{body or '<tr><td colspan=12>none yet</td></tr>'}</tbody></table></div>")
+                f"<tbody>{body or '<tr><td colspan=13>none yet</td></tr>'}</tbody></table></div>")
 
     legend = ('<div class="olegend small">' + "".join(
-        f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("fail", "FAIL"),
+        f'<span><i class="o-{k}"></i>{n}</span>' for k, n in (("pass", "PASS"), ("breaks", "BROKE KNOWN TESTS"), ("fail", "FAIL"),
                                                           ("unparsable", "UNPARSABLE"), ("explore", "ASKED TO EXPLORE"), ("noanswer", "NO ANSWER"), ("stopped", "STOPPED EARLY"),
                                                           ("invalid", "INVALID"), ("oot", "OUT OF TOKENS"), ("time", "OUT OF TIME"), ("nofit", "NO FIT"),
                                                           ("running", "in progress"), ("queued", "queued"),
@@ -364,6 +364,78 @@ def hbars(rows: list[tuple[str, list[tuple[float, str, str]], str]], scale: floa
         spans = "".join(f'<span style="flex:0 0 {100 * v / scale:.2f}%;background:{c}" title="{e(t)}"></span>' for v, c, t in segs if v)
         out.append(f'<div class="obar"><span class="lab">{e(lab)}</span><span class="track">{spans}</span><span class="v">{val}</span></div>')
     return f'<div class="obars">{"".join(out)}</div>'
+
+
+def seen_text(r: dict) -> str | None:
+    """What the model was shown during a run, rebuilt from its bundle: the prompt's context plus every tool output
+    (L1-L8, as `cbench rescore` rebuilds it), or for L-AG the files it viewed (read from the fixture) and its
+    commands' output. None when the bundle can't tell (an L-AG run whose steps weren't saved)."""
+    from context_bench.runner import _seen_text
+    run_dir = RESULTS / "runs" / r["run_id"]
+    if r["level"] != "L-AG":
+        return _seen_text(run_dir)
+    from context_bench.levels.l_ag_antigravity import OUTPUT_ARGS, WORKSPACE
+    repo = ROOT / "fixtures" / f"repo_{r['repo_size']}"
+    parts, steps = [], 0
+    pth = run_dir / "transcript.jsonl"
+    for line in (pth.read_text().splitlines() if pth.exists() else []):
+        step = json.loads(line)
+        for call in step.get("tool_calls") or ():
+            steps += 1
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            if call.get("name") == "view_file" and args.get("file_path"):
+                f = (repo / str(args["file_path"]).removeprefix(WORKSPACE).lstrip("/")).resolve()
+                if f.is_file() and f.is_relative_to(repo.resolve()):
+                    lines = f.read_text(errors="replace").splitlines()
+                    start, end = int(args.get("start_line") or 0), args.get("end_line")
+                    parts.append("\n".join(lines[start:None if end is None else int(end) + 1]))
+            parts.extend(str(args[k]) for k in OUTPUT_ARGS if args.get(k))
+    return "\n\n".join(parts) if steps else None
+
+
+def test_seen(test_id: str, text: str, repo_size: str) -> bool:
+    """The test itself was in front of the model: its def line followed by the first line of its body, as in the
+    fixture (a signature map's one-line entry, e.g. L6, doesn't count: it shows the name, not what the test checks)."""
+    import ast
+    path, *rest = test_id.split("::")
+    name = re.sub(r"\[.*\]$", "", rest[-1]) if rest else ""
+    f = ROOT / "fixtures" / f"repo_{repo_size}" / path
+    if not name or not f.is_file():
+        return False
+    src = f.read_text()
+    lines = src.splitlines()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name and node.body:
+            first = lines[node.body[0].lineno - 1].strip()
+            pat = rf"\bdef {re.escape(name)}\([^\n]*\n(?:[ \t]*\n)*[ \t]*{re.escape(first)}"
+            return re.search(pat, text) is not None
+    return False
+
+
+def first_error(r: dict) -> str:
+    """The first error line pytest printed for the repo's own tests (E   ...), shortened."""
+    t = (RESULTS / "runs" / r["run_id"] / "tests.txt")
+    section = t.read_text(errors="replace").partition("--- repo's own tests ---")[2] if t.exists() else ""
+    m = re.search(r"^E\s+(.+)$", section, re.M)
+    if not m:
+        return ""
+    msg = re.sub(r"\s*\(/tmp/[^)]*\)", "", m.group(1)).strip()
+    return msg if len(msg) <= 110 else msg[:107] + "..."
+
+
+def regressions(rows: list[dict]) -> list[dict]:
+    """Runs whose hidden tests passed while some of the repo's original tests no longer did (BROKE KNOWN TESTS),
+    each with the broken tests the model had seen during the run (None: can't tell)."""
+    out = []
+    for r in rows:
+        if r.get("label") != "breaks_tests":
+            continue
+        broken = r.get("known_tests_broken") or []
+        text = seen_text(r)
+        seen = None if text is None else [t for t in broken if test_seen(t, text, r["repo_size"])]
+        out.append(dict(r=r, broken=broken, seen=seen, err=first_error(r),
+                        bucket="unknown" if seen is None else "seen" if seen else "unseen"))
+    return out
 
 
 def build_final(final: dict, off: dict) -> str:
@@ -498,6 +570,9 @@ def build_final(final: dict, off: dict) -> str:
     tail_pass = sum(outcome(r) == "PASS" for r in tail)
     trap = {(level_label(r), r["repo_size"]): r for r in F if r["task_id"] == "trap-001"}
     trap_fixed = sorted({lab.split()[0] for (lab, s), r in trap.items() if outcome(r) == "PASS" and r.get("reuse_passed")})
+    ret_gain = [round(100 * (lv_pair[l][2] - lv_pair[l][1]) / lv_pair[l][0]) for l in ("L4", "L5") if lv_pair[l][0]]
+    agent_min = min(100 * passed([r for r in G_on[g] if r["repo_size"] == s]) / max(1, sum(r["repo_size"] == s for r in G_on[g]))
+                    for g in ("L7", "L8") for s in "SML")
     hyp = [
         ("The model reuses a helper when it can see the helper's code.", "held",
          f"Reused with its full source in context: {vf[1]}/{vf[0]}. With nothing of it in context: {vn[1]}/{vn[0]}."),
@@ -508,7 +583,7 @@ def build_final(final: dict, off: dict) -> str:
         ("A map of signatures is enough to write the change.", "with thinking",
          f"Thinking on: L6 {pc('L6')}, with docstrings {pc('L6+docs')}. Thinking off: {pc('L6', by_cfg_off)} and {pc('L6+docs', by_cfg_off)}."),
         ("Thinking helps most where the context is thinnest.", "partly",
-         f"The largest gain is at the signature map (L6 {lv_pair['L6'][1]} → {lv_pair['L6'][2]} of {lv_pair['L6'][0]}). Retrieval gains 20 to 25 points, the agents {round(100 * (lv_pair['L7'][2] - lv_pair['L7'][1]) / lv_pair['L7'][0])}. With only the target file (L1) the rate stays low: {lv_pair['L1'][1]} → {lv_pair['L1'][2]} of {lv_pair['L1'][0]}."),
+         f"The largest gain is at the signature map (L6 {lv_pair['L6'][1]} → {lv_pair['L6'][2]} of {lv_pair['L6'][0]}). Retrieval gains {min(ret_gain)} to {max(ret_gain)} points, the agents {round(100 * (lv_pair['L7'][2] - lv_pair['L7'][1]) / lv_pair['L7'][0])}. With only the target file (L1) the rate stays low: {lv_pair['L1'][1]} → {lv_pair['L1'][2]} of {lv_pair['L1'][0]}."),
         ("Richer search tools and a self-managed working set help on a large repository.", "small",
          f"Thinking on: grep {pc('L7 grep')}, hybrid {pc('L7 hybrid')}, rich {pc('L7 rich')}, selective {pc('L7 selective')}. The differences are within the noise of one sample."),
         ("Reading code by symbol instead of whole files saves tokens.", "not held",
@@ -600,6 +675,39 @@ def build_final(final: dict, off: dict) -> str:
                          f"<td class=r>{med_in(xs):.0f}k</td></tr>")
     gem_e, gem_n = empty_cmds(gem)
 
+    # ---- passing patches that broke the repository's own tests (BROKE KNOWN TESTS), by whether the model saw them
+    round_of = lambda r: ("Gemini" if r.get("model", "").startswith("gemini") else "on" if r.get("thinking") else "off")
+    reg = regressions(list(final.values()) + list(off.values()) + gem)
+    hidden_pass = [r for r in list(final.values()) + list(off.values()) + gem if r.get("label") in ("ok", "breaks_tests")]
+    v3_rows = [json.loads(x) for x in (RESULTS / "archive-v3" / "results.jsonl").read_text().splitlines()] \
+        if (RESULTS / "archive-v3" / "results.jsonl").exists() else []
+    v3_rows = [r for r in v3_rows if not (r["level"] == "L7" and r.get("failed_call_cost") is None)]   # superseded (h1)
+    v3_breaks = sum(r.get("label") == "breaks_tests" for r in v3_rows)
+    v3_hidden = sum(r.get("label") in ("ok", "breaks_tests") for r in v3_rows)
+
+    def short_test(t: str) -> str:
+        return t.removeprefix("tests/").replace(".py::", " · ").replace("::", ".")
+
+    def reg_table(items: list[dict]) -> str:
+        if not items:
+            return '<p class="small">None.</p>'
+        rows = []
+        for x in sorted(items, key=lambda x: (round_of(x["r"]), level_label(x["r"]), x["r"]["task_id"])):
+            r, b = x["r"], x["broken"]
+            names = ", ".join(short_test(t) for t in b[:3]) + (f", and {len(b) - 3} more" if len(b) > 3 else "")
+            seen = "–" if x["seen"] is None else f"{len(x['seen'])} of {len(b)}"
+            rows.append(f"<tr><td>{link(r['run_id'], r['task_id'] + ' @ ' + r['repo_size'])}</td>"
+                        f"<td>{e(level_label(r))}</td><td>{e({'on': 'thinking on', 'off': 'thinking off'}.get(round_of(r), 'L-AG + Gemini'))}</td>"
+                        f"<td class=r>{len(b)} of {r.get('known_tests_total')}</td><td class=r>{seen}</td>"
+                        f"<td class=small>{e(names)}</td><td class=small><code>{e(x['err'])}</code></td></tr>")
+        return ("<div class=table-wrap><table><thead><tr><th>Run</th><th>Level</th><th>Round</th>"
+                "<th class=r>Known tests broken</th><th class=r>Of those, seen</th><th>Tests</th><th>First error</th></tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody></table></div>")
+    reg_seen = [x for x in reg if x["bucket"] == "seen"]
+    reg_unseen = [x for x in reg if x["bucket"] == "unseen"]
+    reg_unknown = [x for x in reg if x["bucket"] == "unknown"]
+    reg_by_round = collections.Counter(round_of(x["r"]) for x in reg)
+
     flow = "".join(f'<div class="fstep"><b>{a}</b><span>{b}</span></div>'
                    for i, (a, b) in enumerate([("Task", "a change request in product language"),
                                                ("Context builder", "one level, L0 to L8"),
@@ -643,7 +751,7 @@ def build_final(final: dict, off: dict) -> str:
   </header>
 
   <section class="takeaways breakout" aria-label="Key findings">
-    <div class="takeaway"><b>Agents lifted results to a new level</b><span>On these tasks L7 and L8 passed {rate(G_on['L7']):.0f}% and {rate(G_on['L8']):.0f}% with thinking on, on every repo size. The best search-based level reached {max(rate(G_on[g]) for g in ('L4', 'L5', 'L6')):.0f}%.</span></div>
+    <div class="takeaway"><b>Agents lifted results to a new level</b><span>On these tasks L7 and L8 passed {rate(G_on['L7']):.0f}% and {rate(G_on['L8']):.0f}% with thinking on, and at least {agent_min:.0f}% on each repo size. The best search-based level reached {max(rate(G_on[g]) for g in ('L4', 'L5', 'L6')):.0f}%.</span></div>
     <div class="takeaway"><b>Context building was the key to higher-quality code</b><span>Clean passes rose from {clean_rate['L1']:.0f}% with one file (L1) to {clean_rate['L8']:.0f}% at L8. Helper reuse went from {pct(vn[1], vn[0])} with the helper out of view to {pct(vf[1], vf[0])} with its source in context.</span></div>
     <div class="takeaway"><b>Thinking lifted one-shot prompts much more than agents</b><span>Same runs, off → on: the one-shot levels L1 to L6 went from {pct(os_off, os_n)} to {pct(os_on, os_n)} PASS, the agents from {pct(ag_off, ag_n)} to {pct(ag_on, ag_n)}.</span></div>
     <div class="takeaway"><b>Thinking made the agents read half as much</b><span>L7's median input per run fell from {l7_in[0]:.0f}k to {l7_in[1]:.0f}k tokens, and the thinking-on round used fewer tokens in total ({(in_off + out_off) / 1e6:.0f}M → {(in_on + out_on) / 1e6:.0f}M) despite the extra output.</span></div>
@@ -663,7 +771,7 @@ def build_final(final: dict, off: dict) -> str:
     <div class="eyebrow">Results</div>
     <h2>Pass rate climbed with context, and the agents came out on top</h2>
     <p class="prose">Each row pools every task and repo for one level. The hollow dot marks thinking off, the filled dot
-    thinking on, and PASS means the answer cleared all of the task's hidden tests.</p>
+    thinking on, and PASS means the answer cleared all of the task's hidden tests and kept the repository's own tests passing.</p>
     <div class="chart-legend"><span><i style="border:2px solid var(--accent)"></i>thinking off</span><span><i style="background:var(--accent)"></i>thinking on</span><span><i style="background:var(--muted)"></i>L-AG, an outside reference</span></div>
     {dumbbell(ladder)}
     <p class="small">L1 to L6 open with the file the change belongs in. L2 adds that file's imports and its test, L3 the
@@ -714,7 +822,7 @@ def build_final(final: dict, off: dict) -> str:
         {tpp_bars}
         <p class="small">Every token a level spent, divided by its passing runs. Search-based levels passed cheapest, at
         {ret_tpp / 1e3:.0f}k. L3 needed {l3_tpp / 1e3:.0f}k on the repos it fits. The agents paid more, {l7_tpp / 1e3:.0f}k for L7
-        and {l8_tpp / 1e3:.0f}k for L8, and passed above 90% on every repo size for it. L1 spent
+        and {l8_tpp / 1e3:.0f}k for L8, and passed at least {agent_min:.0f}% on every repo size for it. L1 spent
         {tpp[0][1] / 1e3:.0f}k per PASS, most of it thinking about code the model couldn't see. L-AG spent {lag_tpp / 1e3:.0f}k.</p>
       </div>
     </div>
@@ -740,6 +848,29 @@ def build_final(final: dict, off: dict) -> str:
     {hbars(q_rows, 100)}
     <p class="small">Share of all thinking-on runs. The agents led here as well, with L8 at {clean_rate['L8']:.0f}% clean.
     The collapsed penalty tables at the bottom list the judge's codes per configuration.</p>
+  </section>
+
+  <section id="broke-known-tests">
+    <div class="eyebrow">Regressions</div>
+    <h2>Passing the hidden tests while breaking the repository's own</h2>
+    <p class="prose">After every run, the harness also ran the repository's own test suite on the patched copy. A run
+    whose answer cleared every hidden test but left at least one of the repository's original tests failing, unable to
+    import or gone is labelled <b>BROKE KNOWN TESTS</b>, and it doesn't count as a pass anywhere on this site. On these
+    tasks that happened in {len(reg)} of {len(hidden_pass)} runs that cleared the hidden tests ({reg_by_round['off']} with
+    thinking off, {reg_by_round['on']} with thinking on, {reg_by_round['Gemini']} with Gemini). The runs split by whether the model had the
+    broken test in front of it: a test counts as seen when its code (its definition and the start of its body, not
+    just its name in a signature map) appeared in the prompt or in a tool's output at any point in the run.</p>
+    <h3>The model had seen the test it broke ({len(reg_seen)})</h3>
+    {reg_table(reg_seen)}
+    <h3>The model never saw the test it broke ({len(reg_unseen)})</h3>
+    {reg_table(reg_unseen)}
+    {f"<h3>Can't tell ({len(reg_unknown)})</h3><p class=small>The run's steps weren't saved, so what the agent read can't be rebuilt.</p>" + reg_table(reg_unknown) if reg_unknown else ""}
+    <p class="small">Known tests broken: the repository's original tests that no longer pass after the patch, out of all
+    of them. A module that no longer imports loses every test in it. The repository's own tests ran after every run but
+    weren't part of the outcome until 26 November 2026, when this check was applied to every recorded run; these runs were
+    PASS before. L8 runs the repository's tests itself before it finishes, which L1 to L7 don't. In the v3 round, whose raw
+    runs are kept in the repository (<a href="https://github.com/engineeringthefutureai/context-bench/tree/main/docs/raw/legacy_v3">docs/raw/legacy_v3</a>),
+    {v3_breaks} of {v3_hidden} runs that cleared the hidden tests broke known tests.</p>
   </section>
 
   <section>

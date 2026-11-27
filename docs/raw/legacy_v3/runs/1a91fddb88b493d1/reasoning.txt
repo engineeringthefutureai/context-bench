@@ -1,0 +1,295 @@
+Let me carefully analyze the task.
+
+Task: Show shoppers how many loyalty points an order will earn them. Give `quote()` an optional `customer` argument, and add a `points` field to `Quote` (0 when no customer is specified): the points earned by the customer on what they pay for goods after discount, exactly the same way as loyalty points are earned for paid orders.
+
+Key details:
+
+1. `quote()` needs an optional `customer` argument.
+2. `Quote` needs a `points` field (0 when no customer is specified).
+3. Points are earned "on what they pay for goods after discount" — so based on the discounted goods subtotal, i.e. `subtotal - discount`.
+4. "Exactly the same way as loyalty points are earned for paid orders" — looking at `loyalty.py`, `points_for(customer, spend_cents)` computes: `(spend_cents // 100) * EARN_RATES.get(customer.tier, 1)` for spend > 0, and 0 otherwise.
+
+So, how are loyalty points actually earned for paid orders? Let me think about how `points_for` is called elsewhere. I don't have the payment code at hand, but the task says "exactly the same way as loyalty points are earned for paid orders." The natural way is `points_for(customer, spend_cents)` where spend is the amount paid.
+
+But what's the "amount paid for goods after discount"? In the quote: subtotal (goods) - discount. Shipping is separate ("shipping is untaxed"), and the task explicitly says "what they pay for goods after discount" — so it's goods only, not including shipping or tax. The discount could be a coupon discount… but what about loyalty redemptions? The task says "after any discount" — in `quote()`, the only discount currently is the coupon discount. Hmm, but wait — should loyalty redemptions be included? The task says "Give `quote()` an optional `customer` argument, and add a `points` field to `Quote` (0 when no customer is specified): the points earned by the customer on what they pay for goods after discount."
+
+Hmm, this is ambiguous: "after any discount" — in the current `quote()`, the discount is the coupon discount. The quote function as given doesn't handle loyalty redemptions. So "any discount" probably means the coupon discount that `quote()` computes. Since `quote()` only takes `coupon` as the discount mechanism, points = `points_for(customer, subtotal - discount)`.
+
+Wait — but should loyalty redemptions be included? The task says "after any discount" — in the current `quote()`, the discount is the coupon discount. The quote function as presented doesn't handle loyalty redemptions. So "any discount" probably refers to the coupon discount that `quote()` computes. Since `quote()` only accepts `coupon` as the discount mechanism, points = `points_for(customer, subtotal - discount)`.
+
+Note the tax proration logic: tax is prorated based on discount. Irrelevant for points.
+
+Edge cases:
+- No customer: `points = 0`.
+- Customer present: `points = points_for(customer, subtotal - discount)`.
+- `points_for` handles non-positive spend (returns 0). Can `subtotal - discount` go negative? Discount is computed by `discount_cents(coupon, subtotal, today)` — I don't have the code, but a well-behaved discount shouldn't exceed the subtotal. But for safety, `points_for` returns 0 for non-positive values, so even if the discount exceeds the subtotal, points_for will return 0. Good.
+
+Where does `points_for` fit? Import: `from shopkit.customers.loyalty import points_for`. And `Customer` from `shopkit.customers.models` for the type annotation.
+
+Check existing imports in checkout.py: `from shopkit.customers.models import Address`. Add `Customer` to that import: `from shopkit.customers.models import Address, Customer`.
+
+Signature: `def quote(cart, products, ship_to, weight_g, prices, today, coupon=None, customer=None)`. Where to place `customer`? After `coupon` as a keyword argument makes sense to keep existing callers (which might pass `coupon` positionally) working. Let me check who calls `quote` — I don't have other files at hand, but placing `customer` after `coupon` is the safest for backward compatibility. Existing calls like `quote(cart, products, ship_to, weight_g, prices, today, coupon)` still work.
+
+Quote dataclass: add a `points: int` field. Where? The fields are `order, subtotal_cents, discount_cents, shipping_cents, tax_cents, notes`. `notes` has a default (`field(default_factory=list)`), so `points` must come before `notes` or have a default. I'll add `points: int = 0` — hmm, or `points: int` before `notes`.
+
+Consideration: `Quote` is a dataclass; if `points` is added without a default and placed after `notes` (which has a default), that's a TypeError (non-default argument follows default). So either:
+1. `points: int` immediately after `tax_cents` (before `notes`), or
+2. `points: int = 0` anywhere.
+
+Is there any code that constructs `Quote` positionally? Only `quote()` itself (inside checkout.py). But other code might read `Quote` fields. Adding `points` before `notes` keeps positional construction in `quote()` consistent. Since we're controlling the only construction site in this file, either works. Which is better for the review? The task says "add a `points`points` field to `Quote` (0 when no customer is specified)."
+
+I think the cleaner approach is to add `points: int = 0` after `tax_cents`… no wait, let me think about the field ordering semantics. Fields: order, subtotal_cents, discount_cents, shipping_cents, tax_cents, points, notes. In `quote()` I'll construct `Quote(order, subtotal, discount, shipping, tax, points)` — passing 6 positional args before `notes`. Clean.
+
+Alternatively, `points: int = 0` with default 0. Then someone constructing `Quote(order, subtotal, discount, shipping, tax)` without points gets 0. That's also nice and safe. I'll go with `points: int = 0` for robustness — hmm, but then a reviewer might wonder if the default is masking a bug. Actually, the task explicitly says "(0 when no customer is specified)," so a default of 0 aligns with that. Let's go with `points: int = 0`.
+
+Hmm, actually let me reconsider: if points has a default of 0 and is placed after tax_cents and before notes, then `Quote(order, subtotal, discount, shipping, tax)` works, and `Quote(order, subtotal, discount, shipping, tax, points)` also works. Both are fine.
+
+Now, the calculation:
+
+```python
+points = points_for(customer, subtotal - discount) if customer else 0
+```
+
+Wait — "exactly the same way as loyalty points are earned for paid orders." Let me check `points_for`: "Points earned for a purchase: full currency units × tier rate. Refunds (negative spend) earn 0." So spend_cents is the paid amount. On a paid order, presumably `customer.earn(points_for(customer, order.total_cents), ...)` or something like that. But the task specifically says "the points earned by the customer on what they pay for goods after discount" — so the basis is `subtotal - discount` (goods after discount), not the total including shipping/tax. The task is explicit: "for goods after discount." So `points_for(customer, subtotal - discount)`.
+
+Now, what about loyalty redemptions at checkout? The task says "after any discount." Hmm. If the customer redeems points at checkout, the amount paid for goods decreases. But `quote()` has no redemption parameter. Should I add one? The task only asks for an optional `customer` argument and a `points` field. It doesn't mention redemption. "After any discount" — the discount available in this function is the coupon discount. I'll interpret "any discount" = the discount the quote applies (coupon). Keep the change minimal.
+
+But hmm, "exactly the same way as loyalty points are earned for paid orders" — the phrase "exactly" refers to the earning mechanism (points_for with tier rate, full currency units), not to adding redemption handling. So `points_for(customer, subtotal - discount)` is correct.
+
+Also note: `points_for` uses `EARN_RATES.get(customer.tier, 1)` — handles unknown tiers. And spend <= 0 returns 0. So even if `subtotal - discount <= 0`, points = 0. Good.
+
+Import: `from shopkit.customers.loyalty import points_for`.
+
+Also type annotation: `customer: Customer | None = None`.
+
+Double-checking `Customer` exists in `shopkit.customers.models` — `loyalty.py` imports `from shopkit.customers.models import Customer`, yes.
+
+Now, are there circular import concerns? `shopkit/customers/loyalty.py` imports from `shopkit.customers.models` and `shopkit.catalog.models` (Product). `checkout.py` already imports `shopkit.catalog.models` and `shopkit.customers.models`. Adding an import of `shopkit.customers.loyalty` — does loyalty import checkout? No. No cycle.
+
+Now, the whole new file:
+
+```python
+"""Checkout: turns a cart into a priced order with tax, shipping and discounts, then takes payment."""
+from dataclasses import dataclass, field
+from datetime import date
+
+from shopkit.catalog.models import Product
+from shopkit.catalog.pricing import PriceBook
+from shopkit.customers.loyalty import points_for
+from shopkit.customers.models import Address, Customer
+from shopkit.errors import ShopError
+from shopkit.orders.models import Order, OrderLine
+from shopkit.promotions.coupons import Coupon, discount_cents
+from shopkit.shipping.rates import shipping_cents
+from shopkit.tax.calculator import order_tax
+from shopkit.utils.ids import new_id
+
+
+class EmptyCart(ShopError):
+    http_status = 422
+
+
+class NotPurchasable(ShopError):
+    http_status = 422  # no wait, original is: http_status = 422
+```
+
+Careful — original:
+
+```python
+class NotPurchasable(ShopError):
+    http_status = 422
+```
+
+Keep as is.
+
+New Quote:
+
+```python
+@dataclass
+class Quote:
+    order: Order
+    subtotal_cents: int
+    discount_cents: int
+    shipping_cents: int
+    tax_cents: int
+    points: int = 0
+    notes: list[str] = field(default_factory=list)
+```
+
+Wait — is it fine for `points` to have a default of 0 while `notes` has a default? Yes, both have defaults, so the ordering is fine.
+
+But hmm — one consideration: `notes` had a default before, and now `points` comes before it with a default. No problem.
+
+Should `total_cents` include anything about points? No — total_cents = subtotal - discount + shipping + tax. Points are not a discount in this quote (redemption isn't modeled). Leave `total_cents` unchanged.
+
+New `quote`:
+
+```python
+def quote(cart: dict[str, int], products: dict[str, Product], ship_to: Address, weight_g: int,
+          prices: PriceBook, today: date, coupon: Coupon | None = None,
+          customer: Customer | None = None) -> Quote:
+    """Price a cart (sku -> qty). Tax applies after discount on the goods; shipping is untaxed.
+
+    If a customer is given, ``points`` is what they earn on the goods after discount,
+    using the same rules as paid orders (see ``points_for``).
+    """
+    if not cart:
+        raise EmptyCart("cart is empty")
+    order = Order(id=new_id("ord"))
+    for sku, qty in cart.items():
+        product = products[sku]
+        if not product.is_purchasable():
+            raise NotPurchasable(f"{sku} is not available", sku=sku)
+        order.lines.append(OrderLine(sku, qty, prices.unit_price(product, qty, today)))
+    subtotal = order.total_cents
+    discount = discount_cents(coupon, subtotal, today) if coupon else 0
+    tax = order_tax(order, ship_to)
+    if discount and subtotal:
+        tax = tax * (subtotal - discount) // subtotal
+    points = points_for(customer, subtotal - discount) if customer else 0
+    return Quote(order, subtotal, discount, shipping_cents(ship_to.country, weight_g, subtotal), tax, points)
+```
+
+Check: `order.total_cents` — Order probably has a `total_cents` property; it was used in the original code (`subtotal = order.total_cents`), so it exists.
+
+Edge cases:
+- Empty cart: raises EmptyCart before points computation. No problem.
+- No customer: points = 0. No problem.
+- Customer present, subtotal - discount = 0: points_for returns 0 (spend <= 0). No problem.
+- Customer present, negative (discount > subtotal, unlikely): points_for returns 0. No problem — doesn't go negative.
+- Non-integer cents? All ints in the codebase; `points_for` does `//` so it's fine.
+- Shipping weight / other arguments unchanged.
+
+One more check: the task says "the points earned by the customer on what they pay for goods after discount, exactly the same way as loyalty points are earned for paid orders." — "exactly the same way" = use `points_for`. Yes.
+
+One more thing to check: are there other places that call `quote()` with 7 positional arguments (i.e., passing coupon positionally)? Adding `customer` after `coupon` preserves compatibility. Good.
+
+Also — should `points` be based on `subtotal - discount` even when there's no customer? Yes, it's 0 anyway.
+
+Also, do I need to worry about the signature line length? The original def line:
+
+```python
+def quote(cart: dict[str, int], products: dict[str, Product], ship_to: Address, weight_g: int,
+          prices: PriceBook, today: date, coupon: Coupon | None = None) -> Quote:
+```
+
+Add `customer: Customer | None = None`. To keep line length reasonable, wrap it:
+
+```python
+def quote(cart: dict[str, int], products: dict[str, Product], ship_to: Address, weight_g: int,
+          prices: PriceBook, today: date, coupon: Coupon | None = None,
+          customer: Customer | None = None) -> Quote:
+```
+
+That's consistent with typical formatting (continuation-line indentation matching the opening parenthesis). The second line "          prices: PriceBook, today: date, coupon: Coupon | None = None," is fine.
+
+Docstring: keep the original first line, maybe add a sentence about points. The original docstring: "Price a cart (sku -> qty). Tax applies after discount on the goods; shipping is untaxed." I can add: "When a customer is supplied, points is what they earn on the discounted goods, the same way paid orders earn them." That's useful and matches the style (concise). Keep it short.
+
+Now, one more thing to check: does the codebase have any callers of `quote` that unpack `Quote` positionally, e.g. `order, subtotal, discount, shipping, tax = quote(...)`? Unlikely — it's a dataclass, accessed by attribute. Even if someone unpacked the 5 fields, adding a 6th would break tuple unpacking. Risky, but the dataclass has a default-arg field `notes`, so it's already 6 fields; any positional unpacking would already have to account for `notes`. The task explicitly requires adding the field, so this is accepted.
+
+Placement of `points`: before or after `notes`? Logically `notes` is last (bag of extras). Points is a monetary-related field, so placing it with the cents fields makes sense: after tax_cents. Also, `total_cents` property is right after tax_cents… wait, `total_cents` is a property defined inside the dataclass body, not a field. Field order: order, subtotal_cents, discount_cents, shipping_cents, tax_cents, notes. Insert `points: int = 0` between tax_cents and notes.
+
+Hmm, should points have a default at all? If I make it a required field (`points: int`), then external code constructing `Quote(...)` with 5 positional args breaks. Default 0 is safer and matches "0 when no customer is specified." Going with `points: int = 0`.
+
+Wait, one subtle point: with default 0, a `Quote` built without a customer via the `quote()` function is passed points=0 explicitly. No problem.
+
+Also re-verify that `points_for` is importable without side effects: loyalty.py only imports `shopkit.customers.models`. No problem.
+
+Import ordering: roughly alphabetical within groups:
+- shopkit.catalog.models
+- shopkit.catalog.pricing
+- shopkit.customers.loyalty  ← new
+- shopkit.customers.models
+- shopkit.errors
+- ...
+
+Yes, `loyalty` before `models` alphabetically. Good.
+
+And `from shopkit.customers.models import Address, Customer` — alphabetical: Address, Customer. Good.
+
+Final file:
+
+```python
+"""Checkout: turns a cart into a priced order with tax, shipping and discounts, then takes payment."""
+from dataclasses import dataclass, field
+from datetime import date
+
+from shopkit.catalog.models import Product
+from shopkit.catalog.pricing import PriceBook
+from shopkit.customers.loyalty import points_for
+from shopkit.customers.models import Address, Customer
+from shopkit.errors import ShopError
+from shopkit.orders.models import Order, OrderLine
+from shopkit.promotions.coupons import Coupon, discount_cents
+from shopkit.shipping.rates import shipping_cents
+from shopkit.tax.calculator import order_tax
+from shopkit.utils.ids import new_id
+
+
+class EmptyCart(ShopError):
+    http_status = 422
+
+
+class NotPurchasable(ShopError):
+    http_status = 422
+
+
+@dataclass
+class Quote:
+    order: Order
+    subtotal_cents: int
+    discount_cents: int
+    shipping_cents: int
+    tax_cents: int
+    points: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def total_cents(self) -> int:
+        return self.subtotal_cents - self.discount_cents + self.shipping_cents + self.tax_cents
+
+
+def quote(cart: dict[str, int], products: dict[str, Product], ship_to: Address, weight_g: int,
+          prices: PriceBook, today: date, coupon: Coupon | None = None,
+          customer: Customer | None = None) -> Quote:
+    """Price a cart (sku -> qty). Tax applies after discount on the goods; shipping is untaxed.
+
+    With a customer, ``points`` is what they earn on the discounted goods, the same way
+    points are earned on paid orders.
+    """
+    if not cart:
+        raise EmptyCart("cart is empty")
+    order = Order(id=new_id("ord"))
+    for sku, qty in cart.items():
+        product = products[sku]
+        if not product.is_purchasable():
+            raise NotPurchasable(f"{sku} is not available", sku=sku)
+        order.lines.append(OrderLine(sku, qty, prices.unit_price(product, qty, today)))
+    subtotal = order.total_cents
+    discount = discount_cents(coupon, subtotal, today) if coupon else 0
+    tax = order_tax(order, ship_to)
+    if discount and subtotal:
+        tax = tax * (subtotal - discount) // subtotal
+    points = points_for(customer, subtotal - discount) if customer else 0
+    return Quote(order, subtotal, discount, shipping_cents(ship_to.country, weight_g, subtotal), tax, points)
+```
+
+Hmm, wait: typo alert — I wrote `order = Order(id=new_id("ord"))` in my head, but let me confirm it matches the original. Yes: `order = Order(id=new_id("ord"))`.
+
+Let me trace the main path: cart with items, products, ship_to, weight, prices, today, no coupon, no customer → subtotal computed, discount 0, tax, points 0, Quote with points=0. Good.
+
+With customer (tier "gold", subtotal-discount = 1500 cents) → points_for → (1500 // 100) * 3 = 45. Points = 45. Good.
+
+With coupon: subtotal 1000, discount 200 → basis 800 → standard tier: 8 points. Good.
+
+Edge: subtotal-discount = 50 (less than $1) → 0 points. Consistent with loyalty rules.
+
+Edge: customer specified but empty cart → raises EmptyCart before points. No problem.
+
+One more consideration: should `customer` be placed before `coupon` in the signature? The task says "give `quote()` an optional `customer` argument." Existing code might call `quote(..., today, coupon)` positionally — putting customer after coupon preserves those. Also keyword callers unaffected. Placing after coupon is the safest and most conventional (add at the end).
+
+Also, should I pass customer positionally in the return? `Quote(order, subtotal, discount, shipping, tax, points)` — positionally: order, subtotal_cents, discount_cents, shipping_cents, tax_cents, points, then notes defaults. Correct.
+
+Check the `field` import is still used (yes, for notes' default_factory). `dataclass` used. `date` used. All imports used: Product (annotation), PriceBook (annotation), points_for (used), Address, Customer (annotations), ShopError (base class), Order, OrderLine, Coupon (annotation), discount_cents, shipping_cents, order_tax, new_id. All good.
+
+I'm confident in this change. Output is only the file block, nothing else.

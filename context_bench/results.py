@@ -58,9 +58,10 @@ def config_label(r: dict) -> str:
 
 
 def _repo_intact(rs: list[dict]) -> str:
-    """Passing runs whose patch also kept the repo's own tests green, e.g. "12/13" ("–": not checked)."""
-    ok = [r for r in rs if r["label"] == "ok" and r.get("repo_tests_total") is not None]
-    return f"{sum(r['repo_tests_passed'] == r['repo_tests_total'] for r in ok)}/{len(ok)}" if ok else "–"
+    """Runs that passed the hidden tests and also kept the repo's original tests green, e.g. "12/13" ("–": not
+    checked): ok out of ok + breaks_tests."""
+    hp = [r for r in rs if r["label"] in ("ok", "breaks_tests") and r.get("known_tests_total") is not None]
+    return f"{sum(r['label'] == 'ok' for r in hp)}/{len(hp)}" if hp else "–"
 
 
 def _ran_out(r: dict) -> bool:
@@ -68,7 +69,7 @@ def _ran_out(r: dict) -> bool:
 
 
 def _cell(r: dict) -> str:
-    mark = {"ok": "✅", "no_fit": "⛔", "tool_error": "⚠️"}.get(r["label"], "❌")
+    mark = {"ok": "✅", "breaks_tests": "🔶", "no_fit": "⛔", "tool_error": "⚠️"}.get(r["label"], "❌")
     out = f"{mark} {r['tests_passed']}/{r['tests_total']}"
     if _ran_out(r):
         out += " ✂"
@@ -193,7 +194,7 @@ def report(path: Path, grades_path: Path | None = None) -> str:
         ru = [r for r in rs if r["reuse_passed"] is not None]
         peak = max(r["peak_ctx_tokens"] for r in rs)
         count = lambda lab: sum(r["label"] == lab for r in rs)
-        summary.append([c, len(rs), count("ok"), count("broken"), count("no_fit"), count("tool_error"),
+        summary.append([c, len(rs), count("ok"), count("breaks_tests"), count("broken"), count("no_fit"), count("tool_error"),
                         sum(map(_ran_out, rs)),
                         "/".join(str(sum(r.get("format_status") == s for r in rs))
                                  for s in ("bad_format", "no_code", "tool_request")),
@@ -207,8 +208,8 @@ def report(path: Path, grades_path: Path | None = None) -> str:
                         f"{sum(r['tool_calls'] for r in rs) / len(rs):.1f}",
                         f"{100 * sum(r.get('legacy_ctx_share') or 0 for r in rs) / len(rs):.0f}%",
                         sum(bool(r.get("legacy_used")) for r in rs)])
-    out += _table(["Config", "runs", "ok", "broken", "no_fit", "tool_error", "ran out",
-                   "fmt/no code/asked", "lenient ok", "reuse ok", "repo tests kept (ok runs)",
+    out += _table(["Config", "runs", "ok", "breaks tests", "broken", "no_fit", "tool_error", "ran out",
+                   "fmt/no code/asked", "lenient ok", "reuse ok", "known tests kept (hidden pass)",
                    "mean in", "cacheable in", "mean out", "max peak", "mean latency", "mean tools",
                    "dead ctx", "dead used"], summary)
 

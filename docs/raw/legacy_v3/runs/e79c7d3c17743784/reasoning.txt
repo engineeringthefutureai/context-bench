@@ -1,0 +1,169 @@
+Let me understand the task. I need to add `export_orders_csv(orders) -> str` to `shopkit/orders/export.py`, next to the existing `export_orders_json`.
+
+Requirements:
+1. One row per order line
+2. Header: `order_id,product_code,quantity,line_total`
+3. Product code cleaned "the same way it is cleaned everywhere else in the shop" — there are multiple SKU-normalization functions in the codebase:
+   - `shopkit/utils/text.py::normalize_sku` — "Canonical product code: uppercase, strip separators, dash between letter groups and digit groups."
+   - `shopkit/common/StringUtils.py::cleanSKU` — uppercase, preserve letters, digits, and dashes.
+   - `shopkit/utils/strings.py::sku_code` — "Product code in the format partners expect: uppercase, remove spaces."
+
+Which is "everywhere else in the shop"? Let me look at the usage sites:
+- `shopkit/invoices/render.py` (customer invoices) uses `normalize_sku(line.sku)` for line display: `f"{normalize_sku(line.sku):<16}..."`.
+- `shopkit/catalog/importer.py` uses `normalize_sku`.
+- `shopkit/catalog/search.py` uses `normalize_sku`.
+- `shopkit/api/serializers.py` does not normalize SKUs.
+- The "new" shopkit code (non-common legacy) predominantly uses `normalize_sku`. The existing JSON export in `shopkit/orders/export.py` doesn't normalize.
+- `shopkit/common/inventory_sync.py` uses `cleanSKU` (legacy common code).
+- `shopkit/checkout.py` — no normalization.
+- `shopkit/orders/fulfillment.py` — `pick_list` uses raw SKUs.
+
+The phrase "the same way it is cleaned everywhere else in the shop" — the modern shop code uses `normalize_sku` from `shopkit.utils.text`. In particular, since line totals must match invoices and invoices use `normalize_sku`, that's a strong hint. `render_invoice_text` uses `normalize_sku(line.sku)`. So use `normalize_sku`.
+
+4. Line totals must "look exactly as they do on customer invoices" — invoices use `format_money(line.total_cents, order.currency)`. So `format_money(l.total_cents, o.currency)`.
+
+Wait — `format_money` returns e.g. `$1,234.56`. In CSV, values containing commas get quoted by the csv module, and that's fine ("use the standard csv module" — the csv module handles quoting). The task says to use the standard csv module. The codebase has `shopkit/utils/csvio.py::to_csv`, which uses the standard csv module with `\n` line endings and a header row. That's the standard way in the codebase for CSV writing. The task says "use the standard csv module" — `to_csv` uses the standard csv module. Using `to_csv` fits "match the surrounding code." Let me use `to_csv` from `shopkit.utils.csvio`.
+
+5. One row per order line: for each order, for each line, a row: `(order.id, normalize_sku(line.sku), line.qty, format_money(line.total_cents, order.currency))`.
+
+Header: `order_id,product_code,quantity,line_total`.
+
+The existing file:
+
+```python
+import json
+
+from shopkit.orders.models import Order
+
+
+def export_orders_json(orders: list[Order]) -> str:
+    """Raw JSON export for warehouse integration."""
+    payload = [
+        {
+            "id": o.id,
+            "currency": o.currency,
+            "lines": [{"sku": l.sku, "qty": l.qty, "unit_cents": l.unit_cents} for l in o.lines],
+        }
+        for o in orders
+    ]
+    return json.dumps(payload, indent=2)
+```
+
+New file:
+
+```python
+import json
+
+from shopkit.money import format_money
+from shopkit.orders.models import Order
+from shopkit.utils.csvio import to_csv
+from shopkit.utils.text import normalize_sku
+
+
+def export_orders_json(orders: list[Order]) -> str:
+    """Raw JSON export for warehouse integration."""
+    payload = [
+        {
+            "id": o.id,
+            "currency": o.currency,
+            "lines": [{"sku": l.sku, "qty": l.qty, "unit_cents": l.unit_cents} for l in o.lines],
+        }
+        for o in orders
+    ]
+    return json.dumps(payload, indent=2)
+
+
+def export_orders_csv(orders: list[Order]) -> str:
+    """One row per order line, for finance's spreadsheet. Line totals are formatted the way
+    invoices show them (symbol and thousands separator), so the csv module quotes as needed."""
+    rows = [(o.id, normalize_sku(l.sku), l.qty, format_money(l.total_cents, o.currency))
+            for o in orders for l in o.lines]
+    return to_csv(("order_id", "product_code", "quantity", "line_total"), rows)
+```
+
+Confirming `to_csv`:
+
+```python
+def to_csv(header: Sequence[str], rows: Iterable[Sequence[object]]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buf.getvalue()
+```
+
+It accepts a `Sequence[str]` header — a tuple is fine (`Sequence` is structural). Rows as a list of tuples is also fine.
+
+Confirming `OrderLine.total_cents` exists — yes, it's a property.
+
+`format_money` signature: `format_money(cents: int, currency: str = "USD") -> str`. Good.
+
+`normalize_sku` in `shopkit.utils.text`. Good.
+
+Now, is there any concern about "use the standard csv module"? It could also be read as "use the csv module directly" rather than going through csvio. But csvio is the code the codebase provides that uses the standard csv module; the docstring says "CSV writing for exports and reports (stdlib csv, always \n line endings, header first)." That's exactly the convention. A reviewer would prefer `to_csv`. Going with `to_csv`.
+
+Edge cases:
+- Empty orders list → header only, empty file with just the header row. `to_csv` writes the header and no rows → "order_id,product_code,quantity,line_total\n". Reasonable.
+- Order with no lines → no rows for that order.
+- SKU like "mug 1" → "MUG-1". "ab 12-x" → "AB-12-X".
+- Line total in cents like 2500, USD → "$25.00" → no comma, no quoting. 123456 → "$1,234.56" → csv module quotes: `"$1,234.56"`. That's correct CSV behavior.
+- Negative? Line totals shouldn't be negative, but format_money handles it.
+
+Also, should I include `unit_cents`? No — the header is fixed: `order_id,product_code,quantity,line_total`.
+
+Type hints: match the surrounding style, `orders: list[Order]` and `-> str`.
+
+The docstring should be concise, matching the tone of the codebase.
+
+Re-checking import order in the file: existing is `import json`, then a blank line, then `from shopkit.orders.models import Order`. Isort-ish grouping: stdlib, then first-party. Add:
+
+```python
+import json
+
+from shopkit.money import format_money
+from shopkit.orders.models import Order
+from shopkit.utils.csvio import to_csv
+from shopkit.utils.text import normalize_sku
+```
+
+Alphabetical within the group: money, orders, utils.csvio, utils.text. Good.
+
+Now let me write the full new file contents.
+
+One more consideration: the task says "add `export_orders_csv(orders) -> str` next to the existing JSON export." So the signature should just take `orders`. Good.
+
+Confirm no circular import: `shopkit.orders.export` imports `shopkit.money`, `shopkit.orders.models`, `shopkit.utils.csvio`, `shopkit.utils.text`. None of them import from orders.export. No issue.
+
+Final file:
+
+```python
+import json
+
+from shopkit.money import format_money
+from shopkit.orders.models import Order
+from shopkit.utils.csvio import to_csv
+from shopkit.utils.text import normalize_sku
+
+
+def export_orders_json(orders: list[Order]) -> str:
+    """Raw JSON export for warehouse integration."""
+    payload = [
+        {
+            "id": o.id,
+            "currency": o.currency,
+            "lines": [{"sku": l.sku, "qty": l.qty, "unit_cents": l.unit_cents} for l in o.lines],
+        }
+        for o in orders
+    ]
+    return json.dumps(payload, indent=2)
+
+
+def export_orders_csv(orders: list[Order]) -> str:
+    """Spreadsheet export for finance: one row per order line. Codes and totals match the
+    customer invoice, so amounts keep the currency symbol (the csv module quotes the commas)."""
+    rows = [(o.id, normalize_sku(l.sku), l.qty, format_money(l.total_cents, o.currency))
+            for o in orders for l in o.lines]
+    return to_csv(("order_id", "product_code", "quantity", "line_total"), rows)
+```
+
+That's it. Per the instructions, the response should contain only the file block.

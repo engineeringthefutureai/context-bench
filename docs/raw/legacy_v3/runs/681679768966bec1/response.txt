@@ -1,0 +1,190 @@
+To satisfy the request, I will add an `expected_arrival` function to `shopkit/payments/refunds.py`.
+
+However, there is a missing dependency in the provided context: the "shop's usual business-day calendar". Since no module or function defining this calendar was provided, I must make a reasonable assumption consistent with standard Python codebases. Typically, such a function would live in the `shopkit.utils` or a dedicated calendar module. Given the existing `from shopkit.utils.dates import utc_now`, I will assume there is a helper `is_business_day(day: date) -> bool` or similar available. 
+
+Wait, looking at the imports, I don't see a calendar module imported. If I cannot import it, I cannot implement the "shop is closed" part specifically. 
+Let's re-read carefully: "on the shop's usual business-day calendar (weekends and the days the shop is closed don't count)."
+If the context doesn't provide the calendar, I cannot invent a specific import unless it's obvious. 
+Is there a standard `shopkit.calendar` or similar?
+In many systems, `shopkit.utils.dates` might contain business day logic, or `shopkit.utils` might.
+Let's look at the existing imports in `shopkit/payments/refunds.py`:
+`from shopkit.utils.dates import utc_now`
+
+If I assume there is a function `is_business_day` in `shopkit.utils.dates`, I can use it. If I assume there is a `Calendar` object, I'd need to instantiate it.
+Given the ambiguity and the strict constraint that I can only modify `shopkit/payments/refunds.py` (and potentially import from existing modules), I have to guess the most likely API for the shop's business calendar.
+
+A very common pattern in such codebases is a utility function `is_business_day` or a class `BusinessCalendar`.
+Let's assume the standard Python `datetime` module is used for date arithmetic.
+The function `expected_arrival` should take a `Refund` and return a `date`.
+Logic:
+1. Start with `refund.at.date()`.
+2. Initialize `count = 0`.
+3. While `count < 5`:
+   - Increment date by 1 day.
+   - Check if it is a business day.
+   - If yes, increment `count`.
+4. Return the date.
+
+I need to import `datetime.date` or use `datetime` module.
+I need to check if `shopkit.utils.dates` provides a business day check.
+Let's assume `shopkit.utils.dates` has `is_business_day(day: date) -> bool`.
+If it doesn't, and I'm forced to only use what's shown, I can't know the closed days. But the prompt says "on the shop's usual business-day calendar". This implies such a thing exists in the codebase.
+Since I don't have the code for `shopkit.utils.dates`, I will write the code assuming `is_business_day` is available in `shopkit.utils.dates` or I will import a specific calendar module if one is standard.
+Actually, a safer bet for a "senior software engineer" who "can't ask" and "must make the most reasonable assumption" is to implement the logic such that it relies on a function that defines the business days.
+
+Let's look at the import `from shopkit.utils.dates import utc_now`.
+It is highly probable that `is_business_day` or a similar utility exists in `shopkit.utils.dates` or `shopkit.utils.calendar`.
+I will add an import for a business day checker. A common name would be `is_business_day`.
+I will also need to import `date` from `datetime`.
+
+Let's refine the assumption: The prompt says "on the shop's usual business-day calendar". This is a specific domain concept. I will assume a module `shopkit.utils.calendar` or a function in `shopkit.utils.dates`.
+Let's try `from shopkit.utils.dates import is_business_day`. If this fails in the real environment, it's a risk.
+However, often in these problems, if the context is limited, the "business calendar" might be a simple rule (e.g., just weekends) or there is a specific import I should add.
+Wait, if I just use weekends, I fail the "days the shop is closed" part.
+I will assume `shopkit.utils.dates` contains `is_business_day(day: date) -> bool`.
+
+Let's write the code.
+
+```python
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import datetime, date
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import utc_now, is_business_day
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+
+def expected_arrival(refund: Refund) -> date:
+    """Calculate the expected date the refund reaches the customer's card.
+    
+    Banks need five business days, counted from the day the refund was issued.
+    """
+    current_day = refund.at.date()
+    days_needed = 5
+    while days_needed > 0:
+        current_day += timedelta(days=1)
+        if is_business_day(current_day):
+            days_needed -= 1
+    return current_day
+```
+
+I also need to import `timedelta` from `datetime`.
+
+Wait, what if `is_business_day` is not in `shopkit.utils.dates`?
+Another possibility: `shopkit.utils.calendar` has a `Calendar` instance.
+Given the uncertainty, the most standard, simple, and "fit-in" assumption for a utility function is in the same `dates` module or a `calendar` module.
+I'll stick with `is_business_day` in `shopkit.utils.dates` as it's a very common naming convention for such helpers in Python utils.
+
+One edge case: "counted from the day the refund was issued".
+Does "counted from" mean the issue day is day 1, or do we start adding days after?
+"Banks need five business days, counted from the day the refund was issued".
+Usually, this phrasing "counted from X" implies X is the starting point, and we count 5 business days *from* it.
+If I issue on Monday.
+Day 1: Tuesday? Or is Monday Day 1?
+If Monday is Day 1, then Tuesday 2, Wednesday 3, Thursday 4, Friday 5. Arrival Friday.
+If we start *after* the issue day:
+Monday (issue).
+Day 1: Tuesday.
+Day 2: Wednesday.
+Day 3: Thursday.
+Day 4: Friday.
+Day 5: Monday.
+Arrival Monday.
+
+The phrase "counted from the day the refund was issued" is slightly ambiguous.
+"Counted from X" often means X is the start. "5 days from today" usually means today + 5.
+However, in business contexts, "processing time of 5 business days" usually starts the next business day.
+Let's look at the wording: "counted from the day the refund was issued".
+If I say "The countdown starts from today", today is day 1? Or today is day 0?
+Common bank phrasing: "Refunds are typically credited in 3-5 business days." This usually means you see it in 3-5 days *after* the refund is initiated.
+So if initiated Monday, 5 business days later is the following Monday (assuming 5-day week).
+My loop `while days_needed > 0: current_day += 1; if business: days_needed -= 1` implements "N business days after the start date".
+Start: Monday.
+1. Tuesday (Biz, count 4)
+2. Wednesday (Biz, count 3)
+3. Thursday (Biz, count 2)
+4. Friday (Biz, count 1)
+5. Saturday (No)
+6. Sunday (No)
+7. Monday (Biz, count 0) -> Return Monday.
+This seems the most standard interpretation for "arrival after N business days".
+
+If the requirement meant "including the issue day", it would say "counting the day of issue". "Counted from" suggests the day is the origin/anchor.
+
+I will proceed with the implementation.
+
+One detail: `timedelta` needs to be imported.
+
+<file path="shopkit/payments/refunds.py">
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import datetime, date, timedelta
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import utc_now, is_business_day
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+
+
+def expected_arrival(refund: Refund) -> date:
+    """Calculate the expected date the refund reaches the customer's card.
+
+    Banks need five business days, counted from the day the refund was issued.
+    """
+    current_day = refund.at.date()
+    days_needed = 5
+    while days_needed > 0:
+        current_day += timedelta(days=1)
+        if is_business_day(current_day):
+            days_needed -= 1
+    return current_day
+</file>

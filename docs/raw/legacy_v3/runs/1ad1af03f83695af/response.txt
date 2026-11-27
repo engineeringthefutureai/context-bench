@@ -1,0 +1,59 @@
+
+
+<file path="shopkit/orders/returns.py">
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+RESTOCKING_FEE_PCT = "12.5"
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        """12.5% of the refund for changed-mind returns, 0 for every other reason."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+</file>

@@ -1,0 +1,116 @@
+To satisfy the requirement to add `transfer_reference()` to the payments gateway module, I first need to understand the "same style as the shop's other customer-facing codes". Looking at the context, `new_id` is used for `Payment` IDs (e.g., `"pay..."`), which are internal or semi-internal. I should check `shopkit.utils.ids` or similar files to see if there's a specific generator for customer-facing codes (like order numbers, reference codes, etc.). Since I don't have the context for `shopkit.utils.ids`, I will look for other usages in the codebase if possible, but I cannot run tools.
+
+However, standard "customer-facing codes" in many systems are uppercase alphanumeric, often without ambiguous characters (0/O, 1/I). Let's look at `redact_pan` in `shopkit.payments.reconciliation` or `new_id` in `shopkit.utils.ids`.
+Since I can't see `shopkit.utils.ids`, I have to make a reasonable assumption or implement a standard generator that fits the description "12 characters in three dash-separated groups of four".
+Wait, the prompt says: "in the same style as the shop's other customer-facing codes."
+If I look at `shopkit/payments/gateway.py`, it imports `new_id` from `shopkit.utils.ids`.
+Usually, `new_id` generates something like `pay_abc123...`.
+But "customer-facing codes" often implies something like `ORDER-1234-5678` or similar.
+Let's assume there is a helper in `shopkit.utils` or I should just implement the logic directly in `gateway.py` if it's not obvious, or perhaps there's a `generate_code` utility.
+Without seeing `shopkit.utils.ids`, I will implement a simple, secure random string generator that produces uppercase alphanumeric characters, which is a very common style for customer-facing reference codes (e.g., bank transfer references). I will use `secrets` for security since it's a reference code that customers use to identify their payment.
+
+The format is: `XXXX-XXXX-XXXX`.
+
+Let's refine the implementation:
+```python
+import secrets
+import string
+
+def transfer_reference() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    # Remove ambiguous characters if we assume a standard "safe" set, but the prompt doesn't specify "ambiguous-free".
+    # "Same style as the shop's other customer-facing codes" is the key.
+    # If I don't know the style, I'll stick to a robust default: Uppercase A-Z and 0-9.
+    
+    groups = []
+    for _ in range(3):
+        group = ''.join(secrets.choice(alphabet) for _ in range(4))
+        groups.append(group)
+    return '-'.join(groups)
+```
+
+Is there a helper? `new_id` is used. Maybe `new_id` takes a prefix and length?
+`new_id("pay")` suggests it generates a prefix + random string.
+If I use `new_id`, the format might be `ref-XXXX...` which isn't `XXXX-XXXX-XXXX`.
+So I likely need to implement the specific formatting myself.
+
+Let's look at the imports in `gateway.py`.
+It imports `new_id` from `shopkit.utils.ids`.
+It imports `redact_pan` from `shopkit.payments.reconciliation`.
+
+If I assume the "style" is just uppercase alphanumeric, `secrets` is the right tool.
+I will add the function to `shopkit/payments/gateway.py`.
+
+One detail: "same style as the shop's other customer-facing codes".
+If I look at typical e-commerce patterns, references are often `12345-678901` or `ABCD-1234-EFGH`.
+The request specifically asks for "12 characters in three dash-separated groups of four". This is `XXXX-XXXX-XXXX`.
+This totals 12 characters.
+
+I will implement `transfer_reference` using `secrets` and `string`.
+
+```python
+import secrets
+import string
+
+def transfer_reference() -> str:
+    """Generate a 12-character pay-by-bank transfer reference in XXXX-XXXX-XXXX format."""
+    alphabet = string.ascii_uppercase + string.digits
+    groups = ['-'.join([]) for _ in range(0)] # placeholder
+    groups = []
+    for _ in range(3):
+        group = ''.join(secrets.choice(alphabet) for _ in range(4))
+        groups.append(group)
+    return '-'.join(groups)
+```
+
+I'll place it in the module.
+
+<file path="shopkit/payments/gateway.py">
+"""Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway."""
+import secrets
+import string
+
+from shopkit.errors import ShopError
+from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+from shopkit.payments.reconciliation import redact_pan
+from shopkit.utils.ids import new_id
+
+
+class PaymentDeclined(ShopError):
+    http_status = 402
+
+
+class FakeGateway:
+    """Declines card numbers ending in 0000; everything else is authorized."""
+
+    def __init__(self):
+        self.payments: dict[str, Payment] = {}
+
+    def authorize(self, order_id: str, amount_cents: int, currency: str, card_number: str) -> Payment:
+        digits = "".join(c for c in card_number if c.isdigit())
+        payment = Payment(new_id("pay"), order_id, amount_cents, currency, "card",
+                          card_number=redact_pan(digits))
+        if digits.endswith("0000"):
+            payment.status = FAILED
+            self.payments[payment.id] = payment
+            raise PaymentDeclined("card declined", order_id=order_id, payment_id=payment.id)
+        self.payments[payment.id] = payment
+        return payment
+
+    def capture(self, payment_id: str) -> Payment:
+        payment = self.payments[payment_id]
+        if payment.status != AUTHORIZED:
+            raise ShopError(f"payment {payment_id} is {payment.status}", payment_id=payment_id)
+        payment.status = CAPTURED
+        return payment
+
+
+def transfer_reference() -> str:
+    """Generate a 12-character pay-by-bank transfer reference in XXXX-XXXX-XXXX format."""
+    alphabet = string.ascii_uppercase + string.digits
+    groups = [
+        ''.join(secrets.choice(alphabet) for _ in range(4))
+        for _ in range(3)
+    ]
+    return '-'.join(groups)
+</file>

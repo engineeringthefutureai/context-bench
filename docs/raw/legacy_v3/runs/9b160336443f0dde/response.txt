@@ -1,0 +1,51 @@
+
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.events import Event, bus
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    dst = network.get(destination)
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    dst.stock.receive(sku, qty)
+    # Announce the completed transfer; AuditLog.on_event files it under the SKU.
+    bus.publish(
+        Event(
+            name="stock.transferred",
+            payload={
+                "sku": sku,
+                "qty": qty,
+                "source": source,
+                "destination": destination,
+            },
+        )
+    )
+    return Transfer(sku, qty, source, destination)
+</file>

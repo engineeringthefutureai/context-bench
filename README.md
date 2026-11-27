@@ -33,14 +33,18 @@ reads every passing patch for defects the tests miss.
 
 2,122 runs on repos S, M and L, with thinking off and on, one sample per configuration. On these tasks:
 
-- The agents (L7, L8) passed 93-96% with thinking on, on every repo size. The best search-based level reached 68%.
+- The agents (L7, L8) passed 92% and 96% with thinking on, and at least 82% on each repo size. The best
+  search-based level reached 67%.
 - Clean passes, which pass the tests, keep the repository's own tests green and draw no penalty from the judge,
   rose from 10% with one file to 82% at L8.
-- Thinking lifted the one-shot levels L1-L6 from 35% to 59% PASS, and the agents from 81% to 93%.
+- Thinking lifted the one-shot levels L1-L6 from 35% to 58% PASS, and the agents from 80% to 93%.
+- 13 runs passed every hidden test but broke some of the repository's own tests; they count as BROKE KNOWN
+  TESTS, not PASS. In 9 of them the model had never seen the test it broke.
 - With thinking on, the agents read about half as much, and the whole round used fewer tokens (53M against 33M).
 
 The full write-up, the hypotheses and their verdicts are on the site. The v3 round (repos S and M, 880 runs)
-stays available at the tag `round-v3`.
+stays available at the tag `round-v3`, and its raw runs (patches, replies, test output, prompts) are readable
+file by file in `docs/raw/legacy_v3/`.
 
 ## A commercial harness as the baseline
 
@@ -54,7 +58,7 @@ Gemini models, since these 30 tasks are a simple suite, well below where frontie
 | Antigravity + Gemini 3.5 Flash-Lite | 54/57 | 0 of 823 | 452k |
 | Antigravity + Qwen 3.8 27B, thinking on | 53/57 | 408 of 804 | 301k |
 | L8 + Qwen 3.8 27B, thinking on | 55/57 | – | 103k |
-| L7 selective + Qwen 3.8 27B, thinking on | 54/57 | – | 48k |
+| L7 selective + Qwen 3.8 27B, thinking on | 53/57 | – | 48k |
 
 Antigravity and Gemini showed a high synergy: not one empty command, though the pair didn't reach every task
 (it missed reuse-010@M, long-004@L and reuse-008@L). Qwen in the same harness often named tool arguments in
@@ -77,8 +81,10 @@ written without the repository that fails.
 
 ## How the harness works
 
-- **Outcomes** come from the hidden tests alone: PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER,
-  STOPPED EARLY, INVALID, OUT OF TOKENS, OUT OF TIME, NO FIT (`docs/labeling-design.md`).
+- **Outcomes** come from the tests: PASS (every hidden test passes and the repository's own tests stay green),
+  BROKE KNOWN TESTS (the hidden tests pass, but some of the repository's original tests no longer do), FAIL,
+  UNPARSABLE, ASKED TO EXPLORE, NO ANSWER, STOPPED EARLY, INVALID, OUT OF TOKENS, OUT OF TIME, NO FIT
+  (`docs/labeling-design.md`).
 - **Second chance:** when an agent tries to finish, the harness compiles every changed file (L7) or runs the
   repository's own tests (L8), never the hidden ones, and returns a failure for one more turn. The agent isn't
   told in advance.

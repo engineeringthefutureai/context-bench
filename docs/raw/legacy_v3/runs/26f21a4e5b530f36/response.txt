@@ -1,0 +1,200 @@
+To satisfy the request, I will add the `transfers_by_week` function to `shopkit/inventory/transfers.py`. 
+
+First, I need to determine the correct week label format. The prompt mentions "the same week labels the other dashboards use". Since no other files are provided in the context, I must make a reasonable assumption. A standard ISO week format (e.g., `2023-W04`) is widely used in dashboards for weekly grouping. However, looking at standard Python `datetime` usage and typical requirements, a `YYYY-WW` format or `YYYY-WEEK` is common. Let's look for hints. There are no hints. 
+Wait, often "week labels" in business contexts might just be the ISO year and week number, like `2024-W03`.
+Let's check `shopkit/utils/dates.py` or similar if it existed. It doesn't.
+However, a very common and unambiguous format for weekly buckets in time series is the ISO year and ISO week number.
+Let's assume the format is `f"{dt.isocalendar()[0]}-W{dt.isocalendar()[1]:02d}"`.
+
+Let's refine the implementation:
+1. Import `datetime` is already there.
+2. The function takes `transfers` which is a sequence of `Transfer` objects.
+3. It should return `dict[str, int]`.
+4. Keys should be in chronological order. Python dicts preserve insertion order (since 3.7), so if I process transfers sorted by date, or just insert them in sorted order, the result will be chronological. Since `transfers` input order isn't guaranteed to be chronological, I should sort the unique weeks or the transfers themselves by their `at` timestamp before aggregation to ensure the dictionary keys are in chronological order.
+
+Let's write the function:
+
+```python
+def transfers_by_week(transfers: list[Transfer]) -> dict[str, int]:
+    """
+    Aggregate transfer quantities by ISO week.
+    
+    Returns a dictionary with week labels (e.g., '2023-W04') as keys and 
+    total units moved as values, ordered chronologically.
+    """
+    if not transfers:
+        return {}
+    
+    # Group by week label
+    weeks: dict[str, int] = {}
+    
+    # To ensure chronological order in the resulting dict, we should process
+    # the weeks in sorted order. 
+    # First, extract all weeks and their totals.
+    # Since we need the output dict to be chronological, we can sort the keys at the end.
+    
+    for t in transfers:
+        iso = t.at.isocalendar()
+        label = f"{iso[0]}-W{iso[1]:02d}"
+        weeks[label] = weeks.get(label, 0) + t.qty
+        
+    # Sort keys chronologically to maintain insertion order in the final dict
+    sorted_weeks = sorted(weeks.keys())
+    return {week: weeks[week] for week in sorted_weeks}
+```
+
+Wait, is there a standard utility in `shopkit` for this? The context shows `from shopkit.utils.dates import utc_now`. It's possible there is a `week_label` function in `shopkit.utils.dates` or `shopkit.utils.dashboards`. Since I cannot see it, I must assume the format. `YYYY-WW` is the most standard "dashboard" week label format that sorts correctly alphabetically and chronologically.
+
+Let's double check the requirements.
+- `transfers_by_week(transfers) -> dict[str, int]`
+- total units moved per week
+- keyed by week
+- same week labels the other dashboards use
+- in chronological order
+
+If I assume the label format is `YYYY-WW` (e.g., `2024-W15`), it satisfies chronological ordering via string sort (as long as year is 4 digits and week is 2 digits).
+
+One edge case: What if `transfers` is a generator? The type hint should probably be `Iterable[Transfer]` or `Sequence[Transfer]`. The request says `transfers`, implying a collection. I'll use `Iterable` to be safe, but standard typing for this usually accepts `list` or `Sequence`. Given `Transfer` is a dataclass, a list is most likely. I will type it as `Iterable[Transfer]` to be robust, or just `list[Transfer]` if matching likely style. Let's look at existing code. `transfer` takes primitives. No other list-accepting functions shown. I will use `Iterable[Transfer]` from `collections.abc` or just `list[Transfer]`. Python 3.9+ supports `list`. I'll stick to `list[Transfer]` for simplicity unless the codebase suggests otherwise. Actually, `Sequence` is safer for read-only inputs. Let's use `Iterable` to be most permissive, but `list` is the most common concrete type. I'll define it as `list[Transfer]`.
+
+Wait, I should check if `shopkit.utils.dates` has a specific function. I can't. I will implement the label generation inline as it's a small logic.
+
+Final check on the label format. 
+ISO calendar: `isocalendar()` returns `(year, week, weekday)`.
+Format: `f"{year}-W{week:02d}"`.
+
+One detail: `datetime` import is already present.
+
+Let's construct the final file content.
+
+```python
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable
+
+from shopkit.errors import Conflict
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    return Transfer(sku, qty, source, destination)
+
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    """
+    Aggregate transfer quantities by ISO week.
+    
+    Args:
+        transfers: An iterable of Transfer objects.
+        
+    Returns:
+        A dictionary mapping week labels (e.g., '2024-W03') to the total 
+        quantity of units moved in that week, ordered chronologically.
+    """
+    if not transfers:
+        return {}
+    
+    # Accumulate totals per week label
+    totals: dict[str, int] = {}
+    for t in transfers:
+        iso_year, iso_week, _ = t.at.isocalendar()
+        # Standard week label format: YYYY-Www
+        label = f"{iso_year}-W{iso_week:02d}"
+        totals[label] = totals.get(label, 0) + t.qty
+        
+    # Return a new dict with keys in chronological order
+    # Since labels are YYYY-Www, string sorting matches chronological sorting
+    return {week: totals[week] for week in sorted(totals)}
+```
+
+I added `from typing import Iterable` to handle various input types safely.
+
+One consideration: `t.at` is a `datetime`. If it's timezone-aware, `isocalendar()` works the same. The codebase uses `utc_now`, so `at` is likely UTC.
+
+The label format `YYYY-Www` is the most standard for "dashboard week labels".
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable
+
+from shopkit.errors import Conflict
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    return Transfer(sku, qty, source, destination)
+
+
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    """
+    Aggregate transfer quantities by ISO week.
+    
+    Args:
+        transfers: An iterable of Transfer objects.
+        
+    Returns:
+        A dictionary mapping week labels (e.g., '2024-W03') to the total 
+        quantity of units moved in that week, ordered chronologically.
+    """
+    if not transfers:
+        return {}
+    
+    # Accumulate totals per week label
+    totals: dict[str, int] = {}
+    for t in transfers:
+        iso_year, iso_week, _ = t.at.isocalendar()
+        # Standard week label format: YYYY-Www
+        label = f"{iso_year}-W{iso_week:02d}"
+        totals[label] = totals.get(label, 0) + t.qty
+        
+    # Return a new dict with keys in chronological order
+    # Since labels are YYYY-Www, string sorting matches chronological sorting
+    return {week: totals[week] for week in sorted(totals)}
+</file>

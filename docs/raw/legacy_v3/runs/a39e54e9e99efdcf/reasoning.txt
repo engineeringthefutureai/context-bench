@@ -1,0 +1,116 @@
+Let's start by understanding the task. The email provider is issuing warnings (penalties) against bounce-backs from addresses that were entered incorrectly. The recipients of the newsletter must also have email addresses that pass the same check as what the shop applies at sign-up and at checkout. Everyone else should be skipped.
+
+Therefore, what I need to do is:
+1. Find the email validation check that's used at sign-up and at checkout.
+2. Apply that check to the recipients of the newsletter (in `recipients` and/or `batches`).
+
+Let's explore the repository and find the email validation logic.
+
+
+The validation function is `is_valid_email` in `shopkit/utils/validation.py`. Let's look at it to confirm how it's used, and also check the Customer model to see whether `email` is a field.
+
+
+Customer.email is str, and the check is `is_valid_email` from `shopkit.utils.validation`. In `shopkit/customers/service.py` it's used like `if not is_valid_email(email):`. Let me quickly check how signup is using it, and also check how `recipients`/`batches` are being used elsewhere, so I can preserve the interface.
+
+Let me look at `shopkit/customers/service.py` to confirm the exact usage pattern at signup time, and check who is calling `newsletter.recipients`/`batches`.
+
+
+Let me verify: `is_valid_email(address: str)` — strips the address and then matches. The Customer.email field is of type str. The task: "Newsletter recipients should also have an email address that passes the same check applied at signup and checkout, and everyone else should be skipped."
+
+Signup/checkout check: in `CustomerDirectory.register`, `email.strip().lower()` is applied before `is_valid_email(email)`. `is_valid_email` itself does the strip. Should I lowercase? This regex is case-sensitive for characters, but the email domain/characters are case-insensitive in this regex: `A-Za-z0-9` etc., so lowercasing doesn't change the result. However, for consistency with the signup check, the simplest and safest approach: apply `is_valid_email(c.email)` directly. Since `is_valid_email` handles the strip and is case-insensitive per the regex, applying it directly is fine. But "the same check applied at signup and checkout" — register does `email.strip().lower()` before calling `is_valid_email`. `is_valid_email` also strips again. Since lowercasing doesn't affect the outcome of this regex (both character classes include upper and lower case), `is_valid_email(c.email)` alone is equivalent. Keep it simple: `if c.marketing_opt_in and is_valid_email(c.email)`.
+
+Should I handle the possibility of `c.email` being None? The type is str. I'll maintain the str assumption consistent with the rest of the code.
+
+Edge case: what if email is an empty string? is_valid_email("".strip()) → regex doesn't match → False. No problem.
+
+Let me also check who else calls `recipients` or `batches` — only within the file. `render_for` is probably used elsewhere. No problem.
+
+Now, the change:
+
+```python
+from shopkit.utils.validation import is_valid_email
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+```
+
+Update the module docstring too? The docstring says "Only opted-in customers receive marketing emails." I could append to this. I'll keep it small: update the docstring to reflect the email check. Maybe: "Only opted-in customers with valid email addresses receive marketing emails." That's a reasonable and minimal improvement. Keep it.
+
+Should I also lowercase? register strips and lowercases before validation. To faithfully match "the same check applied at signup," I could do `is_valid_email(c.email.lower())` — but is_valid_email strips internally, and since the regex is case-insensitive, lowercasing is a no-op. Adding `.lower()` would be misleading and a no-op. Skip it.
+
+I don't think I need to check the tests directory for the newsletter — it might not exist. Let me not use any more calls. Actually, should I check whether the tests reference the newsletter to confirm the behavior… I've already used 3 calls. There's budget. Let me quickly grep for newsletter inside the tests.
+
+
+No tests exist that reference the newsletter. OK, let me implement the changes:
+
+- Import `is_valid_email` from `shopkit.utils.validation`.
+- Update `recipients()` to filter by `c.marketing_opt_in and is_valid_email(c.email)`.
+
+Keep the code style consistent. Update the module docstring too? The docstring says "Only customers who have opted in receive marketing emails." I could update it to mention the email validity requirement. This is a small but reasonable doc update that reflects the change. Keep it minimal.
+
+Note: `render_for` uses `customer.email`? No, `batches` uses `c.email`. `render_for` doesn't use email. The filter goes in `recipients()`, which both `batches` (and possibly external callers) use.
+
+Edge cases: `c.email` could potentially be None? The type is str, so `is_valid_email` expects a str. `None` would fail on `.strip()`. The model types email as str, so I'll trust that. But defensively, should I check `c.email`? The codebase trusts the model. `is_valid_email` requires a str. If email is an empty string, the regex fails → filtered out. Good.
+
+Also, should I strip before using email in `batches`? At sign-up it's normalized with `.strip().lower()`. But for customers imported from old systems, emails might not be normalized. The task only says to skip ones that don't pass the check — not to normalize. `is_valid_email` itself strips for the check (the check strips, but `batches` sends the raw `c.email`). Keep it minimal: filter only, no normalization. The task says "skip anyone else." Don't change the sending behavior.
+
+So write the new file:
+
+```python
+"""Newsletter sends. Only customers who opted in receive marketing email."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # provider limit per API call
+
+BODY = "Hi {{ first_name }},\n\n{{ intro }}\n\nShop now: {{ link }}\n\nUnsubscribe: {{ unsubscribe }}"
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    # Skip addresses that failed the signup/checkout check (old-system imports).
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+```
+
+Docstring: "Only customers who have opted in receive marketing emails." — still accurate, but I could add a bit of clarification. Keep it simple, either keep the docstring as-is or make a slight extension. I'll make a slight update to reflect both conditions:
+
+`"""Newsletter sends. Only opted-in customers with a valid email address receive marketing emails."""`
+
+That's reasonable.
+
+
+The grep of tests (result #8) has already been discarded (it was the result of grepping for newsletter|recipients in tests, and it seems that either it was returned with no matches, or its contents were simply unnecessary). In reality, the result has been discarded. I'll now make the changes.
+
+
+The task: newsletter recipients must also have an email address that passes the same check as what the shop applies at sign-up and checkout. That check is `is_valid_email` in `shopkit/utils/validation.py`. Everyone else is skipped.
+
+So modify `recipients` to also filter by `is_valid_email(c.email)`. Note: at sign-up, emails are stored stripped and lowercased, so stored emails are clean, but this task says "badly typed addresses imported from the old system," so customer.email may not have been validated. `is_valid_email` strips the address itself, so `is_valid_email(c.email)` works fine.
+
+Should I use `c.email` directly, or normalize it? The check `is_valid_email` does the stripping. Use `is_valid_email(c.email)`.
+
+The change is minimal: add the import and add the filter condition to `recipients`. `batches` uses `recipients`, so it will automatically benefit. `render_for` is probably used elsewhere, but the filter is applied in `recipients`. Should `batches` also filter? `batches` calls `recipients`, so that's handled.
+
+Update the module docstring? The docstring says "Only customers who opted in receive marketing email." I can update it to also mention a valid email. That's reasonable and small. Keep it concise.
+
+Let me write the new file:
+
+```python
+"""Newsletter sends. Only opted-in customers with a valid email address receive marketing email."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # provider limit per API call
+
+BODY = "Hi {{ first_name }},\n\n{{ intro }}\n\nShop now: {{ link }}\n\nUnsubscribe: {{ unsubscribe }}"
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+```
+
+That's the whole change. Import order: alphabetical by module — customers, marketing, notifications, utils.collections, utils.validation. Good.

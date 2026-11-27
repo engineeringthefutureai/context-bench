@@ -1,0 +1,73 @@
+The request is clear: add `transfers_by_week(transfers) -> dict[str, int]` to `shopkit/inventory/transfers.py` that totals units moved per ISO-week, keyed by the same week labels used by the other dashboards (i.e. `iso_week_label`, which produces the `"YYYY-Wxx"` format), in chronological order.
+
+The `Transfer` dataclass has an `at: datetime` field, and `TransferFailed` raises `Conflict`. Let me look at the relevant pieces:
+
+- `iso_week_label` lives in `shopkit.utils.dates` and takes a `date` — so I should pass `t.at.date()`.
+- The `weekly_revenue` in `reports/sales.py` uses `group_by` + sorted items; I'll mirror that pattern.
+- "total units moved" = sum of `qty` per week.
+
+Let me check `group_by`'s signature to use it consistently.
+
+I don't have `group_by` shown, but it's imported and used in `sales.py` as `group_by(sales, key=lambda s: ...)`. Let me check if it's available.
+
+I'll use the same `group_by` import from `shopkit.utils.collections` as `sales.py` does, for consistency.
+
+```python
+from shopkit.utils.collections import group_by
+from shopkit.utils.dates import iso_week_label
+```
+
+Now, the implementation:
+
+```python
+def transfers_by_week(transfers: list[Transfer]) -> dict[str, int]:
+    weeks = group_by(transfers, key=lambda t: iso_week_label(t.at.date()))
+    return {w: sum(t.qty for t in ts) for w, ts in sorted(weeks.items())}
+```
+
+`sorted(weeks.items())` sorts by the week label key, and since the label format `"YYYY-Wxx"` is lexicographically sortable (zero-padded year and week), this gives chronological order. This matches the `weekly_revenue` pattern exactly.
+
+Let me write the complete file.
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.collections import group_by
+from shopkit.utils.dates import iso_week_label, utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    return Transfer(sku, qty, source, destination)
+
+
+def transfers_by_week(transfers: list[Transfer]) -> dict[str, int]:
+    """Total units moved per ISO week, keyed by week label, in chronological order."""
+    weeks = group_by(transfers, key=lambda t: iso_week_label(t.at.date()))
+    return {w: sum(t.qty for t in ts) for w, ts in sorted(weeks.items())}
+</file>

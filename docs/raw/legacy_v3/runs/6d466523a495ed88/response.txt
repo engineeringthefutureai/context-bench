@@ -1,0 +1,100 @@
+The request is clear: move the hard-coded return window into the shared `Settings`, add a `SHOPKIT_RETURN_DAYS` environment override, and use it from `open_return`. The pattern to follow is exactly `low_stock_threshold` — a plain scalar setting read in `load_settings`.
+
+Two files change:
+- `shopkit/config.py`: add the setting field and the env-var override (kept alongside the other scalar overrides).
+- `shopkit/orders/returns.py`: read the window from `SETTINGS` and drop the now-dead module constant.
+
+<file path="shopkit/config.py">
+"""Service settings. Defaults suit local development; production overrides come from the environment."""
+import os
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class Settings:
+    default_currency: str = "USD"
+    store_country: str = "US"
+    low_stock_threshold: int = 5
+    invoice_prefix: str = "INV"
+    page_size: int = 50
+    max_page_size: int = 200
+    support_email: str = "support@shopkit.example"
+    free_shipping_over_cents: int = 10_000
+    supported_currencies: tuple[str, ...] = ("USD", "EUR", "GBP")
+    return_window_days: int = 30
+    feature_flags: dict[str, bool] = field(default_factory=dict)
+
+    def flag(self, name: str) -> bool:
+        return self.feature_flags.get(name, False)
+
+
+def load_settings(env: dict[str, str] | None = None) -> Settings:
+    """Build Settings from SHOPKIT_* variables; unknown variables are ignored."""
+    env = os.environ if env is None else env
+    kwargs: dict[str, object] = {}
+    if "SHOPKIT_CURRENCY" in env:
+        kwargs["default_currency"] = env["SHOPKIT_CURRENCY"]
+    if "SHOPKIT_COUNTRY" in env:
+        kwargs["store_country"] = env["SHOPKIT_COUNTRY"]
+    if "SHOPKIT_LOW_STOCK" in env:
+        kwargs["low_stock_threshold"] = int(env["SHOPKIT_LOW_STOCK"])
+    if "SHOPKIT_PAGE_SIZE" in env:
+        kwargs["page_size"] = int(env["SHOPKIT_PAGE_SIZE"])
+    if "SHOPKIT_RETURN_DAYS" in env:
+        kwargs["return_window_days"] = int(env["SHOPKIT_RETURN_DAYS"])
+    flags = env.get("SHOPKIT_FLAGS", "")
+    kwargs["feature_flags"] = {f.strip(): True for f in flags.split(",") if f.strip()}
+    return Settings(**kwargs)
+
+
+SETTINGS = load_settings({})
+</file>
+<file path="shopkit/orders/returns.py">
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.config import SETTINGS
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=SETTINGS.return_window_days):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+</file>

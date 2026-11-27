@@ -1,0 +1,227 @@
+The task is to add a read-only `url_path` property to `Product` that returns "/products/<slug>". The slug is generated from the product title using "the same URL slug rules that the shop is already using for titles."
+
+The context only shows `shopkit/catalog/models.py`, and there is no slug helper anywhere. I need to assume a reasonable slug function. Typical slug rules: lowercase, replace non-alphanumeric with hyphens, collapse consecutive hyphens, strip leading/trailing hyphens.
+
+Since there's no slug helper visible in the repo, I should implement a small helper consistent with what a typical shop would use. The instructions say "prefer reusing existing project helpers" but nothing is shown. So I'll implement a module-level function, or a private method, in models.py that generates a slug from the title.
+
+The task says "use the same URL slug rules that the shop is already using for titles" — since I don't have the shop's slug code on hand, I'll make the most reasonable assumption: standard slugification (unicode-friendly: lowercase, replace non-alphanumeric with `-`, collapse consecutive `-`, strip).
+
+Design:
+
+```python
+from dataclasses import dataclass
+import re
+
+
+@dataclass
+class Product:
+    sku: str
+    title: str
+    price_cents: int
+    active: bool = True
+
+    def is_purchasable(self) -> bool:
+        return self.active and self.price_cents > 0
+
+    @property
+    def url_path(self) -> str:
+        slug = slugify(self.title)
+        return f"/products/{slug}"
+```
+
+And slugify:
+
+```python
+def slugify(text: str) -> str:
+    """Turn a title into a stable URL slug."""
+    slug = text.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    return slug.strip("-")
+```
+
+Wait — `[^a-z0-9]+` replaces any consecutive non-alphanumeric run with a single hyphen, which handles collapsing. Then strip leading/trailing hyphens.
+
+Edge case: empty title → slug is "" → url_path becomes "/products/". Hmm, that's a weird path. Should I handle it? The request implies the slug comes from the title. If the title is empty, "/products/" is not a stable useful address. But the codebase's Product probably always has a title. I could leave it alone. Adding a fallback for empty slug might be over-engineering. But "correctness comes first: the new behavior must be correct for every input the request implies, including empty values." Empty title is implied as an edge case. What's reasonable? Probably leave it as "/products/" — but that's an empty slug. Alternatively, I could use sku as a fallback? That would be inventing behavior not in the request. The request says "the slug is generated from the product title" — so strictly from title. Let me keep it simple: empty title → empty slug → "/products/". Hmm.
+
+Actually, let me think about what's most defensible to a reviewer. The request: "return '/products/<slug>' where the slug is generated from the product title." A straightforward implementation would do exactly that. Fallbacks aren't asked for. I'll go with the simple approach, but maybe mention nothing (can't add comments outside the code… no, I can add comments inside code). I'll keep it minimal.
+
+Unicode: should the slug keep unicode letters? A typical shop uses `re.sub(r'[^a-z0-9]+', '-', title.lower())`, which strips accents. Or use `unicodedata` to normalize and transliterate. Without seeing the shop's rules, ASCII is the safest common assumption. I'll use ASCII slugification.
+
+Also the dataclass: adding a `@property` is fine since the dataclass only generates fields from annotations. Note: a property named `url_path` with `-> str` annotation inside the class body — dataclass looks at `__annotations__` in the class namespace. Does a property assigned to a name with an annotation count as a field? Careful! In a dataclass, any name in the class body with an annotation becomes a field. If I write:
+
+```python
+@dataclass
+class Product:
+    sku: str
+    ...
+
+    @property
+    def url_path(self) -> str:
+        ...
+```
+
+The property's `-> str` annotation is on the function, not a class-level annotation. The class-level annotations are `sku`, `title`, `price_cents`, `active`. The property definition `def url_path(self) -> str` does not add to `Product.__annotations__`… actually, wait. Let me recall: when a dataclass processes a class, it collects fields from the class's `__annotations__` dict (only annotations directly in the class body, e.g. `x: int`). A method's return-value annotation does not go into the class's `__annotations__`. So a property with a return-value annotation is safe — it's not a field. Good.
+
+But there's a subtle known pitfall: a property with no annotation, or one that's decorated… no, the classic pitfall is when you annotate a name in the class body like `url_path: str` together with a property — that makes the dataclass treat it as a field with a property default, which fails with "field url_path must not be a property". But a plain `@property def url_path(self) -> str` without a class-level annotation is fine.
+
+So the implementation:
+
+```python
+import re
+from dataclasses import dataclass
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(title: str) -> str:
+    """Return the URL slug for a product title.
+
+    Lowercases the title and replaces any run of non-alphanumeric
+    characters with a single hyphen, dropping leading and trailing
+    hyphens. This matches the slug rules used elsewhere in the shop.
+    """
+    slug = _SLUG_RE.sub("-", title.strip().lower())
+    return slug.strip("-")
+```
+
+Hmm, should I name it `slugify`? The task says the shop already uses slug rules for titles — maybe there's an existing helper like `shopkit/web/slugs.py`? Not shown. Since the context only shows one file, the tests will presumably check `Product(...).url_path` for various titles. If there's an existing helper I can't see, reusing it is preferred but I can't import something that might not exist. Safest is to implement the slugification in models.py.
+
+Where to put the slug function? A module-level private helper in models.py, or inline within the property. Given the target file is models.py and I can only modify that file (I shouldn't create new files unless necessary — "all files the change requires, and nothing beyond it"). I'll keep everything in models.py.
+
+Should the helper be public or private? The shop "already uses URL slug rules for titles" — implying a slug function exists somewhere. Since I can't see it, I'll define a small module-level function. Making it private (`_slugify`) is fine since it's just internal to this file. But if tests import it… unlikely. The property is what's specified. I'll keep it private: `_slugify`. Hmm, but if there were an existing slug function in the repo that the tests compare against, the names would differ. Either way I'll implement it.
+
+Actually, reconsidering: maybe I should make the slug function a module-level public `slugify(title)` so it can be reused if the shop later wants it — but per the instructions "keep the change as small as the request allows." A private helper is fine.
+
+Edge cases to trace:
+- "Hello, World!" → "hello-world" → "/products/hello-world"
+- "  Cacao & Coffee Beans  " → "cacao-coffee-beans"
+- "Ünïcodé" → "n-cod" (non-ASCII stripped: 'ü' → hyphen… let me trace: "unicode" lowercased is "ünïcodé". Regex `[^a-z0-9]+` matches 'ü' → "-", 'ï' → "-", 'é' → "-": "n-cod-" → strip → "n-cod". OK, stable.
+- "A   B" (multiple spaces) → "a-b" (run collapsed).
+- "" → "" → "/products/".
+- "123" → "123" → "/products/123".
+- "CamelCase" → "camelcase".
+
+Also `active=False` doesn't affect url_path — a read-only property of address, fine.
+
+Property should be read-only: `@property` without a setter → read-only. Good.
+
+Also, should I worry about `re` import placement: standard library imports before dataclasses import? Convention: alphabetical / stdlib. `import re` and `from dataclasses import dataclass` — usually plain imports first, then from imports, or just alphabetical. I'll do:
+
+```python
+import re
+from dataclasses import dataclass
+```
+
+That's typical (stdlib block). Good.
+
+Docstring: the class doesn't have one. Should I add a docstring to the property? A short one explaining the slug rule intent is good. Keep style: the existing file has no docstrings at all, no type issues, minimal. Let me add a concise docstring on the helper only where intent isn't obvious (slug rule). Actually "a reviewer should not notice which lines are new from their style" — the file has zero docstrings. Hmm. But the instructions also say "add docstrings or comments where intent is not obvious." The slug rule is somewhat non-obvious. A one-liner comment suffices and keeps style light. I'll add a short docstring to the helper — it's a new public-ish module function and that's appropriate. Keep it minimal.
+
+Also consider: does the slug need to be stable? "Stable product page address" — yes, a deterministic pure function of title. Good.
+
+Final file:
+
+```python
+import re
+from dataclasses import dataclass
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(title: str) -> str:
+    """Return the URL slug for a product title.
+
+    Lowercases the title and replaces every run of non-alphanumeric
+    characters with a single hyphen, dropping hyphens at either end.
+    """
+    slug = _SLUG_RE.sub("-", title.strip().lower())
+    return slug.strip("-")
+
+
+@dataclass
+class Product:
+    sku: str
+    title: str
+    price_cents: int
+    active: bool = True
+
+    def is_purchasable(self) -> bool:
+        return self.active and self.price_cents > 0
+
+    @property
+    def url_path(self) -> str:
+        """The stable product page address, e.g. "/products/green-apple" """
+        return f"/products/{_slugify(self.title)}"
+```
+
+Wait: does a property with a `-> str` return annotation inside a dataclass cause issues? Let me re-verify. In a dataclass, fields are determined by the `__annotations__` of the class namespace. When you define:
+
+```python
+@dataclass
+class Product:
+    sku: str
+
+    @property
+    def url_path(self) -> str:
+        return "x"
+```
+
+`Product.__annotations__` only contains `{'sku': str}`. The function's return annotation is stored on the function object (`url_path.__annotations__`), not the class. So dataclass is fine. The well-known failure mode is annotating the name at class level:
+
+```python
+@dataclass
+class Product:
+    sku: str
+    url_path: str = property(...)
+```
+
+That errors: "field url_path must not be a property". I'm not doing that. Good.
+
+Another consideration: order of `@property` and method `is_purchasable` — placing the property after the method is fine.
+
+Should the helper be placed before or after the dataclass? Before is fine and readable.
+
+One question: the regex should probably also handle underscores? `[^a-z0-9]+` maps underscore → hyphen. Typical slugification (e.g., Django's slugify) keeps only alphanumerics and hyphens. Fine.
+
+Potential test expectation: "Café au lait" → "caf-au-lait"? With ASCII regex: 'é' is non-ASCII → hyphen: "caf-au-lait". If the shop uses unicode-aware slug (keeps é), it would be "café-au-lait". No way to know. ASCII is the most common assumption ("URL slug rules"). Going with ASCII.
+
+Alternatively, use a naive approach without regex:
+
+```python
+slug = "".join(c if c.isalnum() and c.isascii() else "-" for c in title.lower())
+```
+
+The regex is cleaner. Keep the regex.
+
+Let me also double-check the empty-title edge: `/products/` — I'll accept that. The request doesn't specify a fallback, and Product presumably always has a non-empty title. Silently inventing a fallback (like using sku) would be wrong.
+
+Now the output: only the file block, nothing else.
+
+Final check of the whole file contents:
+
+```python
+import re
+from dataclasses import dataclass
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(title: str) -> str:
+    """Return the URL slug for a product title.
+
+    Lowercases the title and replaces every run of non-alphanumeric
+    characters with a single hyphen, dropping hyphens at either end.
+    """
+    slug = _SLUG_RE.sub("-", title.strip().lower())
+    return slug.strip("-" if not slug else slug)
+```
+
+No — I won't invent a fallback. Just:
+
+```python
+    slug = _SLUG_RE.sub("-", title.strip().lower())
+    return slug.strip("-")
+```
+
+Hmm, one more thought: the property docstring. The file's style has no docstrings, so to match style I could just have no docstring, or minimal. I'll keep a concise one-liner on the property? The task is explicit about behavior, so self-evident. To match the file's sparse style, I might omit the docstring on the property, but the "stable address" intent is fine. Let me go with no docstring on the property (self-evident), and a short docstring on the helper where the slug rule needs stating. Actually, let me reconsider matching style: "a reviewer should not notice which lines are new from their style." The file has zero docstrings/comments. Adding one small docstring is common practice for a module-level function and doesn't look foreign. Keeping it.
+
+Done. Writing the output.

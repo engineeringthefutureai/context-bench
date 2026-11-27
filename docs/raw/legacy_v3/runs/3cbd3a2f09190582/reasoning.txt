@@ -1,0 +1,152 @@
+Let's analyze the task:
+
+Task:
+- Changed-mind returns will now have a 12.5% restocking fee.
+- Add `restocking_fee_cents(order)` to `ReturnRequest`: for changed-mind returns, 12.5% of the refund amount for that return; for all other reasons, 0.
+- Since this is a percentage against money, round it in exactly the same way as the shop rounds other percentage amounts like tax and discounts.
+
+The shop uses `apply_rate` from `shopkit.utils.numbers` for percentage amounts: "Used for tax, fees, discounts." Therefore we should use `apply_rate(self.refund_cents(order), 12.5)`.
+
+Looking at the existing code in `shopkit/orders/returns.py`:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+
+RETURN_WINDOW_DAYS = 30
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+```
+
+We need to add:
+
+```python
+    def restocking_fee_cents(self, order: Order) -> int:
+        """12.5% restocking fee on changed-mind returns; 0 for every other reason."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), 12.5)
+```
+
+Should we define a module-level constant, e.g. `RESTOCKING_FEE_PCT = 12.5`? The existing code has `SUBSCRIPTION_DISCOUNT_PCT = 10` in subscriptions.py, so a constant fits the codebase's style. Let's add `RESTOCKING_FEE_PCT = 12.5` near the top of the module.
+
+Import: `from shopkit.utils.numbers import apply_rate`.
+
+Confirming that `apply_rate` handles floats: `apply_rate(1999, 15) -> 300`; it accepts `rate_pct: float | Decimal | str`. Internally it uses `Decimal(str(rate_pct))` so 12.5 works: `Decimal("12.5")`. Rounding is ROUND_HALF_UP (away from zero in the case of negatives). The refund amount is positive, so no problem.
+
+Example: for a 1000-cent refund, 12.5% = 125 cents. apply_rate(1000, 12.5) = Decimal(1000)*Decimal("12.5")/100 = Decimal(125.0) -> 125. Good.
+
+Edge case: refund amount 0? `self.items` is checked in open_return and requires qty >= 1, so a return always has at least one item and a positive refund amount. But even if items were empty, refund would be 0 and fee would also be 0 — no problem.
+
+Should the fee method check `self.reason != "changed_mind"` or `self.reason == "changed_mind"`? The task says "for changed-mind returns, 12.5% of the refund amount for that return; for all other reasons, 0." Therefore `if self.reason == "changed_mind": return apply_rate(...)`, else 0. Either is fine.
+
+Also, existing tests: `test_changed_mind_needs_approval` — unaffected.
+
+Note that `open_return` computes `approved=reason != "changed_mind"` using the string literal. We could also define a `CHANGED_MIND = "changed_mind"` constant, but let's keep the change minimal: we shouldn't refactor unrelated lines. We'll keep the literal inside the new method to match existing usage.
+
+Docstring style: the module's methods have docstrings. `refund_cents` doesn't have one. We'll add a concise one.
+
+Let's write the whole file:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+RESTOCKING_FEE_PCT = 12.5
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents...
+```
+
+Wait — the method name the task asks for: `restocking_fee_cents(order)`. So:
+
+```python
+    def restocking_fee_cents(self, order: Order) -> int:
+        """Restocking fee: 12.5% of the refund for changed-mind returns, 0 otherwise."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+```
+
+Constant placement: after REASONS, or before it. The existing file has `RETURN_WINDOW_DAYS = 30` followed by `REASONS = (...)`. Add `RESTOCKING_FEE_PCT = 12.5` with a brief comment? subscriptions.py uses `SUBSCRIPTION_DISCOUNT_PCT = 10` without a comment. A short comment might help: `# percentage of the refund charged on changed-mind returns`. Let's keep it simple:
+
+```python
+RETURN_WINDOW_DAYS = 30
+RESTOCKING_FEE_PCT = 12.5           # percent of the refund, charged on changed-mind returns
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+```
+
+Checking import order: the existing imports are:
+
+```python
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+```
+
+Alphabetical order: errors, orders.models, utils.ids, utils.numbers. So adding `from shopkit.utils.numbers import apply_rate` after utils.ids preserves alphabetical order. Good.
+
+Rounding verification: apply_rate uses Decimal and ROUND_HALF_UP — the same as tax (tax/calculator uses apply_rate) and discounts (coupons use apply_rate). This satisfies "round in exactly the same way as the shop rounds other percentage amounts like tax and discounts."
+
+Also confirm that the tests won't break: existing tests construct ReturnRequest via open_return and call refund_cents. The new method is additive. No changes to the dataclass's fields.
+
+One consideration: should the fee be computed against the refund amount (sum of returned lines at the unit price), or against something else? The task explicitly says "12.5% of the refund amount for that return" — the return's refund amount, i.e. `self.refund_cents(order)`. Good.
+
+Edge case: what if the reason is an unknown string? `open_return` rejects reasons not in REASONS. For any other reason, fee is 0. No problem.
+
+Type hint: `-> int`. apply_rate returns int.
+
+Now, the file's final contents. Output only the <file> block.

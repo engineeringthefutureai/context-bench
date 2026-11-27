@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 Level = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L-AG"]
-Label = Literal["ok", "broken", "tool_error", "no_fit"]
+Label = Literal["ok", "breaks_tests", "broken", "tool_error", "no_fit"]   # breaks_tests: hidden tests pass, a known repo test doesn't
 Category = Literal["reuse", "cross_file", "convention", "control", "trap", "long"]   # long: a rule buried in a long function (repo L)
 
 
@@ -168,6 +168,8 @@ class RunResult:
     # regression check (added 2026-11-21; backfilled by cbench rescore). Label unaffected.
     repo_tests_passed: int | None = None  # the repo's own tests/ after the patch; None: no <file> blocks
     repo_tests_total: int | None = None
+    known_tests_total: int | None = None      # the repo's original tests (pass on the unmodified fixture)
+    known_tests_broken: list[str] | None = None   # original tests that don't pass after the patch (ids); any -> breaks_tests
     # what the hidden tests verify of the patch (added 2026-11-22; backfilled by cbench rescore)
     patch_stmts: int | None = None      # statements the patch changed/added outside test files
     patch_stmts_covered: int | None = None  # of those, run by the hidden tests (correctness + reuse)

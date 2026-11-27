@@ -1,0 +1,325 @@
+
+
+<file path="shopkit/config.py">
+...
+</file>
+<file path="shopkit/orders/returns.py">
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.config import SETTINGS
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=SETTINGS.return_window_days):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind" and False or reason != "changed_mind")
+</file>
+Wait — let me be careful. The task is only to make the return window a deployment setting. I must not rewrite the final line. Let me redeliver the change correctly and minimally.
+
+Also, I don't actually have the contents of `shopkit/config.py`. I inferred it exists from `shopkit/inventory/reorder.py` importing `from shopkit.config import SETTINGS` and using `SETTINGS.low_stock_threshold`. The task says "like the shop's other settings" — so `SETTINGS` is the settings object. I should add `return_window_days` to the settings with default 30 and env override `SHOPKIT_RETURN_DAYS`.
+
+Since I cannot see `shopkit/config.py`, I need to assume its structure. Typical pattern: a `Settings` dataclass or a module-level object reading env vars, e.g.:
+
+```python
+@dataclass
+class Settings:
+    low_stock_threshold: int = env_int("SHOPKIT_LOW_STOCK_THRESHOLD", 10)
+    ...
+SETTINGS = Settings()
+```
+
+Since I can't run tools (none provided), I must guess. But I should be conservative: the safest change that keeps the codebase healthy is to add the setting to `shopkit/config.py` following the same pattern as `low_stock_threshold`. Since I haven't seen the file, I have to reconstruct it plausibly.
+
+Hmm, the instruction: "If something you need is not shown, make the most reasonable assumption consistent with what is shown, and implement it." What is shown: `from shopkit.config import SETTINGS` and `SETTINGS.low_stock_threshold`. So `shopkit/config.py` defines a `SETTINGS` instance with at least `low_stock_threshold`.
+
+The most reasonable, minimal assumption: a dataclass `Settings` where each field default comes from an env var with a `SHOPKIT_` prefix. I'll write:
+
+```python
+"""Deployment settings. Each value defaults to a sensible standard and can be overridden per
+deployment with an environment variable (SHOPKIT_ prefix)."""
+import os
+from dataclasses import dataclass
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    return int(raw) if raw is not None else default
+
+
+@dataclass(frozen=True)
+class Settings:
+    low_stock_threshold: int = _int("SHOPKIT_LOW_STOCK_THRESHOLD", 10)
+    return_window_days: int = _int("SHOPKIT_RETURN_DAYS", 30)
+
+
+SETTINGS = Settings()
+```
+
+But wait — if the real config.py already has other settings or a different structure, my whole-file rewrite would overwrite them. That's a risk. But I have to deliver the complete file contents; I can't emit a diff. Given I don't have the file, I'll assume the minimal version consistent with the shown usage.
+
+Alternative approach: I could put the env override in returns.py itself, reading `SHOPKIT_RETURN_DAYS` there. But the task says "Make the return window a deployment setting like the shop's other settings" — the shop's other settings live in `shopkit/config.py` (SETTINGS). So the right move is to add it to config and use `SETTINGS.return_window_days` in returns.py, mirroring how `reorder.py` uses `SETTINGS.low_stock_threshold`.
+
+Let me also double check returns.py change: replace `RETURN_WINDOW_DAYS = 30` usage. Should I keep the constant? The task: "used by open_return instead of the hard-coded 30." So remove the module-level `RETURN_WINDOW_DAYS = 30` constant (or keep it?). If I keep `RETURN_WINDOW_DAYS = 30` and set default in config to 30, the constant becomes redundant but harmless. However, other code might import `RETURN_WINDOW_DAYS` from returns.py. The context doesn't show any. The task says "instead of the hard-coded 30", implying the hard-coded 30 should no longer be used. Keeping a dead constant is worse than removing; but removing a public-ish name could break importers I can't see. Given this is a small codebase and the constant is only used once in the shown file, I'll remove it — the setting in config is now the source of truth. Actually, hmm. Let me reconsider: the instructions say "Keep public interfaces, data formats and behaviour that other code relies on intact unless the request asks you to change them." The request asks to replace the hard-coded 30 with a setting. `RETURN_WINDOW_DAYS` is the hard-coded 30. I think the cleanest interpretation: remove the constant, use `SETTINGS.return_window_days`.
+
+Also note: the docstring says "within the return window" — fine, still true.
+
+In my earlier draft I accidentally corrupted the last line of returns.py. The final delivery must be clean.
+
+Let me also think about env parsing robustness: what if env var is set but not an int? `int(raw)` raises ValueError with a clear-ish message. The codebase style for config is unknown. Keep it simple: `int(os.environ.get(name, default))` — but `int("30")` with str default would also work if default is int: `os.environ.get(name, str(default))`? Actually `int(os.environ.get(name, default))` where default is int: `os.environ.get` returns the default if missing, but its type annotation expects str; at runtime, `int(30)` works fine. Cleaner: `int(os.environ.get(name, "") or default)`? No, simplest readable:
+
+```python
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, default))
+```
+
+Hmm, `os.environ.get(name, default)` with default int — works at runtime. But a bit odd type-wise. Alternative:
+
+```python
+def _int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return int(value) if value is not None else default
+```
+
+This is explicit and safe. I'll go with a small helper.
+
+Now, what other settings exist? Only `low_stock_threshold` is shown. I'll include just that plus the new one. Default for `low_stock_threshold`: not shown in context. I have to pick something reasonable. Common default: 5? 10? The test does `stock.receive("C", 2)` and expects C to be suggested with 0 sales... let me check: in test_suggest, C has on_hand=2, sold=0 → cover = inf. Condition: `cover < LEAD_TIME_DAYS + SAFETY_DAYS or on_hand <= SETTINGS.low_stock_threshold` → inf < 21 is False, so need on_hand <= threshold → 2 <= threshold must be True. And B: on_hand=100, sold=30 → cover = 100/(30/30)=100 → not < 21; 100 <= threshold must be False. A: on_hand=10, sold=30 → cover=10 < 21 → True regardless.
+
+So constraint: threshold >= 2 and threshold < 100. Any of 5, 10, 20 works for the test. I'll pick 10 as a sensible default.
+
+Env var name for low_stock_threshold: unknown. I'll assume `SHOPKIT_LOW_STOCK_THRESHOLD`. That's the natural convention (SHOPKIT_ prefix + UPPERCASE name).
+
+Should Settings be frozen? reorder.py's Suggestion is frozen. A settings object with immutable fields — frozen=True is reasonable. But if existing code mutates SETTINGS... unlikely. Frozen is fine and typical. Actually, to minimize risk of mismatch with a real dataclass that might not be frozen, it doesn't matter for attribute reads. frozen=True is safe for reads.
+
+Also `@dataclass` field defaults evaluated at class definition time — env vars read at import. That's standard for deployment settings.
+
+One more consideration: should `return_window_days` allow 0 or negative? A deployment setting; negative window means no returns. Not asked to validate. Keep simple — just parse int. But "never silently return wrong data": a non-int env var would raise ValueError at import with a message naming the variable — acceptable and clear. I could make the message clearer:
+
+```python
+def _int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
+```
+
+Maybe overkill for this codebase's simplicity. The codebase style is terse. I'll include the clearer error since invalid deployment config should fail clearly. Hmm, but keep it small... I'll go with the try/except version — it's still small and clearer. Actually let me weigh: the instruction says "Handle errors the way the codebase does: fail clearly on invalid input." The codebase is terse; `int(raw)` raising ValueError with "invalid literal for int() with base 10: 'abc'" is not bad but doesn't say which variable. I'll add the variable to the message.
+
+Now the final returns.py: remove `RETURN_WINDOW_DAYS = 30`, add `from shopkit.config import SETTINGS`, use `SETTINGS.return_window_days`.
+
+Wait — order of imports: alphabetical — `from shopkit.config import SETTINGS` comes before `from shopkit.errors import ...` — yes, config < errors alphabetically. Good, matches reorder.py's import ordering style.
+
+Also, `today > delivered_on + timedelta(days=SETTINGS.return_window_days)` — the window check remains inclusive of the 30th day (day 30 allowed, day 31+ rejected). Preserved.
+
+Double-check I don't need to change docstring: "A return refunds lines of a delivered order within the return window." — still accurate.
+
+Do I keep `REASONS`? Yes, untouched.
+
+Let me write out the full files.
+
+config.py (assumed minimal, consistent with shown usage):
+
+```python
+"""Deployment settings. Every value has a sensible default and can be overridden per
+deployment through environment variables with the SHOPKIT_ prefix."""
+import os
+from dataclasses import dataclass
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"setting {name} must be an integer, got {raw!r}") from None
+
+
+@dataclass(frozen=True)
+class Settings:
+    low_stock_threshold: int = _int("SHOPKIT_LOW_STOCK_THRESHOLD", 10)
+    return_window_days: int = _int("SHOPKIT_RETURN_DAYS", 30)
+
+
+SETTINGS = Settings()
+```
+
+That's my best reconstruction. And returns.py:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.config import SETTINGS
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=SETTINGS.return_window_days):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+```
+
+That's it. Two file blocks, nothing else in the reply.
+
+Let me verify the trace:
+- Default env: SHOPKIT_RETURN_DAYS unset → return_window_days=30 → behavior identical to before. ✓
+- Set SHOPKIT_RETURN_DAYS=14 → window 14 days. ✓
+- Test compatibility: test_reorder uses SETTINGS.low_stock_threshold; my config provides it with default 10 → test constraint 2 <= 10 < 100 holds. ✓
+- No other shown code imports RETURN_WINDOW_DAYS. ✓
+- Import exists: shopkit.config with SETTINGS. ✓
+
+Final answer: two <file> blocks only.
+
+
+<file path="shopkit/config.py">
+"""Deployment settings. Every value has a sensible default and can be overridden per
+deployment through an environment variable with the SHOPKIT_ prefix."""
+import os
+from dataclasses import dataclass
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"setting {name} must be an integer, got {raw!r}") from None
+
+
+@dataclass(frozen=True)
+class Settings:
+    low_stock_threshold: int = _int("SHOPKIT_LOW_STOCK_THRESHOLD", 10)
+    return_window_days: int = _int("SHOPKIT_RETURN_DAYS", 30)
+
+
+SETTINGS = Settings()
+</file>
+<file path="shopkit/orders/returns.py">
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.config import SETTINGS
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=SETTINGS.return_window_days):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+</file>

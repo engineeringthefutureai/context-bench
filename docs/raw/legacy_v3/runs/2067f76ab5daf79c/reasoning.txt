@@ -1,0 +1,59 @@
+Let's start by exploring the repository in order to understand its structure and find related files (the invoice and warehouse export logic).
+
+
+Let's check the shopkit structure more thoroughly. Need to find the warehouse's JSON export. Let me try listing the shopkit directory.
+
+
+Let's check the orders directory, the entire invoices directory, and the files that use Order. Key files:
+- shopkit/orders/models.py (target)
+- shopkit/orders/export.py (JSON export)
+- shopkit/invoices/render.py (invoice)
+- Other files that use Order: tax/calculator.py, api/serializers.py, checkout.py, etc.
+
+I'll list the orders directory and the invoices directory, and read the export.py and render.py files in full. Also, I'll check money.py's format_money and the test files.
+
+
+Okay, so let's check how the codebase handles validation (errors module) and the tax calculation (which might be applied to the total, and the discount could affect the tax). Also, let's check other places where Order is constructed or where the total is calculated. Let's read errors.py, money.py, the tax calculator, and the fulfillment code.
+
+
+Let me understand the situation:
+
+1. **`shopkit/orders/models.py`** (target): Need to add `discount_percent: int = 0` to `Order`, and `Order.total_cents` needs to reflect the discount with the discount amount rounded down to the cent.
+
+2. **`shopkit/invoices/render.py`**: Invoices need to display the discount amount on an independent line just before the total, but only for orders with a discount.
+
+3. **`shopkit/orders/export.py`**: The warehouse JSON export must include `discount_percent`.
+
+Let me check some more details:
+- `shopkit/utils/numbers.py` has `apply_rate` — let me check how rates are applied (rounding mode).
+- `shopkit/money.py` has `format_money`.
+- Tests: There's a `tests/` directory — I can't run them, but let me peek at the existing tests for models to understand expectations (they won't run, but let me read them).
+
+Key design decisions:
+
+1. `discount_percent: int = 0` — validation "0 to 100". Where do I validate? The dataclass currently has no validation. Let me check how other parts of the codebase validate. `shopkit/errors.py` has a `ShopError` class for business rule failures. But dataclasses rarely validate. Let me look at `utils/numbers.py` to see `apply_rate`, and also check the tests directory.
+
+Actually, note: "The order total must reflect the discount; the discount amount is rounded down to the cent." So `total_cents = gross - discount`, where `discount = floor(gross * percent / 100)`.
+
+Should `discount_percent` be validated to be 0–100? The task says to add `discount_percent: int = 0` (0 to 100). This parenthetical suggests the value is expected to be in the range 0–100. Validation would be reasonable — "fail clearly on invalid input." The codebase has a `ShopError` in errors.py for business rule failures. But does a dataclass do validation? Let me check customers/models or the catalog to see whether dataclasses validate.
+
+Let me also check `apply_rate` in utils/numbers, `format_money` in money.py, the tests directory, and also `checkout.py` to see how the quote interacts with the order total (subtotal = order.total_cents — if the discount is reflected in total_cents, then the checkout quote needs to display the discount, but... the task doesn't require that; the task only lists model total, invoice line, warehouse export).
+
+Let me read these files.
+
+
+I'm looking at the models file and need to add a `discount_percent` field with a default of 0, then modify the `total_cents` property to calculate the discount by rounding down to whole cents before subtracting it from the order total. I need to validate that `discount_percent` stays within the 0–100 range, likely raising a `ValueError` in a property setter if someone tries to set an out-of-bounds value. The tricky part is deciding where the total gets computed—whether it's after the discount is applied, and how to structure the validation without creating circular dependencies with the property system.
+
+For the discount line in invoices, I'm adding a row just before the total that displays the discount amount in cents, but only when there's actually a discount. I need to figure out the exact formatting to match the existing layout. I'm settling on using "DISCOUNT" as the line label with the same alignment as other rows, and formatting the amount as negative (like "-$10.00") to clearly show it's being subtracted from the total. The row would be `f"{'DISCOUNT':<36}{format_money(-discount, order.currency):>12}"`, which matches the codebase's style of showing deductions as negative values.
+
+Now I'm thinking through whether the discount row should show the raw discount amount or the amount actually applied — if the total is zero or the discount exceeds the subtotal, I need to decide if the display should reflect what was actually subtracted.
+
+I'll compute both in the property to avoid recalculating, then in the render logic I'll check if discount_cents is positive to conditionally include the row. I'm also adding validation to prevent discount_percent from going negative or exceeding 100, raising a clear error with context.
+
+For the rounding behavior, I'm using floor division on the absolute value to handle the "round down to whole cents" requirement — so a 15% discount on 1999 cents gives exactly 299, not 300 like a half-up approach would. Now I need to add the discount_percent field to the warehouse JSON export, placing it at the order level after currency. I should place discount_percent after currency in the JSON output since that reflects the field order in the dataclass. I'm verifying the implementation details: the total_cents property already uses floor division for discount calculation, format_money handles negative amounts correctly with the minus sign, and I need to confirm the import chain won't create circular dependencies. For the discount display, I'm thinking through whether to use "DISCOUNT" or "Discount" in the invoice row.
+
+Looking at the formatting, I'll stick with "DISCOUNT" in all-caps to match the existing style, and display the amount as a negative value like the tax calculator handles negative rates. The validation in __post_init__ will properly raise ValueError if someone tries to set discount_percent out of range, even though dataclass field ordering means it comes after lines and currency. The total_cents property won't trigger validation since it's read-only, and OrderLine doesn't need changes.
+
+Writing the models file... Finishing the render_invoice_text function to display line items, discount if applicable, and the final total. I'm also verifying that the discount calculation is consistent—using the same formula in both places to ensure the displayed amount matches what was actually deducted from the total, with floor rounding applied uniformly across all cases.
+
+The validation in __post_init__ handles the constraint that discount_percent must be between 0 and 100, catching invalid values like negative numbers or percentages over 100. I'm also updating the export function to include the discount_percent field in the order payload alongside the currency and line items. The __post_init__ validation won't break existing code since the default is 0, and I'm confident the floor rounding behavior (where 299.85 cents rounds down to 299) matches the requirement to round the discount amount down to whole cents.

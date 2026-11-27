@@ -1,0 +1,133 @@
+
+
+<file path="shopkit/catalog/models.py">
+from dataclasses import dataclass
+
+
+@dataclass
+class Product:
+    sku: str
+    title: str
+    price_cents: int
+    active: bool = True
+    weight_g: int = 0
+
+    def is_purchasable(self) -> bool:
+        return self.active and self.price_cents > 0
+</file>
+<file path="shopkit/orders/fulfillment.py">
+from dataclasses import dataclass, field
+
+from shopkit.catalog.models import Product
+from shopkit.orders.models import Order
+
+MAX_ITEMS_PER_PARCEL = 10
+
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)
+
+    @property
+    def item_count(self) -> int:
+        return sum(qty for _, qty in self.items)
+
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    """Combine the lines of a batch of orders into per-SKU pick quantities."""
+    picked: dict[str, int] = {}
+    for order in orders:
+        for line in order.lines:
+            picked[line.sku] = picked.get(line.sku, 0) + line.qty
+    return list(picked.items())
+
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    if max_items <= 0:
+        raise ValueError("max_items must be positive")
+    parcels: list[Parcel] = []
+    pending: list[str] = []
+    for line in order.lines:
+        for _ in range(line.qty):
+            pending.append(line.sku)
+            if len(pending) >= max_items:
+                parcels.append(_parcel(order.id, len(parcels) + 1, pending))
+                pending = []
+    if pending:
+        parcels.append(_parcel(order.id, len(parcels) + 1, pending))
+    return parcels
+
+
+def _parcel(order_id: str, number: int, skus: list[str]) -> Parcel:
+    items: dict[str, int] = {}
+    for sku in skus:
+        items[sku] = items.get(sku, 0) + 1
+    return Parcel(order_id=order_id, number=number, items=list(items.items()))
+
+
+def parcel_weight_g(parcel: Parcel, products: dict[str, Product]) -> int:
+    """Total grams of the parcel's contents, using each product's per-unit weight."""
+    return sum(products[sku].weight_g * qty for sku, qty in parcel.items)
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    lines = [f"Packing slip {parcel.order_id} - parcel {parcel.number}"]
+    lines.extend(f"{sku} x {qty}" for sku, qty in parcel.items)
+    lines.append(f"Total items: {parcel.item_count}")
+    lines.append(f"Weight: {weight_g} g")
+    return "\n".join(lines)
+</file>
+<file path="shopkit/api/serializers.py">
+from shopkit.catalog.models import Product
+from shopkit.customers.addresses import format_address
+from shopkit.customers.models import Customer
+from shopkit.orders.models import Order
+
+
+def money(cents: int, currency: str = "USD") -> dict:
+    return {"amount_cents": cents, "currency": currency}
+
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price": money(p.price_cents),
+        "active": p.active,
+        "weight_g": p.weight_g,
+    }
+
+
+def order(o: Order, status: str | None = None) -> dict:
+    data = {
+        "id": o.id,
+        "currency": o.currency,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit_price": money(line.unit_cents, o.currency),
+                "total": money(line.total_cents, o.currency),
+            }
+            for line in o.lines
+        ],
+        "total": money(o.total_cents, o.currency),
+    }
+    if status is not None:
+        data["status"] = status
+    return data
+
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier,
+        "marketing_opt_in": c.marketing_opt_in,
+        "joined": c.joined.isoformat() if c.joined is not None else None,
+        "addresses": [format_address(a) for a in c.addresses],
+    }
+</file>

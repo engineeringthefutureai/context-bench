@@ -1,0 +1,189 @@
+Let me understand the task. I need to add a function `transfer_reference() -> str` to `shopkit/payments/gateway.py`. This generates a new 12-character reference consisting of three dash-separated groups of four characters, "in the same style as the shop's other customer-facing codes."
+
+Key clues:
+1. 12 characters in three dash-separated groups of four → `XXXX-XXXX-XXXX` format
+2. "In the same style as the shop's other customer-facing codes" — this strongly suggests I should look at `shopkit/utils/ids.py`, which has `short_code(length: int=8, groups: int=0) -> str`. The `short_code` function with a `groups` parameter seems designed for exactly this: generating codes in group format.
+
+Since I don't have the body of `short_code`, I need to infer its behavior from its name and signature:
+- `short_code(length: int=8, groups: int=0) -> str`
+- `is_short_code(text: str) -> bool`
+
+So `short_code(length=12, groups=3)` probably generates a 12-character code split into three groups, separated by dashes. This fits "in the same style as the shop's other customer-facing codes."
+
+Typical conventions for customer-facing codes: to avoid ambiguity, the alphabet probably excludes easily confused characters (0/O, 1/I). A common approach is a character set like "23456789ABCDEFGHJKMNPQRSTUVWXYZ" (excluding 0, 1, I, O).
+
+Let me check the hints in the repo for how short codes are used:
+- `shopkit/utils/ids.py`: `short_code(length: int=8, groups=0) -> str` and `is_short_code(text: str) -> bool`
+- Gift cards: `GiftCardStore.issue()` creates codes — probably uses `short_code`.
+- Coupons: `normalize_code(code)`.
+- `shopkit/shipping/labels.py`: `label_code(sku)` — "scanner-friendly" according to test name `test_label_code_is_scanner_friendly`.
+
+Given the signature `short_code(length=8, groups=0)`, calling `short_code(12, 3)` should produce something like `AB12-CD34-EF56` — 12 characters of code in three groups of four, separated by dashes.
+
+So the implementation in gateway.py would be:
+
+```python
+def transfer_reference() -> str:
+    """Generate a bank transfer reference for a customer to type into their banking app."""
+    return short_code(12, 3)
+```
+
+But wait — should I verify the meaning of the `groups` parameter? Is `groups` the number of groups, or the group size? The signature `short_code(length: int=8, groups: int=0)`. If groups=0 means no grouping (just a plain code of `length` characters), then groups=3 with length=12 would give 3 groups → 4 characters each. That's the natural interpretation: split a code of `length` characters into `groups` groups.
+
+Alternatively, groups might mean group size: groups=4 with length=12 → three groups of four. Hmm, ambiguous. The name "groups" (plural count) suggests a count, not a size. If it were size, it would be "group_size" or "group_len". So `groups=3` = 3 groups.
+
+Let me also check `is_short_code(text: str) -> bool` — validates whether text is a short code. This supports the idea that short codes are customer-facing codes (gift cards, etc.).
+
+Now, should the function just delegate, or should it implement the logic directly? The instructions say to fit into surrounding code, keep the change small. Delegation to `short_code(12, 3)` is cleanest and matches "in the same style as the shop's other customer-facing codes" — using the shop's existing code generator guarantees the same style (same character set, presumably no confusing characters).
+
+But there's a risk: what if `short_code` has different behavior, like groups meaning something else? Let me think about what's most likely. The repo map is signatures only. Tests in the repo: I don't see a specific test for short_code in the test listing... let me scan the test file list:
+
+- tests/test_issuing.py: test_issue_and_credit — gift card issuance? Actually invoices/issuing.
+- No tests/test_ids.py in the list.
+
+Hmm, no test file for ids. So I can't verify `short_code`'s behavior from tests.
+
+Given the function is named `short_code(length=8, groups=0)` and there's an `is_short_code` validator, I'll proceed with delegation. The task says "in the same style as the shop's other customer-facing codes" — this is a strong signal to reuse the shop's code generator rather than invent a new character set. `short_code` is that generator.
+
+Alternatively, the "other customer-facing codes" might refer to `new_id("pay")` style, but new_id generates an ID like "pay_abc123", not a 12-char grouped code. So short_code is the correct one.
+
+Now let me write the gateway.py file:
+
+```python
+"""Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway."""
+from shopkit.errors import ShopError
+from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+from shopkit.payments.reconciliation import redact_pan
+from shopkit.utils.ids import new_id, short_code
+```
+
+Wait, the current import is `from shopkit.utils.ids import new_id`. I need to add `short_code`.
+
+Next, the function:
+
+```python
+def transfer_reference() -> str:
+    """A reference a customer can type into their banking app (e.g. from an invoice)."""
+    return short_code(12, 3)
+```
+
+Should it be a module-level function, or a method? The task says "add `transfer_reference() -> str` to the payments gateway module" — module-level function. Good.
+
+Where to put it? After the imports, before/after the exception classes, or at the end. I'll put it after the exception classes and before FakeGateway, or at the end of the file. Either works. I think placing it near the top (after exceptions) makes it easy to find as a module-level utility, but at the end also works. Let me think about what's most natural: the file has a docstring, imports, PaymentDeclined, FakeGateway. A small module-level function would fit well right after imports/exceptions. I'll put it after PaymentDeclined and before FakeGateway — reads well: the gateway module exposes a helper for generating transfer references, then the fake for testing.
+
+Actually, on second thought — the ordering isn't super important. I'll put it right before the FakeGateway class, i.e., after the exception classes.
+
+Now let me double-check: could `groups` mean group size? Let me think about the usage patterns I might see elsewhere in the repo. Gift card codes, coupon codes, return codes — I don't have bodies. But given the default `length=8, groups=0`: if groups meant size, default groups=0 meaning no grouping is still valid. If groups meant count, default 0 meaning no grouping is also valid. Ambiguous either way.
+
+The word "groups" is a count noun. If I were to write this API, `short_code(length=8, groups=0)` — I'd make groups a count. Also for "12 characters in three groups", groups=3 is the direct translation.
+
+But what if length must be divisible by groups? 12/3=4, that works out.
+
+What if short_code's behavior is: groups=0 → length characters with no dashes; groups=n → split into n groups joined by "-"? That's the natural implementation:
+
+```python
+def short_code(length: int = 8, groups: int = 0) -> str:
+    alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+    code = "".join(secrets.choice(alphabet) for _ in range(length))
+    if groups and groups > 1:
+        size = length // groups
+        code = "-".join(code[i:i+size] for i in range(0, length, size))
+    return code
+```
+
+This gives "XXXX-XXXX-XXXX". 
+
+One more consideration: should `transfer_reference` handle the case where groups isn't evenly divisible? Not relevant, I'll call with 12, 3.
+
+Also, should I be defensive: what if `short_code` doesn't exist, or has a different signature? The repo map explicitly lists it, so it exists. I'll trust the map.
+
+Another thought: the task says "in the same style as the shop's other customer-facing codes." Maybe the intent is just to use short_code for consistency of character set (no 0/O/1/I ambiguity — important since customers will type/handle it by phone). Delegation achieves that.
+
+Edge cases: no input, pure function, no errors. Nothing else to validate.
+
+Should I keep the `Payment` import and so on? Yes, don't touch the rest of the file.
+
+Complete new file:
+
+```python
+"""Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway."""
+from shopkit.errors import ShopError
+from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+from shopkit.payments.reconciliation import redact_pan
+from shopkit.utils.ids import new_id, short_code
+
+
+class PaymentDeclined(ShopError):
+    http_status = 402
+
+
+def transfer_reference() -> str:
+    """Reference a customer can read off an invoice and type into their banking app."""
+    return short_code(12, 3)
+
+
+class FakeGateway:
+    """Declines card numbers ending in 0000; everything else is authorized."""
+
+    def __init__(self):
+        self.payments: dict[str, Payment] = {}
+
+    def authorize(self, order_id: str, amount_cents: int, currency: str, card_number: str) -> Payment:
+        digits = "".join(c for c in card_number if c.isdigit())
+        payment = Payment(new_id("pay"), order_id, amount_cents, currency, "card",
+                          card_number=redact_pan(digits))
+        if digits.endswith("0000"):
+            payment.status = FAILED
+            self.payments[payment.id] = payment
+            raise PaymentDeclined("card declined", order_id=order_id, payment_id=payment.id)
+        self.payments[payment.id] = payment
+        return payment
+
+    def capture(self, payment_id: str) -> Payment:
+        payment = self.payments[payment_id]
+        if payment.status != AUTHORIZED:
+            raise ShopError(f"payment {payment_id} is {payment.status}", payment_id=payment_id)
+        payment.status = CAPTURED
+        return payment
+```
+
+Wait — onees: "12 characters in three dash-separated groups of four" — with short_code(12, 3), that yields exactly three groups of four characters joined by dashes, 12 characters + 2 dashes. Good.
+
+Docstring: keep it brief and match the style. The file's module docstring is terse; FakeGateway has a one-line docstring. My one-liner is good. Maybe make it more explicit: "Generate a bank transfer reference: 12 characters in three groups of four, safe to read over the phone." Hmm, let me keep it simple and in line with the codebase's tone:
+
+```python
+def transfer_reference() -> str:
+    """A new pay-by-bank reference the customer types into their banking app."""
+    return short_code(12, 3)
+```
+
+The reason for using short_code might not be obvious (why 12, 3?), so maybe a comment explaining why short_code: same character set as other customer-facing codes, avoiding 0/O/1/I. A short comment could help:
+
+```python
+def transfer_reference() -> str:
+    """Generate a bank transfer reference (e.g. printed on an invoice) for the customer."""
+    # Same alphabet as the shop's other customer-facing codes, so no 0/O or 1/I to mix up.
+    return short_code(12, 3)
+```
+
+Hmm, but I'm not 100% sure that short_code excludes 0/O/1/I. That's a common convention, and `is_short_code` exists for validating them; "scanner-friendly" label codes suggest a controlled character set. Since I can't see the body, claiming a specific character set in a comment could be wrong. Better not to assert a specific character set. Instead: "Reuses the same generator as the shop's other customer-facing codes." That's safe.
+
+Actually simpler: no comment needed if the docstring mentions it. Let me write:
+
+```python
+def transfer_reference() -> str:
+    """A new pay-by-bank reference, in the same style as the shop's other customer-facing codes."""
+    return short_code(12, 3)
+```
+
+Good. That communicates intent without asserting implementation details.
+
+Re-check the import: `from shopkit.utils.ids import new_id, short_code` — both exist per the map.
+
+Anything else calling gateway? Not shown in other modules' repo map that imports from gateway. Fine.
+
+Type annotation `-> str` matches the requirement.
+
+I'm reasonably confident in this approach. Only file I'm modifying: shopkit/payments/gateway.py.
+
+Output format: single <file> block with complete contents, nothing outside the block.

@@ -1,0 +1,87 @@
+--- a/shopkit/events.py
++++ b/shopkit/events.py
+@@ -1,38 +1,36 @@
+-"""In-process event bus. Services publish domain events; notifications and audit subscribe."""
+-from collections import defaultdict
+-from collections.abc import Callable
+-from dataclasses import dataclass, field
+-from datetime import datetime
++"""Application-level event bus for shopkit domain events.
+ 
+-from shopkit.utils.dates import utc_now
++Domain code announces events here; the audit trail and other subscribers
++receive them via :func:`subscribe`.  The bus keeps no history: events are
++delivered to subscribers at the moment they are published and only then.
++"""
++from typing import Any, Callable
++
++# A subscriber is a callable that receives one published event.
++Event = Any
++Subscriber = Callable[[Event], None]
++
++_subscribers: list[Subscriber] = []
+ 
+ 
+-@dataclass(frozen=True)
+-class Event:
+-    name: str                       # e.g. "order.paid", "stock.low"
+-    payload: dict
+-    at: datetime = field(default_factory=utc_now)
++def subscribe(callback: Subscriber) -> None:
++    """Register *callback* to be invoked for every event published later."""
++    _subscribers.append(callback)
+ 
+ 
+-Handler = Callable[[Event], None]
++def unsubscribe(callback: Subscriber) -> None:
++    """Remove a previously registered *callback*; no-op if it was not added."""
++    try:
++        _subscribers.remove(callback)
++    except ValueError:
++        pass
+ 
+ 
+-class EventBus:
+-    def __init__(self):
+-        self._handlers: dict[str, list[Handler]] = defaultdict(list)
+-        self.history: list[Event] = []
++def publish(event: Event) -> None:
++    """Dispatch *event* to every currently registered subscriber.
+ 
+-    def subscribe(self, name: str, handler: Handler) -> None:
+-        """name may end with ".*" to receive every event under a prefix, e.g. "order.*"."""
+-        self._handlers[name].append(handler)
+-
+-    def publish(self, name: str, **payload) -> Event:
+-        event = Event(name, payload)
+-        self.history.append(event)
+-        prefix = name.split(".", 1)[0] + ".*"
+-        for handler in self._handlers.get(name, []) + self._handlers.get(prefix, []):
+-            handler(event)
+-        return event
+-
+-
+-BUS = EventBus()
++    A subscriber's arguments are left to the subscriber's own signature:
++    most shopkit subscribers take the event positionally.
++    """
++    for callback in _subscribers:
++        callback(event)
+--- a/shopkit/inventory/transfers.py
++++ b/shopkit/inventory/transfers.py
+@@ -3,6 +3,7 @@
+ from datetime import datetime
+ 
+ from shopkit.errors import Conflict
++from shopkit.events import publish
+ from shopkit.inventory.warehouses import Network
+ from shopkit.utils.dates import utc_now
+ 
+@@ -30,4 +31,6 @@
+     # Stock has no public removal API; transfers adjust the ledger directly.
+     src.stock._on_hand[sku] -= qty
+     network.get(destination).stock.receive(sku, qty)
+-    return Transfer(sku, qty, source, destination)
++    t = Transfer(sku, qty, source, destination)
++    publish(t)
++    return t

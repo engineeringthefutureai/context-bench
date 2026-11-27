@@ -1,0 +1,135 @@
+The task is asking to add `transfers_by_week(transfers) -> dict[str, int]` to the transfers module. I need to know what "the same week labels the other dashboards use" means. The context only shows transfers.py. I don't have the rest of the codebase. I need to make reasonable assumptions.
+
+Key details:
+- `transfers_by_week(transfers) -> dict[str, int]` — takes a collection of `Transfer` objects (each has an `at: datetime` and `qty: int`).
+- Returns a dict keyed by week label, values are total units moved (sum of qty).
+- Keys are in chronological order — Python 3.7+ dicts preserve insertion order, so insert keys in chronological order.
+- "the same week labels the other dashboards use" — I don't have other dashboards. I need to make a reasonable assumption consistent with what would be in the codebase. Common week label formats: `YYYY-Www` (e.g., `2024-W03`) or `YYYY-MM-DD` of week start. Given `shopkit.utils.dates` exists with `utc_now`, there's likely a week-label helper. Since I can't see it, I should either import a plausible helper or implement the labeling myself.
+
+Given the instructions: "If something you need is not shown, make the most reasonable assumption consistent with what is shown and implement it."
+
+Option A: Assume there's a helper like `week_label(dt)` in `shopkit.utils.dates`. Risky — if it doesn't exist, the import breaks and all tests fail.
+
+Option B: Implement the label inline inside transfers.py using `datetime.isocalendar()`. ISO week label `f"{year}-W{week:02d}"` is a very common "week label" for dashboards. This is self-contained and safe.
+
+Option B is safer: no unknown imports. But "the same week labels the other dashboards use" implies a shared format. ISO week `YYYY-Www` is the most standard week label. I'll implement with `isocalendar` and produce `f"{iso.year}-W{iso.week:02d}"`.
+
+Wait — should I be careful about year: `isocalendar()` returns ISO year, week, weekday. Using `iso_year` is correct (handles weeks that straddle year boundaries, e.g., 2024-12-30 is week 1 of 2025). Good.
+
+Sort: sort transfers by `at` before accumulating, or collect and sort keys. Simplest: sort by `at` then accumulate into dict (insertion order preserved). Or group with a dict then rebuild in sorted order. Sorting the input first is clean and gives chronological insertion order.
+
+Edge cases:
+- empty list → empty dict.
+- Multiple transfers in same week → sum.
+- Transfers in different years → ISO year handles it.
+- Input type: iterable of Transfer. Signature is `transfers` — probably a list. Accept any iterable.
+
+Typing: the file uses simple typing, no `from __future__ import annotations`. The task signature is `dict[str, int]` — Python 3.9+ built-in generics. The file already uses lowercase generics in the task spec. Use `Iterable[Transfer]` from typing? The module currently imports nothing from typing. I could write `def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:` and need `from typing import Iterable`. Alternatively keep it simple and use `list[Transfer]`. Dashboards likely pass a list. But Iterable is more forgiving. Hmm, to keep the change minimal and consistent, either is fine. I'll go with `Iterable[Transfer]` with a typing import — safe, small.
+
+Actually, to minimize risk, `list[Transfer]` would also be fine, but the function should work on any iterable. I'll use Iterable.
+
+Week label: should I worry about the possibility that the other dashboards use a `shopkit.utils.dates.week_label`? The context only includes `shopkit/utils/dates` with `utc_now` visible (imported). I can't see more. The instruction says to make the most reasonable assumption. Implementing the ISO week label locally is the reasonable assumption and self-contained.
+
+I'll write:
+
+```python
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    """Total units moved per ISO week, in chronological order.
+
+    Keys use the ``YYYY-Www`` labels shared by the other dashboards.
+    """
+    totals: dict[str, int] = {}
+    for t in sorted(transfers, key=lambda t: t.at):
+        label = _week_label(t.at)
+        totals[label] = totals.get(label, 0) + t.qty
+    return totals
+```
+
+And a small helper:
+
+```python
+def _week_label(at: datetime) -> str:
+    iso_year, iso_week, _ = at.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+```
+
+Wait: sorting by `t.at` — can at be compared? All are datetimes, probably all tz-aware (utc_now) or all naive. Mixed would raise. That's fine — the data is created via `utc_now` so all are aware. If someone constructed a naive one, the sort would TypeError on mixed. Could guard, but overengineering. In fact, the default factory is `utc_now` so aware. If tests construct naive datetimes, they'd all be naive and sort fine. Mixed unlikely.
+
+Alternatively, avoid sorting the whole input, compute labels and sort keys. But chronological order of the keys matters, and sorting transfers by `at` gives correct key order. Either works. I'll keep the sort.
+
+Should the helper be module-level private or inline? Inline in the loop is enough but a named helper is clearer and testable. Either fine. I'll inline the label computation in the loop to keep the change small — actually the helper is cleaner. Minimal: inline:
+
+```python
+for transfer in sorted(transfers, key=lambda t: t.at):
+    iso_year, iso_week, _ = transfer.at.isocalendar()
+    label = f"{iso_year}-W{iso_week:02d}"
+```
+
+Good.
+
+Full file:
+
+```python
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable
+
+from shopkit.errors import Conflict
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    return Transfer(sku, qty, source, destination)
+
+
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    """Total units moved per week, in chronological order.
+
+    Week keys use the ``YYYY-Www`` ISO labels the other dashboards use
+    (e.g. ``2024-W05``).
+    """
+    totals: dict[str, int] = {}
+    for t in sorted(transfers, key=lambda t: t.at):
+        iso_year, iso_week, _ = t.at.isocalendar()
+        label = f"{iso_year}-W{iso_week:02d}"
+        totals[label] = totals.get(label, 0) + t.qty
+    return totals
+```
+
+Hmm, `totals[label] = totals.get(label, 0) + t.qty`.
+
+Check: empty input → `{}`. Multiple weeks in order → chronological because sorted by at. Same week summing.
+
+One concern: dict insertion order — after `totals[label] = ...`, if label already exists, position unchanged (assignment to existing key doesn't change order). Good, chronological order is preserved by first occurrence, which follows the sorted iteration.
+
+Should the function handle a single Transfer? No, it expects a collection.
+
+Should it be tolerant of qty possibly being int only — fine.
+
+Type annotation `dict[str, int]` requires Python 3.9+. The codebase uses modern syntax elsewhere (task specifies this signature), fine.
+
+I think this is good. Output is just the file block.

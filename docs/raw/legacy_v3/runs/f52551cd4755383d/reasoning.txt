@@ -1,0 +1,54 @@
+Let's understand the task:
+1. Add a `restocking_fee_cents(order)` method to `ReturnRequest`.
+2. For returns due to change of mind, calculate 12.5% of the refund amount, and 0 for other reasons.
+3. Round it exactly the same way the shop rounds other percentage amounts like tax and discounts.
+
+I need to check how the shop rounds percentage amounts. Let me search the codebase for tax/discount calculations and rounding helpers.
+
+Let's explore the repository.
+
+
+The `apply_rate` in shopkit/utils/numbers.py seems to be a standard for rounding percentages. Let me read it, and also check shopkit/money.py and tax/calculator.py to see how tax is rounded. I'll also check how discounts (coupons) are rounded.
+
+
+The shop's percentage amount is rounded via `apply_rate(cents, rate_pct)` in `shopkit/utils/numbers.py`. The tax calculator uses it, and promotions probably use it too. Therefore, `restocking_fee_cents(order)` should look like this:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+```
+
+Let me check the promotions / discount usage sites and make sure that `apply_rate` is the standard — the search results already say "used for tax, commissions, discounts," so yes, that's it. Let me quickly check where `apply_rate` is used, and check the orders/models to confirm that `Order.lines` has `unit_cents`. Also check whether there are existing tests for returns. I'll take a look at the orders directory and the promotion usage sites.
+
+
+Okay, let's check who is importing returns.py, how ReturnRequest is being used, and whether refunds and such are being calculated.
+
+
+All the necessary information is gathered:
+
+1. `ReturnRequest.refund_cents(order)` computes the refund amount in cents.
+2. The way the shop rounds percentage amounts is `apply_rate(cents, rate_pct)` in `shopkit/utils/numbers.py` — rounds to the nearest cent (half-up, rounding away from zero), used for tax and discounts.
+3. Add a `restocking_fee_cents(order)` method to `ReturnRequest`: for `changed_mind`, apply 12.5% to `refund_cents(order)`, otherwise 0.
+
+Design details:
+- Define a module-level constant `RESTOCKING_FEE_PCT = 12.5`, following the style of the `RETURN_WINDOW_DAYS` and `REASONS` constants.
+- The rate: 12.5 — `apply_rate` converts via `Decimal(str(rate_pct))`. `str(12.5)` = "12.5", exact. Using 12.5 as a float is fine because `Decimal(str(12.5))` is exactly 12.5. But it would be safer to pass the string "12.5"? apply_rate accepts `float | Decimal | str`. The coupon code uses `coupon.value` which is an int. Tax uses `rate_for(...)` — let me think what that returns. Probably a float. Either works; `Decimal(str(12.5))` is exact. Let's go with the float constant 12.5 — consistent with "percentage" naming.
+
+Wait — should the fee apply only when `self.reason == "changed_mind"`? Yes: "changed_mind returns get 12.5% of the return's refund amount, other reasons get 0".
+
+Implementation:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+```
+
+Import: `from shopkit.utils.numbers import apply_rate`.
+
+Edge cases: empty items → refund 0 → fee 0. No problem.
+
+Now, write out the whole file with the change applied. Keep everything else identical.

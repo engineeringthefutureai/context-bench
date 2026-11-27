@@ -42,11 +42,64 @@ def reuse_not_run(reuse_output: str) -> bool:
 def run_repo_tests(sandbox: Path, shared_dir: Path, timeout: int = 120) -> tuple[int, int, str]:
     """The repository's own test suite (sandbox/tests, as patched) after the change: (passed, total,
     output). Catches patches that pass the hidden tests while breaking or deleting code elsewhere.
-    (0, 0, "") when the repo has no tests/ directory."""
+    (0, 0, "") when the repo has no tests/ directory. A test module that no longer imports counts as one
+    failed test here (its tests can't be collected); `known_tests_broken` names the tests that were lost."""
+    passed, collected, out = repo_test_ids(sandbox, shared_dir, timeout)
+    return len(passed), len(collected), out
+
+
+def repo_test_ids(sandbox: Path, shared_dir: Path, timeout: int = 120) -> tuple[set[str], set[str], str]:
+    """The repository's own tests after the change, by test id ("tests/test_x.py::test_name"): (passed,
+    collected, output). Collection errors don't stop the run (--continue-on-collection-errors): the other
+    modules still run, and a module that fails to import appears in `collected` under its own path."""
     tests = sandbox / "tests"
     if not tests.is_dir():
-        return 0, 0, ""
-    return _pytest(sandbox, shared_dir, timeout, [str(tests)])
+        return set(), set(), ""
+    return _pytest_ids(sandbox, shared_dir, timeout, ["--continue-on-collection-errors", str(tests)])
+
+
+def known_tests_broken(known: set[str], passed: set[str]) -> list[str]:
+    """The repository's original tests (`known`: the ids that pass on the unmodified fixture) that don't pass
+    after the change: failed, errored, no longer collected (their module doesn't import) or deleted."""
+    return sorted(known - passed)
+
+
+def _pytest_ids(sandbox: Path, shared_dir: Path, timeout: int, args: list[str]) -> tuple[set[str], set[str], str]:
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(sandbox), str(shared_dir)]),
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "report.xml"
+        empty_ini = Path(tmp) / "pytest.ini"
+        empty_ini.write_text("[pytest]\n")
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", str(empty_ini),
+               "--rootdir", str(sandbox), f"--junitxml={report}", *args]
+        try:
+            proc = subprocess.run(cmd, cwd=sandbox, env=env, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return set(), set(), f"TIMEOUT after {timeout}s"
+        output = proc.stdout + proc.stderr
+        if not report.exists():
+            return set(), set(), output
+        passed, collected = set(), set()
+        for case in ET.parse(report).getroot().iter("testcase"):
+            tid = _test_id(case.get("classname", ""), case.get("name", ""))
+            collected.add(tid)
+            if not any(child.tag in ("failure", "error", "skipped") for child in case):
+                passed.add(tid)
+        return passed, collected, output
+
+
+def _test_id(classname: str, name: str) -> str:
+    """junit (classname "tests.test_x[.Class]", name "test_y[param]") -> "tests/test_x.py::[Class::]test_y[param]".
+    A collection error has an empty classname and the module ("tests.test_x") as its name."""
+    if not classname:
+        return name.replace(".", "/") + ".py"
+    parts = classname.split(".")
+    i = next((k for k in range(len(parts)) if parts[k].startswith("test")), len(parts) - 1)
+    if i == 0 and parts[0] == "tests":
+        i = 1
+    module = "/".join(parts[:i + 1]) + ".py"
+    return "::".join([module, *parts[i + 1:], name])
 
 
 def _pytest(sandbox: Path, shared_dir: Path, timeout: int, args: list[str],

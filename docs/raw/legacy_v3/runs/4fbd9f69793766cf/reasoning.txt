@@ -1,0 +1,106 @@
+Let me check the context.
+
+Task: Add `by_email(customers) -> dict[str, Customer]` to `shopkit/reports/customers_report.py`, key it by the email address after trimming and lowercasing it, and "build it the same way the shop builds other lookup tables."
+
+What does "build it the same way the shop builds other lookup tables" mean? Let me look at the codebase. There's probably a helper in `shopkit/utils/collections` like `index_by` or `key_by`. The current file uses `group_by` from `shopkit.utils.collections`. There might be an `index_by` helper in the same module. It's not shown in the context, but the phrasing "build it the same way the shop builds other lookup tables" suggests there's an existing utility for building lookup tables.
+
+Looking at the snippets shown:
+- `shopkit/customers/service.py` uses `self._by_id` — a dict keyed by customer id. It's built by `self._by_id[customer.id] = customer`. So the service holds a `_by_id` lookup table.
+- Other lookup tables might be keyed by lowercase email addresses, etc.
+
+The `shopkit/utils/collections.py` file is not shown, but since `group_by` is imported from there, there might also be an `index_by` function. Since it's not shown, I need to make an assumption. The task says "build it the same way the shop builds other lookup tables" — the shop builds lookup tables like `_by_id` by assigning in a loop: `self._by_id[customer.id] = customer`.
+
+Hmm, but maybe there's a utility in `shopkit/utils/collections` like `index_by(items, key)` that returns a dict. That would be the natural counterpart to `group_by`. Since I can't see the file, should I use `group_by`? No — group_by groups, returning dict[key, list]. For a lookup table, I want dict[key, item].
+
+Options:
+1. Write a dict comprehension: `{c.email.strip().lower(): c for c in customers}`.
+2. Use an assumed `index_by` helper from `shopkit.utils.collections`.
+
+Risk: if `index_by` doesn't exist, the import breaks. If I write a dict comprehension, there's no risk of import errors. The instructions say "prefer reusing existing project helpers over writing new ones," but I can only verify that `group_by` exists (it's imported in the target file). The safest approach consistent with what's shown: use a dict comprehension, or mimic the service's approach.
+
+Actually, let me think more about "built the same way the shop builds its other lookup tables." In `service.py`, `_by_id` is built by `self._by_id[customer.id] = customer`. The key is the raw id (no transformation needed). For email lookup, `find_by_email` strips and lowercases the input to match against the stored `c.email`. The stored email is already normalized at registration (`email.strip().lower()`). But `db.getCustomerByEmail` uses `email.lower()` without strip. And `registerCustomer` uses `email.lower()`.
+
+The task explicitly says: key it by the trimmed and lowercased email. So the key is `c.email.strip().lower()`.
+
+Edge cases: duplicate emails — later entries overwrite earlier ones, same as the service's dict assignment. Empty email list → empty dict.
+
+What about customers with empty email? Probably fine; they just get keyed as "".
+
+Now, how should I write it? Simple:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+Does this match "built the same way the shop builds other lookup tables"? The service builds them via a loop of dict assignment. A dict comprehension is the idiomatic form of the same construction. I think that's fine.
+
+Alternatively, maybe there's an `index_by` in utils.collections. Let me think about what's most likely in these generated codebases. The target module imports `group_by` from `shopkit.utils.collections`. A common pairing: `group_by` and `index_by`/`key_by`. The task phrase "built the same way the shop builds other lookup tables" — "the shop" — the customers service builds `_by_id`. That's a by_id lookup table. So "build it the same way" = assign `table[key] = customer` for each customer.
+
+Since I can't confirm the existence of `index_by`, the safest is a dict comprehension. It's simple, correct, and stylistically consistent.
+
+But wait — should I check if the codebase has something like `shopkit/utils/collections.py` with `index_by`? The context only shows what's retrieved. I should make the most reasonable assumption. Writing a dict comprehension is safe either way.
+
+Also, keep the docstring style: other functions in the report module don't have docstrings, just a module docstring. So no docstring needed, or a short one. The module docstring is "Customer cohort numbers for marketing." I could add a one-line comment, but the existing functions have no docstrings, so keep it plain.
+
+Function ordering: add at the end of the file, or after `tier_mix`? Probably fine at the end. Actually, the order is: signups_by_month, opt_in_rate, tier_mix, active_since. Add `by_email` at the end.
+
+Type hints: the file uses `list[Customer]`, `dict[str, int]`. So `dict[str, Customer]` matches.
+
+Implementation:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    """Lookup of customers keyed by trimmed, lowercased email."""
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+Existing functions don't have docstrings; adding one small one might be fine, but "a reviewer should not be able to tell which lines are new based on style" — since existing ones don't have docstrings, keep it without one. Hmm, but a comment explaining the normalization might help. The service's `find_by_email` does `email.strip().lower()` without a comment. Keep it minimal, no docstring.
+
+Actually wait — "built the same way the shop builds other lookup tables." Let me reconsider. Maybe there's a helper somewhere. The service builds `_by_id` in `__init__` or in register. There might be other services (catalog) with `_by_id`. All of them use plain dict assignment. So the dict comprehension matches.
+
+One more consideration: should the key be based on `c.email` which might be None? In the model, email is a required str. No problem.
+
+Deduplication: later wins. Consistent with the service behavior (register prevents duplicates, but dict assignment overwrites). No problem.
+
+Final file:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = [c for c in customers if c.joined]
+    groups = group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))
+    return {m: len(cs) for m, cs in sorted(groups.items())}
+
+
+def opt_in_rate(customers: list[Customer]) -> float:
+    return safe_ratio(sum(c.marketing_opt_in for c in customers), len(customers))
+
+
+def tier_mix(customers: list[Customer]) -> dict[str, int]:
+    return {t: len(cs) for t, cs in sorted(group_by(customers, key=lambda c: c.tier).items())}
+
+
+def active_since(customers: list[Customer], since: date) -> list[Customer]:
+    return [c for c in customers if c.joined and c.joined >= since]
+
+
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+That's the change. Verify imports: Customer is already imported. No new imports needed.
+
+Edge cases:
+- empty list → {}
+- emails with mixed case/whitespace → normalized keys
+- duplicate normalized emails → last one wins (same as `_by_id` construction)
+
+I'm confident. Output only the file block.

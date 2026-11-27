@@ -1,0 +1,52 @@
+
+
+I've traced the system. Key findings:
+
+- `shopkit/events.py` exposes a module-level `BUS = EventBus()`; `publish(name, **payload)` is how the shop announces domain events (e.g. `order.paid`, `stock.low`).
+- `AuditLog.on_event` files events under `order_id` **or** `sku` in the payload → the payload must include `sku` so the audit trail files it under the SKU.
+- The webhook/notification layer picks up events by top-level prefix (`stock.*`), so naming it in the existing `stock.*` namespace reaches subscribers.
+- `transfer()` is a plain function; keeping its signature means I publish via the shared `BUS` singleton rather than injecting a bus.
+
+The two failure paths (`qty < 1`, insufficient stock) — and a missing `destination`/`source` — all raise *before* the publish, so a failed transfer announces nothing.
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.events import BUS
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    # stock.* namespace: audit trail and notification subscribers pick this up
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    moved = Transfer(sku, qty, source, destination)
+    # Announce the successful move the way the rest of the shop does; only on success,
+    # so the audit trail (keyed on sku) and notification subscribers both see it.
+    BUS.publish("stock.transferred", sku=sku, qty=qty, source=source, destination=destination)
+    return moved
+</file>

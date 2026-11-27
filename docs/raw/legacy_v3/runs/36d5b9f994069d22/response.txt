@@ -1,0 +1,54 @@
+The requirement: a successful `transfer()` should publish a domain event carrying the SKU, quantity, source and destination (so `AuditLog.on_event` files it under the SKU), while `transfer()` keeps its signature and a failed transfer publishes nothing.
+
+I traced the event flow:
+- `EventBus.publish(name, **payload)` builds an `Event`, appends it to history, and dispatches to exact-name and `prefix.*` subscribers.
+- `AuditLog.on_event` picks the audit `target` from `payload.get("sku")` and records `event.name` as the action — so including a `sku` key files it correctly under the SKU.
+- Other subscribers (e.g. `Notifier`) subscribe explicitly, so a new `inventory.*` event is inert for them, matching "reach notification subscribers" via the bus.
+
+Since `transfer()` keeps its signature, the bus is injected via the constructor (mirroring `StatusBoard(bus=BUS)`), defaulting to the module-level `BUS`. Publishing happens only after both ledgers are adjusted (after any `TransferFailed` could have raised), so failed transfers announce nothing.
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.events import BUS, EventBus
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+class Transfers:
+    """Runs stock transfers and announces them on the event bus (audit trail, notifications)."""
+
+    def __init__(self, network: Network, bus: EventBus = BUS):
+        self.network = network
+        self._bus = bus
+
+    def transfer(self, sku: str, qty: int, source: str, destination: str) -> Transfer:
+        if qty < 1:
+            raise ValueError("qty must be >= 1")
+        src = self.network.get(source)
+        if src.stock.available(sku) < qty:
+            raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                                 requested=qty, available=src.stock.available(sku))
+        # Stock has no public removal API; transfers adjust the ledger directly.
+        src.stock._on_hand[sku] -= qty
+        self.network.get(destination).stock.receive(sku, qty)
+        self._bus.publish("inventory.transferred", sku=sku, qty=qty, source=source,
+                          destination=destination)
+        return Transfer(sku, qty, source, destination)
+</file>

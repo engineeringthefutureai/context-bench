@@ -1,0 +1,65 @@
+To understand what the shop is already using, I'll investigate the repository and find the URL slug rules it uses for titles.
+
+
+There are two slug functions: `slugify` in shopkit/utils/strings.py (underscore, probably not URL-oriented) and `slug_for_title` in shopkit/utils/text.py (URL slug for product or campaign titles). The task says "the same URL slug rule that the shop already uses for titles" — categories.py uses `slug_for_title` for category names. Let's read the relevant files.
+
+
+The task is clear:
+
+1. Add a read-only `url_path` property to `Product` that returns `"/products/<slug>"`.
+2. The slug is generated from the product title, using "the same URL slug rules that the shop already uses for titles."
+
+Which slug function is the one "the shop already uses for titles"? Let me check:
+- `shopkit/utils/text.py::slug_for_title` — "URL slug for a product or campaign title." This is explicitly documented as being for product titles. `Category` in `shopkit/catalog/categories.py` uses this.
+- `shopkit/utils/strings.py::slugify` — "URL-safe identifier for a title" for "partner integrations," joined by underscores. The docstring of the `strings.py` module says "String and amount helpers for the partner integrations." So this is for partners, not for the shop's own storefront.
+
+Therefore, the correct choice is `slug_for_title` from `shopkit.utils.text` — it says "URL slug for a product or campaign title," and is already used in `shopkit/catalog/categories.py` (the catalog module), which matches the pattern: `@property def slug(self) -> str: return slug_for_title(self.name)`.
+
+Next, I'll check other usages of Product to make sure I don't break anything, and also check whether there's any existing `url_path` convention elsewhere (e.g., in the order processing or storefront modules).
+
+To make sure adding a property doesn't break anything (e.g., code that serializes Product via dataclasses, or code that uses `__dict__`), I'll search for usages of `Product`. I'll also check the `is_purchasable` reference and any potential conflicts.
+
+I'll do a few quick checks:
+- find_references for Product
+- Grep for `url_path` to check for existing conventions.
+
+
+Let me take a look at seo.py. The slug might be used there, or there might be existing conventions regarding URL paths. Also going to check api/routes.py and serializers.py to see how the URL is exposed.
+
+
+All the necessary information is gathered. The shop uses `slug_for_title` from `shopkit.utils.text` as the slug rule for titles (it's also used in `Category.slug`). The task is to add a read-only `url_path` property to `Product` that returns `"/products/<slug>"`.
+
+Considerations:
+- Read-only property: just an `@property` with no setter — same as `Category.slug`.
+- Import: `from shopkit.utils.text import slug_for_title`.
+- Dataclass: adding a property to a dataclass is fine (properties defined on the class are preserved. It's not a field).
+- Should the property be placed before or after `is_purchasable`? Order: fields, then methods/properties. I'll add the `url_path` property. Placement: probably after `is_purchasable`, or before it. Either is fine. To group data-derived accessors together, I'll put the property first and keep the method last. No wait, `is_purchasable` is a method, and the property is a read-only attribute — put the property after `is_purchasable`, or before it? There's no strong convention. Either works. I'll add it after `is_purchasable`.
+
+Edge cases: title like "  " → slug is "" → url_path becomes "/products/". This is consistent with slug_for_title's behavior. The shop's rule is that. No special handling is asked for. Just simply follow the rule.
+
+Writing the new file:
+
+```python
+from dataclasses import dataclass
+
+from shopkit.utils.text import slug_for_title
+
+
+@dataclass
+class Product:
+    sku: str
+    title: str
+    price_cents: int
+    active: bool = True
+
+    def is_purchasable(self) -> bool:
+        return self.active and self.price_cents > 0
+
+    @property
+    def url_path(self) -> str:
+        return "/products/" + slug_for_title(self.title)
+```
+
+Checking for circular imports: shopkit.utils.text only imports re and unicodedata. Safe.
+
+The import order in other files (categories.py): `from dataclasses import ...` followed by `from shopkit.utils.text import slug_for_title`. Match this style.

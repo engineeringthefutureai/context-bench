@@ -1,0 +1,108 @@
+--- a/shopkit/catalog/models.py
++++ b/shopkit/catalog/models.py
+@@ -7,6 +7,7 @@
+     title: str
+     price_cents: int
+     active: bool = True
++    weight_g: int = 0
+ 
+     def is_purchasable(self) -> bool:
+         return self.active and self.price_cents > 0
+--- /dev/null
++++ b/shopkit/fulfillment.py
+@@ -0,0 +1,95 @@
++"""Fulfillment helpers."""
++
++
++def _line_to_sku_quantity(line):
++    if isinstance(line, str):
++        return line, 1
++
++    if isinstance(line, (list, tuple)) and len(line) == 2:
++        return line[0], line[1]
++
++    if isinstance(line, dict):
++        sku = line.get("sku")
++        quantity = None
++        for key in ("quantity", "qty", "count"):
++            value = line.get(key)
++            if value is not None:
++                quantity = value
++                break
++    else:
++        sku = getattr(line, "sku", None)
++        quantity = None
++        for name in ("quantity", "qty", "count"):
++            value = getattr(line, name, None)
++            if value is not None:
++                quantity = value
++                break
++        if quantity is None and hasattr(line, "weight_g"):
++            quantity = 1
++
++    if sku is None or quantity is None:
++        raise TypeError("parcel line items must identify a SKU and a quantity")
++    return sku, quantity
++
++
++def _parcel_lines(parcel):
++    if isinstance(parcel, dict):
++        if "sku" in parcel and any(key in parcel for key in ("quantity", "qty", "count")):
++            yield parcel
++            return
++
++        for sku, quantity in parcel.items():
++            yield sku, quantity
++        return
++
++    if isinstance(parcel, (list, tuple)) and len(parcel) == 2:
++        sku, quantity = parcel
++        if (
++            isinstance(sku, str)
++            and isinstance(quantity, (int, float))
++            and not isinstance(quantity, bool)
++        ):
++            yield parcel
++            return
++
++    raw_lines = None
++    sku_to_quantity = getattr(parcel, "sku_to_quantity", None)
++    if sku_to_quantity is not None:
++        if isinstance(sku_to_quantity, dict):
++            raw_lines = sku_to_quantity.items()
++        else:
++            raw_lines = sku_to_quantity
++    else:
++        for name in ("lines", "items", "contents", "skus"):
++            raw_lines = getattr(parcel, name, None)
++            if raw_lines is not None:
++                if callable(raw_lines):
++                    raw_lines = raw_lines()
++                if isinstance(raw_lines, dict):
++                    raw_lines = raw_lines.items()
++                break
++
++    if raw_lines is None:
++        if hasattr(parcel, "sku"):
++            raw_lines = [parcel]
++        else:
++            try:
++                raw_lines = list(parcel)
++            except TypeError as exc:
++                raise TypeError(
++                    "parcel must be a mapping of SKU to quantity or an iterable of line items"
++                ) from exc
++
++    for line in raw_lines:
++        yield _line_to_sku_quantity(line)
++
++
++def parcel_weight_g(parcel, products) -> int:
++    """Return the total shipping weight in grams of a parcel's contents."""
++    total = 0
++    for sku, quantity in _parcel_lines(parcel):
++        product = products.get(sku)
++        if product is None:
++            raise KeyError(sku)
++        total += product.weight_g * quantity
++    return total

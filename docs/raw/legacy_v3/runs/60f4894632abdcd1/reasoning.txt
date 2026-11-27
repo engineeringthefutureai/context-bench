@@ -1,0 +1,166 @@
+Let's understand the task:
+
+1. Add `expected_arrival(refund: Refund) -> date` to `shopkit/payments/refunds.py`.
+2. The bank requires 5 business days.
+3. Count from the day the refund was issued (refund.at).
+4. Use the shop's usual business-day calendar (weekends and shop-closed days don't count) — this is `add_business_days(start, days)` in `shopkit/utils/dates.py`.
+
+Let's look at the relevant code:
+
+- `shopkit/utils/dates.py` has `add_business_days(start: date, days: int) -> date` and `is_business_day(day: date) -> bool`.
+- Tests in `tests/test_dates.py`: `test_add_business_days_skips_weekend`, `test_add_business_days_skips_holidays`, `test_add_business_days_rejects_negative`.
+
+So `add_business_days(start, days)` probably: start from `start` and advance `days` business days, skipping weekends and holidays. The question is whether "the day the refund was issued" itself is counted as day 0 (i.e., arrival = the 5th business day after issue day).
+
+Task says "the bank requires 5 business days, counted from the day the refund was issued". Standard interpretation: the issue day is day 0, and the 5th business day after it.
+
+Now, `refund.at` is a `datetime`. We need to convert it to a `date`. Which timezone? The refund is created with `utc_now()`. So `refund.at.date()` gives the UTC date. That's the most reasonable: use the UTC date of issue.
+
+Hmm, but wait — is there a settings store timezone? `Settings` has `store_country` but I don't see a timezone. So `refund.at.date()` in UTC is the right approach.
+
+Let's check the signature of `add_business_days`: `add_business_days(start: date, days: int) -> date`. The test `test_add_business_days_rejects_negative` means it rejects negative days. We're passing 5, so no problem.
+
+Implementation:
+
+```python
+def expected_arrival(refund: Refund) -> date:
+    """Business days until the refunded amount should reach the customer's card."""
+    return add_business_days(refund.at.date(), REFUND_BUSINESS_DAYS)
+```
+
+Where `REFUND_BUSINESS_DAYS = 5`.
+
+Or maybe better to make it a constant: `_REFUND_BUSINESS_DAYS = 5` or `REFUND_ARRIVAL_DAYS = 5`.
+
+Should it handle a naive datetime? The datetime from `utc_now()` — let's assume it's timezone-aware UTC. But if someone constructs a Refund with a naive datetime, `at.date()` works fine anyway. If someone passes a datetime in a different timezone... unlikely. Keep it simple: `refund.at.date()`.
+
+Actually, wait. Let me think about whether it should be counted from the issue day. "Counted from the day the refund was issued" — so day 0 = issue day, and the arrival is the 5th business day after that. `add_business_days(issue_day, 5)` gives the day that is 5 business days after the issue day. This matches "the bank requires 5 business days, counted from the day the refund was issued".
+
+Let me double-check the semantics of `add_business_days` with the tests: `test_add_business_days_skips_weekend`. Typical implementation: `add_business_days(date(2024,1,5), 1)` (Friday) → Monday. So it advances by `days` business days. If the issue day is itself a non-business day (weekend/holiday), does it count from the next business day? Depends on the implementation. But we don't know exactly; typical implementation: start = day after start, count up while days > 0. If start is a weekend, the first business day counted is the next Monday. That's reasonable behavior — "5 business days from issuance" when issued on a Saturday would be the Friday a week later (Mon, Tue, Wed, Thu, Fri). That's a natural reading.
+
+We can't see the implementation, so just use it as is; it's "the shop's usual business-day calendar" and the function name matches exactly.
+
+Imports needed: `from datetime import date, datetime` (adding `date` to existing imports) and `from shopkit.utils.dates import add_business_days, utc_now`.
+
+Where to put the constant? Maybe as a module-level constant `REFUND_ARRIVAL_BUSINESS_DAYS = 5`. Or just inline 5 with a comment. A named constant is clearer and fits a codebase that seems to use named constants elsewhere (e.g., `MAX_ITEMS_PER_PARCEL`, `DEFAULT_CURRENCY_SYMBOL`). Define `REFUND_BUSINESS_DAYS = 5` at module level.
+
+Docstring: "Business days until the refunded amount should reach the customer's card."
+
+Should `expected_arrival` be a function or a method? Task says "add `expected_arrival(refund: Refund) -> date` to the refunds module" — a module-level function that takes a Refund.
+
+Edge cases: `refund.at` defaults to `utc_now()`, always set. Fine.
+
+Final file:
+
+```python
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import add_business_days, utc_now
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+#: Banks need this many business days for a refund to reach the customer's card.
+REFUND_BUSINESS_DAYS = 5
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+
+
+def expected_arrival(refund: Refund) -> date:
+    """The day the refunded amount should reach the customer's card.
+
+    Banks need five business days, counted from the day after the refund was issued,
+    on the shop's usual business-day calendar (weekends and shop closures
+    don't count).
+    """
+    return add_business_days(refund.at.date(), REFUND_BUSINESS_DAYS)
+```
+
+Wait — "counted from the day the refund was issued" — should we say in the docstring that the issue day itself doesn't count? The phrasing "counted from the day the refund was issued" suggests the issue day is the start, and 5 business days after it. Let me rephrase: "Banks need five business days, so the arrival is the fifth business day after the refund was issued." Hmm, but is the issue day counted as business day 1? If a refund is issued on Monday and the bank "requires 5 business days", normally the money arrives on the 5th business day (Mon=T0 → Fri is the 5th business day if counting Mon as day 1, or the following Thursday if counting Mon as day 0...).
+
+Ambiguity: "5 business days from the day the refund was issued" — the most standard reading in payment contexts: T+5 business days. T = issue day. So `add_business_days(issue_day, 5)`.
+
+Let me check what `add_business_days` does — from the test names, it advances `days` business days from start. Typical implementation (like pandas `business_day` or a simple loop):
+
+```python
+def add_business_days(start: date, days: int) -> date:
+    if days < 0:
+        raise ValueError(...)
+    day = start
+    added = 0
+    while added < days:
+        day += timedelta(days=1)
+        if is_business_day(day):
+            added += 1
+    return day
+```
+
+This is T+n. So `expected_arrival = add_business_days(refund.at.date(), 5)` gives T+5 business days. That's the standard reading of "the bank requires 5 business days, counted from the day the refund was issued".
+
+Alternatively, the test might check that a refund issued on Friday 2024-01-05 arrives on 2024-01-12 (next Friday): T+5 business days: Mon 8, Tue 9, Wed 10, Thu 11, Fri 12 → Jan 12. Yes, that's the natural expectation.
+
+Timezone consideration: `refund.at.date()` uses the datetime's own representation. `utc_now()` probably returns a timezone-aware UTC datetime. If it were naive UTC, `.date()` still returns the UTC date. Fine.
+
+One more consideration: should the constant be public or private? The module currently only defines the `RefundTooLarge` class, `Refund` dataclass, and `refund` function. Adding a public constant `REFUND_BUSINESS_DAYS` is fine, and could be useful if support wants to tune it. Keep it public.
+
+Naming: `REFUND_ARRIVAL_BUSINESS_DAYS` might be more descriptive. Let's go with `REFUND_ARRIVAL_DAYS` with a docstring/comment that it's business days. Hmm. "The bank requires 5 business days" — constant name `REFUND_BUSINESS_DAYS = 5` is clear enough.
+
+Let me also verify the import ordering: the existing file imports:
+
+```python
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import utc_now
+```
+
+Add `date` to the datetime import: `from datetime import date, datetime`. And `from shopkit.utils.dates import add_business_days, utc_now`.
+
+Style: the codebase uses module docstrings, simple functions. Good.
+
+Should I type the parameter? Yes: `def expected_arrival(refund: Refund) -> date:`.
+
+Reconfirming: no other callers to update; purely additive change.
+
+One question: the task says "counted from the day the refund was issued" — should I make it explicit in the docstring: "The issue day itself does not count; the arrival is the fifth business day after it." Let me write:
+
+```python
+def expected_arrival(refund: Refund) -> date:
+    """When the refunded amount should reach the customer's card.
+
+    Banks need five business days, so the arrival is the fifth business day
+    after the day the refund was issued, on the shop's usual business-day
+    calendar (weekends and shop closures don't count).
+    """
+    return add_business_days(refund.at.date(), REFUND_BUSINESS_DAYS)
+```
+
+Good. Let's deliver only the changed file.

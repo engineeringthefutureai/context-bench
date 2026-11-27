@@ -1,0 +1,63 @@
+Let's start by understanding the task. The email provider is penalizing them for bounces (delivery failures) from addresses with invalid formats imported from old systems. Newsletter recipients also need to have email addresses that pass "the same checks that the shop applies at sign-up and checkout," and everyone else is skipped.
+
+So, what I need to find is:
+1. The email address validation checks used at sign-up and checkout.
+2. Modify `newsletter.py` so that only recipients whose email addresses pass that check are included.
+
+Let me try exploring the repository.
+
+
+The check at registration/checkout is `is_valid_email` in `shopkit/utils/validation.py`. Let's confirm how it's used in the customer service (registration/checkout) and check the Customer model (the email field might be optional/None?).
+
+
+Customer.email is of type `str` (never None, always a string — probably could be an empty string). Task: recipients must also have an email that passes `is_valid_email`. So we update `recipients` to filter with both `c.marketing_opt_in` and `is_valid_email(c.email)`.
+
+`batches` uses `recipients`, so it's covered. `render_for` — should we skip invalid emails here too? The task says "newsletter recipients must also have an email address that passes the same check." recipients() is the definition of who becomes a recipient. Filtering in `recipients()` covers both `batches` and direct callers of `recipients`. `render_for` renders for a given customer; if a customer with an invalid email gets passed in, that's a caller bug — the check on recipients is what's being asked. I'll keep the change minimal and put it in `recipients()`.
+
+Let me check who calls `recipients` and `batches` to make sure nothing breaks.
+
+
+The `recipients` function is the filter. It filters by `marketing_opt_in`. This task requires that, in addition to that, the email address must also pass `is_valid_email` (the same check used at signup time — `CustomerDirectory.register` in customers/service.py uses `is_valid_email`). Since `batches` calls `recipients`, filtering in `recipients` will cover both entry points.
+
+Edge case: can `email` be None? In the model it's defined as `email: str`, but according to the context, data was "imported from the old system" and may have been entered in incorrectly — email could be an empty string, or possibly None. `is_valid_email` expects a str and calls `.strip()`. If email is None, `.strip()` will fail with AttributeError. Since the task states "badly-typed addresses imported from the old system," defensively handling None is prudent: `c.email and is_valid_email(c.email)`. This is a small, safe addition. The model's type says str, but "imported from the old system" suggests that None/empty values could exist. Use `is_valid_email(c.email) if c.email else False` — or more simply: `c.email is not None and is_valid_email(c.email)`. Let's write it cleanly:
+
+```python
+def recipients(customers: list[Customer]) -> list[Customer]:
+    """Opted-in customers whose email passes the same check as signup/checkout."""
+    return [c for c in customers if c.marketing_opt_in and c.email and is_valid_email(c.email)]
+```
+
+Wait — should I double-check the order: opt-in first, then validity? The order of the conditions doesn't affect correctness. No problem.
+
+Let me confirm: is there anywhere else that newsletter sending relies on `batches` being derived from all customers? `batches` uses `recipients`, so it's covered.
+
+Also, check the usage of is_valid_email in `notifications/email.py` to confirm consistency — it's used at send time too, so the filtering is consistent.
+
+Make the minimal changes: add the import and update `recipients`. Leave everything else as is.
+
+
+The newsletter module currently filters only by `marketing_opt_in`. The requirement: recipients must also have an email address that passes `is_valid_email` (the same check used at signup/checkout). Everyone else is skipped (not raise — skip).
+
+Change `recipients` to also check `is_valid_email(c.email)`. Note `is_valid_email` expects a str; customer.email is str. `is_valid_email` strips the address and checks the regex — so `""` fails, and None would fail too (TypeError on strip). The model says `email: str`, so keep it simple.
+
+Update the file:
+
+```python
+"""Newsletter sends. Only customers who opted in receive marketing email."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # provider limit per API call
+
+BODY = ...
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    """Customers who opted in and whose email address is valid (signup/checkout check)."""
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+```
+
+Everything else stays. Since `batches` uses `recipients`, it's automatically covered.

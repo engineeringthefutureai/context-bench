@@ -1,0 +1,60 @@
+<file path="shopkit/checkout.py">
+"""Checkout: turns a cart into a priced order with tax, shipping and discounts, then takes payment."""
+from dataclasses import dataclass, field
+from datetime import date
+
+from shopkit.catalog.models import Product
+from shopkit.catalog.pricing import PriceBook
+from shopkit.customers.loyalty import points_for
+from shopkit.customers.models import Address, Customer
+from shopkit.errors import ShopError
+from shopkit.orders.models import Order, OrderLine
+from shopkit.promotions.coupons import Coupon, discount_cents
+from shopkit.shipping.rates import shipping_cents
+from shopkit.tax.calculator import order_tax
+from shopkit.utils.ids import new_id
+
+
+class EmptyCart(ShopError):
+    http_status = 422
+
+
+class NotPurchasable(ShopError):
+    http_status = 422
+
+
+@dataclass
+class Quote:
+    order: Order
+    subtotal_cents: int
+    discount_cents: int
+    shipping_cents: int
+    tax_cents: int
+    points: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def total_cents(self) -> int:
+        return self.subtotal_cents - self.discount_cents + self.shipping_cents + self.tax_cents
+
+
+def quote(cart: dict[str, int], products: dict[str, Product], ship_to: Address, weight_g: int,
+          prices: PriceBook, today: date, coupon: Coupon | None = None,
+          customer: Customer | None = None) -> Quote:
+    """Price a cart (sku -> qty). Tax applies after discount on the goods; shipping is untaxed."""
+    if not cart:
+        raise EmptyCart("cart is empty")
+    order = Order(id=new_id("ord"))
+    for sku, qty in cart.items():
+        product = products[sku]
+        if not product.is_purchasable():
+            raise NotPurchasable(f"{sku} is not available", sku=sku)
+        order.lines.append(OrderLine(sku, qty, prices.unit_price(product, qty, today)))
+    subtotal = order.total_cents
+    discount = discount_cents(coupon, subtotal, today) if coupon else 0
+    tax = order_tax(order, ship_to)
+    if discount and subtotal:
+        tax = tax * (subtotal - discount) // subtotal
+    points = points_for(customer, subtotal - discount) if customer else 0
+    return Quote(order, subtotal, discount, shipping_cents(ship_to.country, weight_g, subtotal), tax, points)
+</file>

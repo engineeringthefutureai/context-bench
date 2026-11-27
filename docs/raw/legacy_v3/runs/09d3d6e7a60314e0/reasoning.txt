@@ -1,0 +1,155 @@
+Let me carefully understand the requirements.
+
+Task: Add a `transfer_reference() -> str` function to the payments gateway module (`shopkit/payments/gateway.py`). This generates a new reference number: 12 characters in 3 groups of 4 characters separated by dashes, "in the same style as other customer-facing codes in the shop."
+
+Looking at the repo map, `shopkit/utils/ids.py` has:
+- `new_id(prefix: str) -> str` — e.g., `new_id("ord")` -> `ord_3f9a1c2b7d4e`.
+- `short_code(length: int=8, groups: int=0) -> str` — "A random, human-readable code from an unambiguous alphabet, e.g., 'K7QM-X2PA' when groups=4."
+- `is_short_code(text: str) -> bool`
+
+So "the same style as other customer-facing codes in the shop" clearly refers to `short_code`. The example `short_code(length=8, groups=4)` -> "K7QM-X2PA". So `transfer_reference()` would be `short_code(length=12, groups=3)`.
+
+12 characters in 3 groups of 4 characters separated by dashes = "XXXX-XXXX-XXXX". That's `short_code(length=12, groups=3)`.
+
+The docstring says `short_code` generates a "human-readable code from an unambiguous alphabet." So I just need to add:
+
+```python
+def transfer_reference() -> str:
+    """New pay-by-bank reference: 12 unambiguous characters in three groups of four."""
+    return short_code(length=12, groups=3)
+```
+
+But wait — I need to verify how `short_code` works. The context only gives me the signature and the first line of the docstring, not the body. The example: `short_code(length=8, groups=4)` -> "K7QM-X2PA". This is 8 characters in 2 groups of 4 separated by a dash. So `groups=4`? Hmm, wait. The example is "K7QM-X2PA" when groups=4. "K7QM-X2PA" has 2 groups of 4. Hmm, so maybe `groups` isn't the number of groups?
+
+Let me reread: `def short_code(length: int=8, groups: int=0) -> str  # A random, human-readable code from an unambiguous alphabet, e.g., 'K7QM-X2PA' when groups=4.`
+
+Hmm, "e.g., 'K7QM-X2PA' when groups=4" — that's odd. "K7QM-X2PA" is 8 characters with 1 dash. If groups=4 means "group size of 4," then with length=8 you get 2 groups of 4: "K7QM-X2PA"... no wait, "K7QM-X2PA" = K7QM (4) + X2PA (4) = 8 characters, 2 groups of 4. So `groups=4` probably means "group size = 4". That makes sense: `short_code(length=8, groups=4)` -> "K7QM-X2PA" (2 groups of 4).
+
+So `groups` is probably the group size, not the number of groups. Hmm, but I can't be 100% sure without the body. Let me think about what's most reasonable.
+
+If `groups` is group size: `short_code(length=12, groups=4)` -> "XXXX-XXXX-XXXX" (3 groups of 4). This is exactly what I need.
+
+If `groups` is number of groups: `short_code(length=12, groups=3)` -> 3 groups of 4 -> "XXXX-XXXX-XXXX". But then the example: `short_code(length=8, groups=4)` would be 4 groups of 2 -> "XX-XX-XX-XX", which is not "K7QM-X2PA". So the example contradicts the "number of groups" interpretation.
+
+Therefore `groups` is almost certainly the group size: `short_code(length=12, groups=4)` yields 3 groups of 4 separated by dashes.
+
+Hmm, but wait. What if the meaning of `groups` is different? Let me think: maybe groups=4 means "insert a dash every 4 characters." That's the same as group size 4. Yes.
+
+So the implementation is:
+
+```python
+def transfer_reference() -> str:
+    return short_code(length=12, groups=4)
+```
+
+But I should be careful — since I can't see the body of `short_code`, I should also think about whether there's any risk of it producing something different. The docstring says "A random, human-readable code from an unambiguous alphabet, e.g., 'K7QM-X2PA' when groups=4." This strongly suggests that the output is length `length` characters from an unambiguous alphabet (like 23456789BCDEFHJKLMNPQRTVWXY, excluding 0/O, 1/I) grouped into chunks of `groups` separated by dashes. When groups=0, no dashes, probably.
+
+Therefore `transfer_reference()` = `short_code(length=12, groups=4)`.
+
+Where should the function go in gateway.py? The module has `PaymentDeclined` and `FakeGateway`. I need to add the import of `short_code` from `shopkit.utils.ids`. Currently it imports `new_id` from `shopkit.utils.ids`. So update to `from shopkit.utils.ids import new_id, short_code`.
+
+Also, "the same style as other customer-facing codes in the shop" — short_code is used for e.g. gift cards? `GiftCardStore.issue` generates a code — probably uses `short_code`. Invoices? No. The gift card code is a customer-facing code. So using `short_code` aligns with "the same style."
+
+Should the function live at module level in gateway.py? Yes, the task says "add `transfer_reference() -> str` to the payments gateway module."
+
+Should it take arguments? The task says `transfer_reference() -> str` — no arguments. So it's a module-level function.
+
+Should I add a docstring? Yes: "New pay-by-bank reference: 12 characters in 3 groups of 4, in the same unambiguous style as other customer-facing codes."
+
+Let me also double-check the dash grouping: "12 characters in 3 groups of 4 separated by dashes" — so total character count excluding dashes = 12. "XXXX-XXXX-XXXX". Good.
+
+Edge case: what if `short_code` with groups=4 and length=12... produces "XXXX-XXXX-XXXX"? Per the example (length=8, groups=4 -> "K7QM-X2PA" = 4+4), yes.
+
+One more consideration: should the reference be unique? `short_code` uses random from an alphabet. Probably uses secrets or uuid. Uniqueness isn't strictly required; a 12-character code from an ~30-character alphabet has enormous space. The task just says "generate a new reference."
+
+Should I worry about FakeGateway? No, not needed.
+
+Let me write the final file:
+
+```python
+"""Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway."""
+from shopkit.errors import ShopError
+from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+from shopkit.payments.reconciliation import redact_pan
+from shopkit.utils.ids import new_id, short_code
+
+
+class PaymentDeclined(ShopError):
+    http_status = 402
+
+
+def transfer_reference() -> str:
+    """New pay-by-bank reference: 12 characters in three dash-separated groups of four."""
+    return short_code(length=12, groups=4)
+
+
+class FakeGateway:
+    """Declines card numbers ending in 0000; everything else is authorized."""
+
+    def __init__(self):
+        self.payments: dict[str, Payment] = {}
+
+    def authorize(self, order_id: str, amount_cents: int, currency: str, card_number: str) -> Payment:
+        digits = "".join(c for c in card_number if c.isdigit())
+        payment = Payment(new_id("pay"), order_id, amount_cents, currency, "card",
+                          card_number=redact_pan(digits))
+        if digits.endswith("0000"):
+            payment.status = FAILED
+            self.payments[payment.id] = payment
+            raise PaymentDeclined("card declined", order_id=order_id, payment_id=payment.id)
+        self.payments[payment.id] = payment
+        return payment
+
+    def capture(self, payment_id: str) -> Payment:
+        payment = self.payments[payment_id]
+        if payment.status != AUTHORIZED:
+            raise ShopError(f"payment {payment_id} is {payment.status}", payment_id=payment_id)
+        payment.status = CAPTURED
+        return payment
+```
+
+Wait — should the function be defined before or after the class? Order doesn't matter functionally. I'll place it after the `PaymentDeclined` exception, before `FakeGateway`, as a module-level helper. Seems reasonable.
+
+Now, let me think again about the meaning of the `groups` parameter. This is the crux. Risk: if `groups` means "number of groups," then `short_code(length=12, groups=3)` gives 3 groups of 4 -> "XXXX-XXXX-XXXX", and the docstring example "K7QM-X2PA" with groups=4 would be wrong (it should be 4 groups of 2). The example shows 2 groups of 4 with groups=4, which matches "group size 4." So I'm fairly confident `groups` = group size (chunk width).
+
+Alternatively, maybe `groups` is the number of separators? No, that's weird.
+
+Hmm, actually, wait. Let me reconsider. "short_code(length=8, groups=4)" -> "K7QM-X2PA". Hmm, if `groups` meant "number of groups"... no. If it meant "group size"... yes. If it meant "number of dashes"... 4 dashes would be "XX-XX-XX-XX-XX". No.
+
+So group size it is. `short_code(length=12, groups=4)` -> "XXXX-XXXX-XXXX".
+
+But another subtlety: what if `short_code`'s `length` counts the dashes too? In the example: length=8, output "K7QM-X2PA" is 9 characters including the dash, 8 alphanumerics. So length counts the alphanumeric characters, not the dashes. Good — for length=12 we get 12 alphanumerics + 2 dashes = "XXXX-XXXX-XXXX". Exactly what the task wants: "12 characters in 3 groups of 4 separated by dashes."
+
+Great.
+
+One more consideration: should `transfer_reference` be a method on FakeGateway, or used by it? The task says to add it to the "payments gateway module," with signature `transfer_reference() -> str` — no self. A module-level function.
+
+Do I need to handle anything for FakeGateway, like generating a bank transfer payment? The task is only about the reference generator. Keep the change minimal.
+
+Also let me check the imports: the module currently imports `new_id` from `shopkit.utils.ids`. I'll add `short_code`. Alphabet style: "unambiguous alphabet" — that's the shop style for customer-facing codes (gift card codes are probably made with `short_code`). Good.
+
+Docstring: keep it short, fit the style. The module docstring is one line. Functions in this codebase use short docstrings. Something like:
+
+```python
+def transfer_reference() -> str:
+    """New pay-by-bank reference, e.g. "K7QM-X2PA-9C4T": 12 characters in three groups of four."""
+    return short_code(length=12, groups=4)
+```
+
+Hmm, should I include an example? A bit risky since I don't know the exact alphabet. Let me keep it simple:
+
+```python
+def transfer_reference() -> str:
+    """New pay-by-bank transfer reference: 12 characters in three dash-separated groups of four."""
+    return short_code(length=12, groups=4)
+```
+
+Good.
+
+Now the final file contents. Let me make sure I don't change anything else and that the whole file is included.
+
+Double-check: the task says "in the same style as other customer-facing codes in the shop." `short_code`'s docstring: "A random, human-readable code from an unambiguous alphabet." Gift cards (customer-facing) probably use `short_code`. So yes.
+
+One more thing to consider: maybe there's an existing convention for bank transfer references — the shop doesn't have it yet ("we're adding pay-by-bank-transfer"). So there's nothing to match beyond the code style.
+
+I'm confident in this change. Let me write the final answer with just the file block.

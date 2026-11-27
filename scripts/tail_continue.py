@@ -229,13 +229,15 @@ def continue_run(exp, rc, new, old, fb, legacy_mods) -> dict:
         passed, total, reuse, tests_out = run_hidden_tests(sandbox, task.hidden_tests, exp.shared_dir)
         extra = {}
         if files:
-            r_passed, r_total, r_out = run_repo_tests(sandbox, exp.shared_dir)
-            extra.update(repo_tests_passed=r_passed, repo_tests_total=r_total)
+            repo_fields, r_out = exp._repo_test_fields(old["repo_size"], sandbox)
+            extra.update(repo_fields)
             tests_out += "\n--- repo's own tests ---\n" + r_out
             if patch:
                 extra.update(patch_coverage(sandbox, task.hidden_tests, exp.shared_dir, before, files),
                              **tests_added(before, files))
     label = "ok" if total > 0 and passed == total else "broken"
+    if label == "ok" and extra.get("known_tests_broken"):
+        label = "breaks_tests"
     row = {**old, "run_id": new.run_id, "tail_checks": True, "tail_check": "tests" if edit else "syntax",
            "continued_from": old["run_id"], "label": label, "tests_passed": passed, "tests_total": total,
            "reuse_passed": reuse, "error": error or (None if label == "ok" else old.get("error")),

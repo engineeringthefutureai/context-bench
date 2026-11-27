@@ -1,0 +1,67 @@
+Let's understand the task. I need to add a `restocking_fee_cents(order)` method to `ReturnRequest` in `shopkit/orders/returns.py`. This returns 12.5% of the return amount for "change of mind" returns, and 0 for all other reasons. It must be rounded in exactly the same way as how the shop rounds other percentage amounts like tax and discounts.
+
+I need to find how the shop rounds its percentage amounts. Let me explore the repository.
+
+
+Let's take a look at money.py, tax, promotions (discounts), and utils/numbers.py to confirm how the shop rounds percentage amounts like tax or discounts.
+
+
+`shopkit/utils/numbers.py` has `apply_rate`, which is documented as "used for tax, commissions, discounts" — exactly what the task refers to ("round it exactly the same way the shop rounds its other percentage amounts like tax and discounts").
+
+Let me check how `apply_rate` is used in the tax calculator and coupons, and how the import is done.
+
+
+The shop's pattern for percentage amounts (tax, discounts) is `apply_rate` from `shopkit.utils.numbers`, which rounds to whole cent units with ROUND_HALF_UP. Therefore:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+```
+
+The rate is 12.5%. `apply_rate` accepts `float | Decimal | str`. Passing `12.5` as a float works because it gets converted via `str(rate_pct)` → "12.5". It's better to either define a constant `RESTOCKING_FEE_PCT = 12.5`, or just pass 12.5 inline. For clarity, defining a constant is better. Since the task specifies 12.5%, a named constant fits the codebase's style (like RETURN_WINDOW_DAYS, etc.).
+
+Should this method be an instance method on ReturnRequest? Yes: "Add `restocking_fee_cents(order)` to `ReturnRequest`." So `def restocking_fee_cents(self, order: Order) -> int`.
+
+Note: The fee is calculated based on the refund amount, which is the sum of the prices of the returned items. `refund_cents(order)` computes that. If the reason is changed_mind → 12.5% of refund_cents.
+
+Edge cases: Refund 0? If all quantities are 0 it's blocked, but for robustness `apply_rate` handles 0 → 0 without issue. Negative numbers are not possible here.
+
+Rounding example: Refund 1234 cents → 12.5% = 154.25 → rounded to 154 with ROUND_HALF_UP. Good.
+
+Import: add `from shopkit.utils.numbers import apply_rate` to returns.py.
+
+Let me double-check that there's nothing else, for example the "restocking" or fee-related stuff. Also, the use of apply_rate in promotions/coupons.py, to confirm the pattern for naming percentage constants. Strictly speaking, not necessary, but I want to keep it to a minimum. I've used 6 tool calls so far (list_files x2, grep x1, read_file x3, find_references x1 = actually 7). Plenty of budget remaining, but I don't think it's necessary. Let me just quickly check coupons.py to see how the percentage constant is named and mimic the style. Actually, let me check one: `SUBSCRIPTION_DISCOUNT_PCT` in subscriptions.py. The `_PCT` suffix is used. I'll go with `RESTOCKING_FEE_PCT = 12.5`.
+
+One question: should I pass `RESTOCKING_FEE_PCT` as a float 12.5? `apply_rate(1000, "7.25")` uses the string "7.25", but `apply_rate(1999, 15)` uses an int. Float 12.5 → str(12.5) = "12.5", which is exact in decimal. No problem. As an alternative, passing the string "12.5" avoids the float representation issue entirely. str(12.5) == "12.5" is exact because 12.5 can be represented exactly in binary. Either works. I'll go with `12.5` as the constant... hmm, but the module docstring of numbers.py says "Money is always in integer cents, never round through float formatting," but apply_rate itself accepts a float and uses Decimal(str(rate_pct)). Either is safe. To mimic the string style of "7.25", I could also define `RESTOCKING_FEE_PCT = "12.5"`? That's a bit unusual. The test `apply_rate(1000, "7.25") == 73` uses a string. Let me look at coupons.py and subscriptions.py to check which style is dominant.
+
+Let me quickly read those two files (2 tool calls).
+
+
+All the necessary information is gathered. The shop rounds percentage amounts (tax, discounts, commissions) using `apply_rate` in `shopkit/utils/numbers.py`: it uses Decimal, rounding half-up, and rounds to the cent.
+
+So, the change to `shopkit/orders/returns.py`:
+
+- Add a constant `RESTOCKING_FEE_PCT = 12.5` (the codebase style: `SUBSCRIPTION_DISCOUNT_PCT = 10`, `RETURN_WINDOW_DAYS = 30`). Where to put it — near RETURN_WINDOW_DAYS at the top.
+- Add a method to ReturnRequest:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    """12.5% of the refund on changed-mind returns; 0 for every other reason."""
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+```
+
+Import apply_rate.
+
+Verify: `apply_rate(cents, 12.5)` — Decimal("12.5") works from the string "12.5" via `str(12.5)`. Yes.
+
+`refund_cents` is a method that takes `order`. So `restocking_fee_cents(order)` calls `self.refund_cents(order)`. This matches the requested signature: `restocking_fee_cents(order)`.
+
+Edge cases: refund 0 → fee 0. changed_mind → 12.5% rounded half-up. Example: refund 1999 cents → 1999 * 12.5 / 100 = 249.875 → 250.
+
+The string literal "changed_mind" is already used in open_return (`reason != "changed_mind"`). Use a constant REASONS? REASONS is a tuple, and the code uses the literal "changed_mind". Follow suit and use the literal.
+
+Write the whole file.

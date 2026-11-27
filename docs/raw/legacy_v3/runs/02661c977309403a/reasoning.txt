@@ -1,0 +1,132 @@
+Let me carefully read the requirements and code.
+
+Task: Add parcel weight to the shipping label. `label_text` gets an optional `weight_g` argument (parcel weight in grams). When given, print a line `Weight: <weight>` right after the order/parcel line. Labels for US addresses display pounds to two decimal places (1500 g -> `3.31 lb`); all other destinations retain the shop's standard kilogram display (1500 g -> `1.5 kg`). Use the shop's standard weight formatting so the label matches the packing slip.
+
+Target file: shopkit/shipping/labels.py
+
+From the repository map:
+
+shopkit/shipping/packaging.py:
+```python
+def format_weight(grams: int, unit: str='kg') -> str  # Weight for display on labels, slips and the storefront. unit is "kg" (default), "g" or "lb":
+```
+
+So the shop's standard weight formatting is `format_weight` in `shopkit/shipping/packaging.py`. This function takes grams and unit. For US addresses, use unit="lb"; for others, the default "kg".
+
+Let me verify: 1500 g -> lb: 1500 g = 3.3069... lb. To two decimals: 3.31 lb. Good. kg: 1500 g = 1.5 kg. Good.
+
+I don't have the body of `format_weight`, but the docstring says "unit is 'kg' (default), 'g' or 'lb'". The task says "use the shop's standard weight formatting so the label matches the packing slip". So I should call `format_weight(weight_g, "lb")` for US and `format_weight(weight_g)` otherwise.
+
+Wait — but is `format_weight` the one used by the packing slip? The packing slip is in `shopkit/orders/fulfillment.py`: `packing_slip(parcel: Parcel, weight_g: int) -> str  # Slip packed inside each parcel: order, parcel number, contents and weight.` I don't have its body, but it presumably uses `format_weight`. The docstring of `format_weight` says "Weight for display on labels, slips and the storefront." That confirms it's the standard.
+
+Now, how to detect US addresses? `Address` has fields: name, line1, city, postcode, country, line2, region. So `to.country`. Country codes are ISO, probably uppercase like "US". `zone_for_country(country, home='US')` and `estimated_delivery(..., home: str='US')` suggest ISO country codes. So check `to.country.upper() == "US"`? Or just `to.country == "US"`?
+
+Hmm. How careful should I be? Address country field — in `customers/addresses.py`, `normalize_postcode(postcode, country)` and `format_address(address)`. The test `test_format_address_us` suggests the country is "US". The `tax_by_jurisdiction` shows "DE" and "US-CA", so countries are ISO uppercase codes. So `to.country == "US"` is fine. For safety, `.upper()` could normalize, but the codebase convention seems to consistently store uppercase ISO codes. To stay simple and consistent, `to.country == "US"`. Hmm, but what would be most consistent? Let me look at other places in the repo where US is compared:
+
+- `shopkit/shipping/zones.py`: `zone_for_country(country: str, home: str='US') -> str` — body unknown.
+- `shopkit/shipping/rates.py`: `shipping_cents(country, weight_g, order_total_cents=0)` — uses `getShippingCost(country, weightLbs, orderTotal)` from the common module? Probably.
+- `shopkit/common/shipping_calc.py`: `getShippingCost(country, weightLbs, orderTotal=0)`, `getZone(country)`, `estimateDays(country)`.
+
+I don't have the bodies. The safest check most consistent with the codebase: `to.country.upper() == "US"`? Or `to.country == "US"`.
+
+Actually, there's also `Address.region` — US states. For US, region would be the state. But the task says "labels for US addresses" — meaning the destination country is US. Use `to.country`.
+
+Hmm, should I use a helper like `zone_for_country`? No — that returns a rate zone, not the country. The simplest direct check: `unit = "lb" if to.country == "US" else "kg"`.
+
+Wait, one nuance: should the US check be case-insensitive? The codebase stores countries as uppercase ISO codes (e.g. "US-CA" in tax report, "home: str='US'"). `normalize_postcode(postcode, country)` takes country. I think `to.country == "US"` matches the system's convention. But adding `.upper()` is a defensive no-op against the convention. Hmm, which would reviewers prefer? The codebase style: `zone_for_country(country: str, home: str='US')` — the docstring says "destination ISO country code, as seen from the store's home country". So uppercase ISO codes are the norm. Let me go with `to.country == "US"`. Actually, hmm, let me reconsider: some addresses might be created with mixed-case input. `format_address` test: `test_format_address_us` — country is likely "US". Let me just do `to.country == "US"`. That's the cleanest.
+
+Hmm, wait. Actually, let me think about `to.country.upper() == "US"` vs `== "US"`. The task says "labels for US addresses show pounds". Since the rest of the system uses uppercase ISO codes, direct comparison is fine. I'll go with `to.country == "US"`.
+
+Now, the function signature:
+
+```python
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+```
+
+"When given, print a line `Weight: <weight>` right after the order/parcel line."
+
+Current lines:
+```python
+lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+```
+
+So after the order/parcel line, before the item lines, insert `Weight: <weight>`.
+
+So:
+
+```python
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+    lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+    if weight_g is not None:
+        lines.append(f"Weight: {format_weight(weight_g, 'lb' if to.country == 'US' else 'kg')}")
+    lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+```
+
+Import: `from shopkit.shipping.packaging import format_weight`.
+
+Check for circular imports: `shopkit/shipping/packaging.py` — what does it import? The map shows only classes/functions, no imports. `labels.py` is in the same package `shopkit.shipping`. `packaging.py` imports `Box`, and probably `math` for rounding up. Unlikely to import `labels.py`. So no circular import.
+
+Now, edge cases:
+
+1. `weight_g` is None (not given) → no weight line. ✓
+2. `weight_g = 0`? "When given" — 0 is given. `format_weight(0)` probably returns "0 kg" or "0 lb". Fine, will be printed. The task says "when given", and using `is not None` correctly handles 0 as given. Using `if weight_g:` would incorrectly skip 0. So `is not None` is correct.
+3. US address → `format_weight(weight_g, "lb")` → e.g. "3.31 lb". Others → `format_weight(weight_g)` → "1.5 kg".
+
+Let me double-check the expected output format: `Weight: <weight>`, e.g. `Weight: 3.31 lb` and `Weight: 1.5 kg`. The docstring of `format_weight` says unit is "kg", "g", "lb" — the output for lb is probably "3.31 lb" (the task's example shows `3.31 lb` with a space). And kg → `1.5 kg`. These examples match the format `format_weight` presumably produces, since the task says "use the shop's standard weight formatting" and gives these exact outputs. Good.
+
+Wait — "Labels for US addresses show pounds to two decimal places (1500 g -> `3.31 lb`)". Is it `format_weight` that guarantees two decimals for lb? The docstring is cut off: `unit is "kg" (default), "g" or "lb":` — rest is unknown, but presumably kg uses 1 decimal (1.5 kg), lb uses 2 decimals (3.31 lb), g is integer. The task examples match. I'll trust it.
+
+Now let me check the tests: `tests/test_labels.py` has `test_label_code_is_scanner_friendly` and `test_label_text`. The hidden tests will likely call `label_text(parcel, to, total, weight_g=1500)` with US and non-US addresses.
+
+The type annotation `int | None` is used elsewhere in the codebase (e.g., `per_page: int | None = None`), so it's consistent.
+
+Also, should the parameter be a keyword-only argument? The task says "optional `weight_g` argument". Simplest: add as 4th positional-or-keyword param with default None. Existing callers `label_text(parcel, to, total)` still work. ✓
+
+Let me also confirm `Address.country` exists — yes: fields name, line1, city, postcode, country, line2='', region=''.
+
+Now the docstring: should I add one? The current `label_text` doesn't have a docstring. Keep it minimal; maybe add a short comment about the US-pound rule since the intent isn't fully obvious (why lb for US). A one-line comment fits: `# US customers get pounds; everyone else the standard kg display.` Hmm, or I could keep it without a comment. The instructions say "add a docstring or comment where intent isn't obvious". The intent "US shows lb" is somewhat obvious from the code, but a brief note about matching the packing slip via format_weight might be useful. Let me keep it minimal — a small comment.
+
+Let me write the final file:
+
+```python
+"""Shipping label content handed to the label printer service."""
+from shopkit.customers.addresses import format_address
+from shopkit.customers.models import Address
+from shopkit.orders.fulfillment import Parcel
+from shopkit.shipping.packaging import format_weight
+
+
+def label_code(sku: str) -> str:
+    """Compact code printed under the barcode: uppercase, spaces and dashes removed (scanner-friendly)."""
+    return sku.replace(" ", "").replace("-", "").upper()
+
+
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+    lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+    if weight_g is not None:
+        # US destinations print pounds (two decimals); everyone else the standard kg display.
+        unit = "lb" if to.country == "US" else "kg"
+        lines.append(f"Weight: {format_weight(weight_g, unit)}")
+    lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+```
+
+Wait — is there any risk `to.country` might be lowercase in data? In the codebase, ISO uppercase codes are the convention (zones.py's `home='US'`, tax report's "US-CA", `estimated_delivery(..., country, shipped_on, home='US')`). I'll keep `== "US"`.
+
+Hmm, one more thought — should I use `format_weight(weight_g, "lb")` with explicit unit for US, and `format_weight(weight_g)` for the default? Using the variable `unit` is clean.
+
+Let me double-check import ordering: labels.py currently imports from shopkit.customers.* and shopkit.orders.*. Adding shopkit.shipping.packaging — no circularity: packaging.py is in the same package; its imports are probably just `math` or so. And orders/fulfillment.py — does it import packaging? `packing_slip(parcel, weight_g)` probably imports format_weight from packaging. So packaging is a leaf module. Safe.
+
+Also verify: is anything calling `label_text` elsewhere? The repository map only shows function signatures for other files; `label_text` is in labels.py. I don't see any other module that references labels. Adding a keyword argument with a default is backward compatible anyway.
+
+Edge: `weight_g` negative? Not implied by the request; format_weight handles display. No validation required — the packing slip does the same (accepts weight_g: int).
+
+I'm fairly confident. One more check on the f-string: `f"Weight: {format_weight(weight_g, unit)}"` produces `Weight: 3.31 lb`. Matches "print a line `Weight: <weight>`".
+
+Position: "right after the order/parcel line" — the lines list currently is [address, "", order_line]. Inserting at index 3 → before the item lines. ✓
+
+Output: a single <file> block for shopkit/shipping/labels.py. Nothing else should be changed.
+
+Final answer with the file contents.

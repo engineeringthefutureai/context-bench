@@ -1,0 +1,72 @@
+The request is to add `export_orders_csv` to the orders export module, mirroring the existing JSON export but producing a CSV.
+
+Looking at the existing `export_orders_json`, I can see:
+- It takes a list of `Order` objects
+- It iterates over order lines
+- It uses `l.sku`, `l.qty`, `l.unit_cents`
+- Product codes are cleaned via `normalize_sku` (as used in `render.py`)
+- Line totals should use `format_money` (as used on customer invoices in `render.py`)
+
+Let me check what's available in the codebase:
+- `normalize_sku` in `shopkit/utils/text.py`
+- `format_money` in `shopkit/money.py`
+- `csv` module (standard library)
+- The existing `to_csv` helper in `shopkit/utils/csvio.py` which uses the standard `csv` module
+
+Now let me write the CSV export function. The header is `order_id,product_code,quantity,line_total`. One row per order line. Product codes are normalized with `normalize_sku`. Line totals use `format_money` to match customer invoices.
+
+Let me check the `to_csv` helper in `csvio.py`:
+```python
+def to_csv(header: Sequence[str], rows: Iterable[Sequence[object]]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buf.getvalue()
+```
+
+This is perfect - it uses the standard `csv` module, always `\n` line endings, header first. I'll use this helper.
+
+The line total on customer invoices is `line.total_cents` formatted via `format_money`. Looking at `render_invoice_text`:
+```python
+rows.append(f"{normalize_sku(line.sku):<16}{line.qty:>4} x {format_money(line.unit_cents, order.currency):>12}"
+            f"  = {format_money(line.total_cents, order.currency):>12}")
+```
+
+So `line_total` should be `format_money(line.total_cents, order.currency)`.
+
+Now let me write the updated `export.py` file:
+
+<file path="shopkit/orders/export.py">
+import json
+
+from shopkit.money import format_money
+from shopkit.orders.models import Order
+from shopkit.utils.collections import dedupe
+from shopkit.utils.csvio import to_csv
+from shopkit.utils.text import normalize_sku
+
+
+def export_orders_json(orders: list[Order]) -> str:
+    """Raw JSON export for the warehouse integration."""
+    payload = [
+        {
+            "id": o.id,
+            "currency": o.currency,
+            "lines": [{"sku": l.sku, "qty": l.qty, "unit_cents": l.unit_cents} for l in o.lines],
+        }
+        for o in orders
+    ]
+    return json.dumps(payload, indent=2)
+
+
+def export_orders_csv(orders: list[Order]) -> str:
+    """CSV export for finance: one row per order line with product code and line total."""
+    header = ["order_id", "product_code", "quantity", "line_total"]
+    rows = [
+        [o.id, normalize_sku(l.sku), l.qty, format_money(l.total_cents, o.currency)]
+        for o in orders
+        for l in o.lines
+    ]
+    return to_csv(header, rows)
+</file>

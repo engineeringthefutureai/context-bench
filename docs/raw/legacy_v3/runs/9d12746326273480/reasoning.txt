@@ -1,0 +1,153 @@
+Let me explore the repository to understand the codebase. What I need to find:
+1. The shop's business day calendar (closed days / holidays) — probably inside shopkit.utils or somewhere similar.
+2. The money/date utilities.
+3. The Payment model, the errors module.
+
+Let me start by listing the files.
+
+
+Let's check the payments directory, the config file (the shop's business day calendar is probably there), and utils.
+
+
+The settings don't have a business calendar. I'll try searching the entire repository for "business", "closed", "holiday", and "calendar".
+
+
+There's already a helper `add_business_days` in `shopkit/utils/dates.py` that skips weekends and HOLIDAYS — the "shop's usual business day calendar." The refunds module already imports `utc_now` from there.
+
+What the task is asking for is `expected_arrival(refund: Refund) -> date`: the bank needs 5 business days counted from the day the refund was issued. `refund.at` is a datetime (UTC), so the issue day is `refund.at.date()`. "Counting from the day the refund was issued" — that is, 5 business days after the issue date. `add_business_days(issued, 5)` returns the date 5 business days after the start date, and skips weekends and holidays.
+
+Question: does "counting from the day the refund was issued" mean that the issue day itself counts as business day 1, or that the count starts the day after the issue date? Consider the phrasing: "the bank needs 5 business days, counting from the day the refund was issued." Hmm. "Counting from" — I think it means the count starts from the issue day: add_business_days(issued, 5). If the issue day is a business day, is it business day 1?
+
+Ambiguity: two interpretations:
+1. `add_business_days(issued, 5)`: 5 business days after the issue day. If issued on Monday, business days are Tue, Wed, Thu, Fri, Mon → Monday of the following week.
+2. The issue day counts as day 1: if issued on Monday, day 1 = Monday, day 5 = Friday.
+
+"Counting from the day the refund was issued" most naturally reads as "starting from the issue day, count 5 business days." The standard bank phrasing "funds arrive within 5 business days" is counted after the issue date. The existing helper `add_business_days(start, days)` — "the date `days` business days after `start`." For invoices: `due = add_business_days(issued, PAYMENT_TERMS_DAYS)` — payment terms in business days counted from the issue date, with the issue day not counted. The shipping carrier does the same: `add_business_days(shipped_on, transit_days)` — transit days after the ship date.
+
+Given the consistency with the rest of the system (invoices, shipping), the natural interpretation is: `add_business_days(refund.at.date(), 5)`. This is the business-day calendar used throughout the codebase.
+
+Also, `refund.at` is a datetime, so we need `.date()`.
+
+Let me check the tests to see if there's a hint about the expected behavior of expected_arrival. Let me look at the tests directory and existing refund tests.
+
+Let me also check the signature style of the refunds module: `refund(payment: Payment, amount_cents: int, reason: str) -> Refund`. The new function is: `def expected_arrival(refund: Refund) -> date:`.
+
+Let me check the tests folder for hints.
+
+
+There is no existing `expected_arrival`. This codebase has `add_business_days(start: date, days: int) -> date`, which starts counting from the day after start — "the date `days` business days after `start`… add_business_days(friday, 1) becomes the next Monday". This perfectly matches "counted from the day the refund was issued": the refund issuance day itself is not counted, weekends and holidays are skipped.
+
+Let me check the existing usage example in invoices/layout.py and the shipping-related stuff, and follow the pattern. Also, let me check the `at` field of Refund — it's a datetime. `.date()` is needed.
+
+For style, let me quickly check invoices/layout.py and shipping/carriers.py.
+
+
+Everything I need is in place:
+
+- `shopkit/utils/dates.py` has `add_business_days(start: date, days: int) -> date`, which skips weekends and HOLIDAYS (the shop's standard business day calendar).
+- The `Refund` dataclass has an `at: datetime` field (defaults to `utc_now`).
+- The task: add `expected_arrival(refund: Refund) -> date` to the refunds module. Banks require 5 business days counted from the date the refund was issued. So `add_business_days(refund.at.date(), 5)`.
+
+`add_business_days` counts forward from `start` (the start day itself is not counted — "the date `days` business days after `start`"). "Counted from the date the refund was issued" — the same phrasing as invoice due dates: `add_business_days(issued, PAYMENT_TERMS_DAYS)`. So `add_business_days(refund.at.date(), 5)` matches the pattern of this codebase.
+
+Naming: `REFUND_ARRIVAL_DAYS = 5` or similar. Looking at the codebase: `PAYMENT_TERMS_DAYS = 14` in invoices, transit days for carriers. So a module-level constant `REFUND_ARRIVAL_BUSINESS_DAYS = 5` would fit. Keep it simple: `REFUND_ARRIVAL_DAYS = 5`.
+
+Import `date` from datetime (Refund.at is a datetime, so `.date()`). `add_business_days` needs a `date` object.
+
+Edge cases:
+- `refund.at` could be a naive or timezone-aware datetime; `.date()` works for either.
+- If issued on a weekend: `add_business_days` starts counting from the next day, so Friday + 5 = next Friday, Monday + 5 = next Monday... wait let me check: add_business_days(Monday, 5) → Tue, Wed, Thu, Fri, Mon = Monday of the following week. Correct.
+
+Should it be defined in terms of a constant? The task says "Banks require 5 business days." A named constant is consistent with `PAYMENT_TERMS_DAYS`.
+
+Docstring matching the codebase style: short, e.g.
+
+```python
+def expected_arrival(refund: Refund) -> date:
+    """Date the refund should reach the customer's card: REFUND_ARRIVAL_DAYS business days after the refund was issued."""
+    return add_business_days(refund.at.date(), REFUND_ARRIVAL_DAYS)
+```
+
+Type annotation: `-> date` per the task.
+
+Update the module docstring? The module docstring is "Refunds against captured payments. Partial refunds are allowed up to the captured amount." Could leave it as-is. Keep changes minimal.
+
+Placement: after the `Refund` dataclass, or after the `refund` function. Probably after the `refund` function, at the end of the file, or near `Refund`. Since it operates on `Refund`, either right after the dataclass or at the end would work. I'll add it after the `refund` function — the flow of the file is: exceptions, dataclass, refund function; appending the new function at the end keeps the diff clean.
+
+Imports to add: `from datetime import date, datetime` (currently `from datetime import datetime`), and `from shopkit.utils.dates import add_business_days, utc_now`.
+
+Keep the import ordering consistent: dataclasses, datetime, then shopkit imports alphabetically: errors, money, payments.models, utils.dates. Current state:
+
+```python
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import utc_now
+```
+
+So change the last one to `from shopkit.utils.dates import add_business_days, utc_now` (alphabetical within: add_business_days before utc_now — yes).
+
+Constant: place it near the top, after the import section and before `RefundTooLarge`? In invoices, the constant is after the imports. I'll place it after the imports:
+
+```python
+REFUND_ARRIVAL_DAYS = 5
+```
+
+Then write out the full file.
+
+```python
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+```
+
+No wait, format_money. Careful.
+
+```python
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import add_business_days, utc_now
+
+# Business days banks take to settle a refund onto the customer's card.
+REFUND_ARRIVAL_DAYS = 5
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+
+
+def expected_arrival(refund: Refund) -> date:
+    """Date the refund should reach the customer's card: REFUND_ARRIVAL_DAYS business days
+    after the refund was issued (weekends and shop holidays don't count)."""
+    return add_business_days(refund.at.date(), REFUND_ARRIVAL_DAYS)
+```
+
+This is clean and minimal. Done.

@@ -259,7 +259,9 @@ def outcome(r: dict) -> str:
     - STOPPED EARLY (agents: L7, L8, L-AG): ended without code or a change, typically by announcing the next step
       in prose instead of making the call; an agent can explore, so this is not ASKED TO EXPLORE;
     - OUT OF TIME (agents): the harness's own limit (L-AG: 1 h or 100 model calls) ended a run with no answer;
-    - INVALID: anything else (a run whose reply doesn't say: e.g. a harness failure).
+    - INVALID: anything else (a run whose reply doesn't say: e.g. a harness failure);
+    - BROKE KNOWN TESTS: the hidden tests pass, but at least one of the repository's original tests no longer
+      does (label breaks_tests, from 2026-11-26; applied retroactively). Not a pass.
     The reply decides, not the stored label: an agent's label is tool_error when any tool call failed along
     the way, but those calls get feedback and the run goes on, so its final reply is what it ended with.
     Infrastructure errors are never recorded; those runs are redone."""
@@ -282,6 +284,8 @@ def outcome(r: dict) -> str:
         return "NO ANSWER"
     if r.get("label") == "tool_error" or fs != "ok":
         return "INVALID"
+    if r.get("label") == "breaks_tests":
+        return "BROKE KNOWN TESTS"
     return "PASS" if r.get("label") == "ok" else "FAIL"
 
 
@@ -449,7 +453,8 @@ def run_payload(r: dict) -> dict:
     meta.update(level_label=level_label(r), outcome=outcome(r), model=r.get("model"), quant=r.get("quant"),
                 embedder=r.get("embedder"), prompt_version=r.get("prompt_version"),
                 max_output_tokens=r.get("max_output_tokens"), context_window=r.get("context_window"),
-                peak_ctx_tokens=r.get("peak_ctx_tokens"), target_file=target)
+                peak_ctx_tokens=r.get("peak_ctx_tokens"), target_file=target,
+                known_tests_total=r.get("known_tests_total"), known_tests_broken=r.get("known_tests_broken"))
     return {
         "meta": meta,
         "system": (lag_system_segments() if r.get("level") == "L-AG"

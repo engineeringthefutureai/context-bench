@@ -1,0 +1,112 @@
+
+
+<file path="shopkit/orders/models.py">
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+    gift_message: str = ""
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+</file>
+<file path="shopkit/orders/fulfillment.py">
+"""Picking and packing. Builds pick lists for the warehouse and splits orders into parcels."""
+from dataclasses import dataclass, field
+
+from shopkit.orders.models import Order
+from shopkit.shipping.packaging import format_weight
+from shopkit.utils.collections import chunked, group_by
+
+MAX_ITEMS_PER_PARCEL = 10
+
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)    # (sku, qty)
+    gift_message: str = ""
+
+    @property
+    def item_count(self) -> int:
+        return sum(q for _, q in self.items)
+
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    """Total quantity per SKU across orders, sorted by SKU (the order pickers walk the aisles)."""
+    by_sku = group_by((line for o in orders for line in o.lines), key=lambda l: l.sku)
+    return sorted((sku, sum(l.qty for l in lines)) for sku, lines in by_sku.items())
+
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    """One unit per slot, at most `max_items` units per parcel, lines kept together where possible.
+
+    The order's gift message rides on the first parcel only, so it appears on one packing slip.
+    """
+    units = [line.sku for line in order.lines for _ in range(line.qty)]
+    parcels = []
+    for n, batch in enumerate(chunked(units, max_items), start=1):
+        counts = group_by(batch, key=lambda s: s)
+        parcels.append(Parcel(order.id, n, [(sku, len(v)) for sku, v in counts.items()],
+                              gift_message=order.gift_message if n == 1 else ""))
+    return parcels
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    """Slip packed inside each parcel: order, parcel number, contents and weight."""
+    lines = [f"Order {parcel.order_id} - parcel {parcel.number}", f"Weight: {format_weight(weight_g)}"]
+    if parcel.gift_message:
+        lines.append(f"Gift message: {parcel.gift_message}")
+    lines += [f"  {qty} x {sku}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+</file>
+<file path="shopkit/api/serializers.py">
+"""Domain objects -> JSON-ready dicts for API responses. Amounts are sent as integer cents plus a
+display string."""
+from shopkit.catalog.models import Product
+from shopkit.customers.models import Customer
+from shopkit.money import format_money
+from shopkit.orders.models import Order
+
+
+def money(cents: int, currency: str = "USD") -> dict:
+    return {"cents": cents, "display": format_money(cents, currency), "currency": currency}
+
+
+def product(p: Product) -> dict:
+    return {"sku": p.sku, "title": p.title, "price": money(p.price_cents), "active": p.active,
+            "purchasable": p.is_purchasable()}
+
+
+def order(o: Order, status: str | None = None) -> dict:
+    return {
+        "id": o.id,
+        "status": status,
+        "lines": [{"sku": l.sku, "qty": l.qty, "unit": money(l.unit_cents, o.currency),
+                   "total": money(l.total_cents, o.currency)} for l in o.lines],
+        "total": money(o.total_cents, o.currency),
+        "gift_message": o.gift_message,
+    }
+
+
+def customer(c: Customer) -> dict:
+    return {"id": c.id, "email": c.email, "name": c.name, "tier": c.tier,
+            "marketing_opt_in": c.marketing_opt_in}
+</file>

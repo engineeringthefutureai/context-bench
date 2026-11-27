@@ -1,0 +1,198 @@
+Let me understand the task.
+
+I need to add an `expected_arrival(refund: Refund) -> date` function to `shopkit/payments/refunds.py`. Banks need 5 business days, counted from the date the refund was issued, using the shop's normal business-day calendar (weekends and holidays don't count).
+
+Looking at the context:
+- `shopkit/utils/dates.py` has `add_business_days(start: date, days: int) -> date`, which "is the date `days` business days after `start` (skipping weekends and HOLIDAYS). `add_business_days(friday, 1)` is the following Monday. `days=0` returns `start` unchanged."
+
+So the implementation is:
+```python
+def expected_arrival(refund: Refund) -> date:
+    return add_business_days(refund.at.date(), 5)
+```
+
+The `Refund` dataclass has an `at: datetime` field. So `refund.at.date()` converts it to a `date`.
+
+Let me think about the imports I need to add:
+- `from datetime import date, datetime` — `date` needs to be imported for the type annotation.
+- `from shopkit.utils.dates import add_business_days, utc_now`
+
+Now, what does "counted from the date the refund was issued" mean? Does the day of the refund count as day 0 (i.e., 5 business days after the refund day), or does the refund day itself count as day 1 (i.e., 4 business days after)?
+
+"Banks need 5 business days, counted from the date the refund was issued" — I read this as "5 business days after the issue date." The natural interpretation is: the refund is issued on day D, and the bank takes 5 business days to process, so the money arrives on the 5th business day after D. That's exactly what `add_business_days(start, 5)` returns: "the date 5 business days after start."
+
+For example, if the refund is issued on Friday, then business days: Mon, Tue, Wed, Thu, Fri → arrives next Friday. `add_business_days(friday, 5)` → 5 business days after Friday = the Friday of the following week. That matches "bank needs 5 business days" counted from the issue date.
+
+Alternatively, "counted from" could mean the issue date is day 1. Then the arrival would be the 4th business day after the issue date, i.e., `add_business_days(start, 4)`. Hmm. Which is more consistent?
+
+The phrase "bank needs 5 business days, counted from the date the refund was issued" — in banking, a processing time "of 5 business days from X" typically means 5 business days after X. And the helper `add_business_days` is described as "the date `days` business days after `start`". The most natural implementation is `add_business_days(refund.at.date(), 5)`.
+
+Also, the existing test style: `add_business_days(friday, 1)` is the following Monday — so day 0 = start. Thus 5 business days from Friday → the Friday of the following week. That's the standard interpretation.
+
+Edge cases: what if the refund was issued on a holiday or weekend? `add_business_days` handles that: it starts from `start` and adds business days until it has counted `days` business days. If `start` is a Saturday, the 1st business day is Monday, and so on. That's fine — "counted from the issue date" and weekends don't count.
+
+Another consideration: `refund.at` is a `datetime` (probably with timezone, since `utc_now` is used). `.date()` gives a `date` in the UTC timezone of the datetime. That's the "date the refund was issued" as far as we know. Since the shop's calendar presumably operates in UTC (uses `utc_now`), using `refund.at.date()` is correct.
+
+Should I validate the refund parameter? The request is simple; `refund` is a `Refund` with an `at` field. No validation needed — no need to check if it's a `Refund`; keep it simple and align with the codebase style.
+
+Should I add a docstring? The codebase has docstrings on some functions (e.g., `add_business_days`). A short docstring would be good:
+
+```python
+def expected_arrival(refund: Refund) -> date:
+    """The date the refund is expected to reach the customer's card: banks
+    need five business days after the refund is issued (weekends and shop
+    holidays don't count)."""
+    return add_business_days(refund.at.date(), 5)
+```
+
+Next, the imports: the current file imports `from datetime import datetime`. I need to add `date`: `from datetime import date, datetime`.
+
+And add `add_business_days` to the utils import: `from shopkit.utils.dates import add_business_days, utc_now`.
+
+Order of imports: current file:
+```python
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import utc_now
+```
+
+New:
+```python
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import add_business_days, utc_now
+```
+
+Where to put `expected_arrival`? After the `refund` function, at the end of the file. That's natural — the module documents "refunds of captured payments," and this is a query about refunds.
+
+The full new file:
+
+```python
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import add_business_days, utc_now
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+
+
+def expected_arrival(refund: Refund) -> date:
+    """The date the refund is expected to reach the customer's card.
+
+    Banks need five business days, counted from the day the refund was
+    issued; weekends and shop holidays don't count (see
+    shopkit.utils.dates.add_business_days).
+    """
+    return add_business_days
+    ...
+```
+
+Wait, just: `return add_business_days(refund.at.date(), 5)`.
+
+Let me keep the docstring concise, consistent with the style of `add_business_days` in utils/dates.py. Probably:
+
+```python
+def expected_arrival(refund: Refund) -> date:
+    """The day the refunded money is expected to reach the customer's card:
+    five business days after the refund was issued (weekends and shop
+    holidays don't count)."""
+    return add_business_days(refund.at.date(), 5)
+```
+
+That's fine. Should I keep it to one or two lines? The module docstring is a one-line docstring. `add_business_days`'s docstring is three lines. I'll go with a short 2–3 line docstring.
+
+Check: `refund.at` is a `datetime`; `.date()` returns `date`. `add_business_days` expects `date` and `int >= 0`. 5 is fine.
+
+Type annotations: `-> date` requires `date` to be imported. Done.
+
+Anything else that depends on this module? Tests I can't see — probably `tests/test_refunds.py` will test `expected_arrival`. The signature must be `expected_arrival(refund: Refund) -> date`. Yes.
+
+One more consideration: should the constant 5 be a named constant like `BANK_BUSINESS_DAYS = 5`? Keep it minimal; inline 5 with a docstring is fine. But a named constant would make it clear. The codebase style — looking at `models.py`, there are module-level constants `AUTHORIZED`, `CAPTURED` for statuses. For a single use, inline 5 with a docstring is simple enough. I'll keep it inline for minimalism. Actually, hmm — the product team might later say "make it configurable," but that's not the request. Keep it simple.
+
+Double-checking that the `Refund` dataclass is frozen — fine, we're only reading.
+
+Timezones: `utc_now` probably returns a timezone-aware UTC datetime. `.date()` on an aware datetime uses that datetime's own (UTC) date, which is the issue date in the shop's clock. Good.
+
+Final file contents:
+
+```python
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import add_business_days, utc_now
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+
+
+def expected_arrival(refund: Refund) -> date:
+    """The day the refunded money is expected to reach the customer's card.
+
+    Banks need five business days, counted from the day the refund was
+    issued; weekends and days the shop is closed don't count.
+    """
+    return add_business_days(refund.at.date(), 5)
+```
+
+This is the complete file. Let me check it once more: "weekends and days the shop are closed don't count" — `add_business_days` skips weekends and HOLIDAYS per its docstring.
+
+Output: only the file block, no other text.

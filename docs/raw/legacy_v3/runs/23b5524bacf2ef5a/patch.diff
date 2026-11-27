@@ -1,0 +1,48 @@
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -38,6 +39,23 @@
+     return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
+ 
+ 
++def _mask_payload(payload):
++    """Mask any ``card_number`` value in the event payload before it leaves the shop.
++
++    Only string ``card_number`` fields are touched, and each is masked with the
++    same ``redact_pan`` routine used everywhere else a card number is stored or
++    shown. Other fields are left unchanged."""
++    if not isinstance(payload, dict):
++        return payload
++    masked = {}
++    for k, v in payload.items():
++        if k == "card_number" and isinstance(v, str):
++            masked[k] = redact_pan(v)
++        else:
++            masked[k] = v
++    return masked
++
++
+ class WebhookDispatcher:
+     def __init__(self, endpoints: list[Endpoint], transport=None):
+         self.endpoints = endpoints
+@@ -46,10 +64,12 @@
+ 
+     def attach(self, bus: EventBus) -> None:
+         for prefix in {e.split(".", 1)[0] for ep in self.endpoints for e in ep.events}:
++                        if not e.endswith(".*") and e != "*"}:
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(),
++                           "data": _mask_payload(event.payload)},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

@@ -1,0 +1,45 @@
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -38,6 +39,24 @@
+     return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
+ 
+ 
++def _sanitize(payload: dict) -> dict:
++    """Return a copy of `payload` with any full card number redacted the way the shop redacts
++    cards everywhere else (payments.reconciliation.redact_pan). Recurses into nested dicts and
++    lists; other fields go out unchanged."""
++    if isinstance(payload, dict):
++        out = {}
++        for key, value in payload.items():
++            if key == "card_number" and isinstance(value, str):
++                value = redact_pan(value)
++            elif isinstance(value, (dict, list)):
++                value = _sanitize(value)
++            out[key] = value
++        return out
++    if isinstance(payload, list):
++        return [_sanitize(v) if isinstance(v, (dict, list)) else v, list)) else v for v in payload]
++    return payload
++
++
+ class WebhookDispatcher:
+     def __init__(self, endpoints: list[Endpoint], transport=None):
+         self.endpoints = endpoints
+@@ -49,7 +68,8 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        data = _sanitize(event.payload)
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": data},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

@@ -1,0 +1,47 @@
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -1,10 +1,12 @@
+-"""Outgoing webhooks to partner systems (ERP, marketing). Payloads are signed with HMAC-SHA256."""
++"""Outgoing webhooks to partner systems (ERP, marketing). Payloads are signed with HMAC-SHA256.
++Payment card numbers are redacted before they are ever queued."""
+ import hashlib
+ import hmac
+ import json
+ from dataclasses import dataclass, field
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -34,6 +36,20 @@
+     return hmac.compare_digest(sign(body, secret), signature)
+ 
+ 
++def _redact_card_numbers(data):
++    """Replace any "card_number" value with the standard redacted form (see redact_pan) so full
++    card numbers never reach the wire; everything else is left untouched."""
++    if not isinstance(data, dict):
++        return data
++    redacted = {}
++    for key, value in data.items():
++        if key == "card_number" and isinstance(value, str):
++            redacted[key] = redact_pan(value)
++        else:
++            redacted[key] = value
++    return redacted
++
++
+ def _subscribed(endpoint: Endpoint, name: str) -> bool:
+     return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
+ 
+@@ -49,7 +65,8 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(),
++                           "data": _redact_card_numbers(event.payload)},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

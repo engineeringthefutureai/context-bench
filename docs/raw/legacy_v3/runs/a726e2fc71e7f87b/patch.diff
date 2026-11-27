@@ -1,0 +1,134 @@
+--- a/shopkit/inventory/stock.py
++++ b/shopkit/inventory/stock.py
+@@ -1,11 +1,93 @@
++from __future__ import annotations
++
++import threading
++from decimal import Decimal, getcontext
++
++getcontext().prec = 28
++
++from shopkit.errors import Conflict
++
++
++class InsufficientStock(Conflict):
++    """Raised when a reservation (or transfer) cannot be satisfied by on-hand stock."""
++
++
+ class Stock:
+-    """On-hand quantities per SKU."""
++    """On-hand quantities per SKU.
+ 
+-    def __init__(self):
++    Reservations (held stock) and on-hand quantities are tracked per SKU. All
++    mutations happen under a re-entrant lock so that a reserve/decrement that
++    crosses a reservation boundary is atomic and can never oversell.
++    """
++
++    def __init__(self) -> None:
+         self._on_hand: dict[str, int] = {}
++        self._reserved: dict[str, int] = {}
++        self._lock = threading.RLock()
+ 
+     def receive(self, sku: str, qty: int) -> None:
+-        self._on_hand[sku] = self._on_hand.get(sku, 0) + qty
++        with self._lock:
++            self._on_hand[sku] = self._on_hand.get(sku, 0) + qty
+ 
+     def available(self, sku: str) -> int:
+-        return self._on_hand.get(sku, 0)
++        with self._lock:
++            on_hand = self._on_hand.get(sku, 0)
++            reserved = self._reserved.get(sku, 0)
++        return _to_int(Decimal(on_hand) - Decimal(reserved))
++
++    def reserve(self, sku: str, qty: int) -> int:
++        """Hold `qty` units of `sku` for an in-flight order.
++
++        Returns the units held. Raises :class:`InsufficientStock` when the
++        request cannot be satisfied; the ledger is left unchanged in that case.
++        """
++        if qty < 1:
++            raise ValueError("qty must be >= 1")
++        with self._lock:
++            on_hand = Decimal(self._on_hand.get(sku, 0))
++            reserved = Decimal(self._reserved.get(sku, 0))
++            if on_hand - reserved < qty:
++                raise InsufficientStock(
++                    f"cannot reserve {qty} x {sku}: only "
++                    f"{_to_int(on_hand - reserved)} available",
++                    sku=sku,
++                    requested=qty,
++                    available=_to_int(on_hand - reserved),
++                )
++            self._on_hand[sku] = _to_int(on_hand)
++            self._reserved[sku] = _to_int(reserved + qty)
++            return qty
++
++    def release(self, sku: str, qty: int) -> None:
++        """Release previously reserved stock (e.g. when an order is cancelled)."""
++        if qty < 1:
++            raise ValueError("qty must be >= 1")
++        with self._lock:
++            reserved = self._reserved.get(sku, 0)
++            if reserved < qty:
++                raise ValueError(
++                    f"cannot release {qty} x {sku}: only {reserved} reserved"
++                )
++            self._reserved[sku] = reserved - qty
++            if self._reserved[sku] == 0:
++                del self._reserved[sku]
++
++    def fulfill(self, sku: str, qty: int) -> None:
++        """Ship `qty` units that were held by :meth:`reserve`."""
++        if qty < 1:
++            raise ValueError("qty must be >= 1")
++        with self._lock:
++            on_hand = Decimal(self._on_hand.get(sku, 0))
++            reserved = Decimal(self._reserved.get(sku, 0))
++            if reserved < qty:
++                raise ValueError(
++                    f"cannot fulfill {qty} x {sku}: only {reserved} reserved"
++                )
++            self._on_hand[sku] = _to_int(on_hand - qty)
++            self._reserved[sku] = _to_int(reserved - qty)
++            if self._reserved[sku] == 0:
++                del self._reserved[sku]
++
++
++def _to_int(value: Decimal) -> int:
++    return int(value)
+--- a/shopkit/inventory/transfers.py
++++ b/shopkit/inventory/transfers.py
+@@ -3,6 +3,7 @@
+ from datetime import datetime
+ 
+ from shopkit.errors import Conflict
++from shopkit.inventory.stock import InsufficientStock, Stock
+ from shopkit.inventory.warehouses import Network
+ from shopkit.utils.dates import utc_now
+ 
+@@ -17,17 +18,16 @@
+     qty: int
+     source: str
+     destination: str
+-    at: datetime = field(default_factory=utc_now)
++    at: datetime = None
+ 
+ 
+ def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+     if qty < 1:
+         raise ValueError("qty must be >= 1")
+     src = network.get(source)
+-    if src.stock.available(sku) < qty:
+-        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+-                             requested=qty, available=src.stock.available(sku))
+-    # Stock has no public removal API; transfers adjust the ledger directly.
+-    src.stock._on_hand[sku] -= qty
+-    network.get(destination).stock.receive(sku, qty)
++    # Reserving the quantity is atomic against the source stock; if the source
++    # cannot cover the transfer, the reservation fails and nothing is moved.
++    src.stock.reserve(sku, qty)
++    dst = network.get(destination)
++    dst.stock.receive(sku, qty)
+     return Transfer(sku, qty, source, destination)

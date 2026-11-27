@@ -1,0 +1,125 @@
+Let me understand the task: add `transfer_reference() -> str` to the payments gateway module (`shopkit/payments/gateway.py`) that generates a new reference: 12 chars in 3 dash-separated groups of 4, same style as the shop's other customer-facing codes.
+
+"Same style as the shop's other customer-facing codes" — that points to `shopkit/utils/ids.py` `short_code()`: "Random human-friendly code from an unambiguous alphabet, e.g. 'K7QM-X2PA' with groups=4. groups=0 means no dashes." Alphabet is `ABCDEFGHJKMNPQRSTUVWXYZ23456789` — no 0/O, 1/I/L.
+
+So `transfer_reference()` should return `short_code(length=12, groups=4)` which will produce "XXXX-XXXX-XXXX".
+
+Confirming: `short_code(length=12, groups=4)` generates 12 chars from the alphabet and joins into groups of 4: `"-".join(code[i:i+4] for i in range(0, 12, 4))` → 3 groups of 4 separated by dashes. Total 12 chars + 2 dashes. Matches the requirement "12 chars in 3 dash-separated groups of 4".
+
+This is also how `ReturnRequest.code` is done: `field(default_factory=lambda: short_code(8, groups=4))` → "K7QM-X2PA" (8 chars, 2 groups of 4). And `GiftCard.code` uses `short_code(16, groups=4)` → 4 groups.
+
+So the implementation is:
+
+```python
+def transfer_reference() -> str:
+    """Customer-facing bank transfer reference: 12 chars, three dash-separated groups of four,
+    from the unambiguous code alphabet (no 0/O, 1/I/L)."""
+    return short_code(12, groups=4)
+```
+
+Need to add import: `from shopkit.utils.ids import new_id, short_code`.
+
+Now, where to put it in the file? The gateway module currently has:
+- docstring
+- imports: ShopError, payments.models constants + Payment, reconciliation's redact_pan, utils.ids's new_id
+- PaymentDeclined
+- FakeGateway
+
+I'll add the function. Probably after imports, before the class, or after the class. Function is a standalone helper; I think placing it near the top after the `PaymentDeclined` class or before it makes sense. The style of the file: module docstring, imports, exception class, FakeGateway. Adding `transfer_reference` after the `PaymentDeclined` class, before `FakeGateway`, or after `FakeGateway`. Both fine. Since it's a customer-facing code helper and FakeGateway is the main subject, I'll put it after FakeGateway. Actually, hmm — a module-level function for generating a transfer reference is used at checkout when creating the order (generate the reference to print on the invoice). It's standalone. Let me put it after the FakeGateway class at the end of the file — keeps the class as the main subject; or before the class. Let me think about what a reviewer would expect: the module is "Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway." Pay-by-bank-transfer is a new payment method; the reference generator is a small utility. Let me add it right after the imports/exception, before FakeGateway?
+
+Hmm. Let me decide: I'll add it after the `PaymentDeclined` class definition, before `FakeGateway`. Actually, the class is the core of the module and the function is a small helper… no strong convention. I'll put it at the end of the file, after FakeGateway. That way the existing class stays intact and the new helper is appended. Either is fine. Let me append at the end.
+
+Wait — also considering: should the reference be checked for uniqueness against existing references? The task says "generates a new reference" — the same as `new_id` and `short_code` are random and uniqueness is handled by the caller (or by probability). `GiftCard` uses `short_code(16, groups=4)` for the code without uniqueness checks. So a plain random generation is consistent.
+
+The docstring should explain the style: 12 alphanumeric chars in 3 groups of 4, from an unambiguous alphabet (no 0/O, 1/I/L) because customers type these from printed invoices / read them off the phone.
+
+Now let me write the file:
+
+```python
+"""Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway."""
+from shopkit.errors import ShopError
+from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+from shopkit.payments.reconciliation import redact_pan
+from shopkit.utils.ids import new_id, short_code
+
+
+class PaymentDeclined(ShopError):
+    http_status = 402
+
+
+def transfer_reference() -> str:
+    """Bank transfer reference customers type into their banking app, e.g. "K7QM-X2PA-9C4R".
+    12 characters in three dash-separated groups of four, drawn from the unambiguous alphabet
+    (no 0/O, 1/I/L) so it works from printed invoices and read over the phone."""
+    return short_code(12, groups=4)
+
+
+class FakeGateway:
+    ...
+```
+
+Hmm, wait, should it go before FakeGateway? Let me reconsider ordering. Module layout: docstring, imports, exception, class. A reviewer will look for where the function belongs. It's not tied to FakeGateway. I think placing it after the exception and before the class reads well: exception, then small pure helper, then the gateway class. Or append at the end.
+
+Let me just pick: after `PaymentDeclined`, before `FakeGateway`. No, actually — minimal diff-wise, appending at the end is least intrusive, but inserting after the exception is also small. Either works. I'll insert after the exception. The file becomes: docstring, imports, PaymentDeclined, transfer_reference(), FakeGateway. Hmm, actually many modules in this codebase put module-level helpers/classes in a natural order. E.g. `shopkit/orders/returns.py`: constants, exceptions, dataclass, functions. `shopkit/promotions/coupons.py`: constants, exception, dataclass, functions (functions after the dataclass). `shopkit/catalog/variants.py`: dataclass, then functions after. So functions come after class. I'll append `transfer_reference` at the end after FakeGateway. That matches the pattern of "class first, functions after".
+
+Double-check `short_code` signature too: `short_code(length: int = 8, groups: int = 0)`. With length=12, groups=4: code = 12 chars; groups: `code[i:i+4]` for i in range(0, 12, 4) → 3 groups → "XXXX-XXXX-XXXX". 12 chars, 2 dashes. Matches "12 chars in 3 dash-separated groups of 4".
+
+Edge case: alphabet has 31 chars, so 12 chars is fine.
+
+I'll verify the example in the docstring is valid per the alphabet: "K7QM-X2PA-9C4R" — K,7,Q,M,X,2,P,A,9,C,4,R — all in `ABCDEFGHJKMNPQRSTUVWXYZ23456789`? K yes, 7 yes, Q yes, M yes, X yes, 2 yes, P yes, A yes, 9 yes, C yes, 4 yes, R yes. Good. No 0/O/1/I/L. Good.
+
+Maybe I should avoid giving a concrete example that could be mistaken as deterministic. The ids.py docstring gives an example "K7QM-X2PA" the same way. So that's fine.
+
+Import check: `from shopkit.utils.ids import new_id, short_code` — both exist.
+
+Everything else in the file unchanged.
+
+Final file:
+
+```python
+"""Card gateway adapter. The real provider is behind `charge`; tests use FakeGateway."""
+from shopkit.errors import ShopError
+from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+from shopkit.payments.reconciliation import redact_pan
+from shopkit.utils.ids import new_id, short_code
+
+
+class PaymentDeclined(ShopError):
+    http_status = 402
+
+
+class FakeGateway:
+    """Declines card numbers ending in 0000; everything else is authorized."""
+
+    def __init__(self):
+        self.payments: dict[str, Payment] = {}
+
+    def authorize(self, order_id: str, amount_cents: int, currency: str, card_number: str) -> Payment:
+        digits = "".join(c for c in card_number if c.isdigit())
+        payment = Payment(new_id("pay"), order_id, amount_cents, currency, "card",
+                          card_number=redact_pan(digits))
+        if digits.endswith("0000"):
+            payment.status = FAILED
+            self.payments[payment.id] = payment
+            raise PaymentDeclined("card declined", order_id=order_id, payment_id=payment.id)
+        self.payments[payment.id] = payment
+        return payment
+
+    def capture(self, payment_id: str) -> Payment:
+        payment = self.payments[payment_id]
+        if payment.status != AUTHORIZED:
+            raise ShopError(f"payment {payment_id} is {payment.status}", payment_id=payment_id)
+        payment.status = CAPTURED
+        return payment
+
+
+def transfer_reference() -> str:
+    """Bank-transfer reference for customers to type into their banking app, e.g. "K7QM-X2PA-9C4R".
+    12 characters in three dash-separated groups of four, from the unambiguous code alphabet
+    (no 0/O, 1/I/L), so it stays readable from printed invoices and over the phone."""
+    return short_code(12, groups=4)
+```
+
+That's the whole change. Nothing else needs updating — no callers yet (the product team is only asking for a generator). The Payment model has `method: str  # card | paypal | gift_card` — the task only asks for the reference generator, not for wiring a new payment method into the gateway. Keep it minimal.
+
+The output format requires only the file block, with nothing outside.

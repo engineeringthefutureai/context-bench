@@ -27,6 +27,16 @@ At run time the harness parses the reply strictly: complete `<file path="...">` 
 - `tool_error`: an agent run ended on a harness-side tool failure.
 - `ok` / `broken`: the patch was applied and the hidden tests passed / failed. A reply without valid
   file blocks applies nothing and is `broken`.
+- `breaks_tests` (2026-11-26): the hidden tests passed, but at least one of the repository's original tests
+  no longer does after the patch. Original tests are compared by id (`tests/test_x.py::test_y`) with the ones
+  that pass on the unmodified fixture; a test that fails, errors, can't be collected because its module no
+  longer imports, or is gone counts (`known_tests_broken`). `cbench rescore` applies it to recorded runs.
+
+**Why (2026-11-26, from cross-002 · L5 · M, v3 round).** The patch passed every hidden test while deleting
+the packing slip, the pick list and two serializers: the model treated L5's function excerpts as whole files.
+The repository's own tests had been recorded since that run (`repo_tests_passed/total`) but never decided the
+outcome, and a module that no longer imported stopped pytest at collection, so "0 of 1" stood for a whole
+lost module. Collection errors no longer stop the run, and the outcome now counts the original tests.
 
 Every run also records `format_status` (`apply.format_status`), checked in this order:
 
@@ -75,7 +85,8 @@ The label stays strict.
 tool call failed along the way (a bad argument, a call over budget). Those calls get feedback and the run
 goes on, so the label says nothing about how the run ended. Two L7 selective runs (qwen names) that went
 silent showed as INVALID only because one call had failed earlier; they are NO ANSWER.
-| PASS | label `ok` | every hidden test passes |
+| BROKE KNOWN TESTS | label `breaks_tests` | every hidden test passes, but some of the repository's original tests no longer do; not a pass |
+| PASS | label `ok` | every hidden test passes and the repository's original tests stay green |
 | FAIL | otherwise | a valid answer, a hidden test fails |
 
 Never "broken" in reader-facing text: it reads like an infrastructure problem. Infrastructure errors

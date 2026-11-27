@@ -1,0 +1,44 @@
+
+
+The picture is clear: domain events are published on the shared `shopkit.events.BUS` (e.g. `StatusBoard` publishes `order.{status}` with an `order_id` payload key), the audit trail's `on_event` files events under the `sku` payload key, and inventory events live in the `stock.*` namespace (precedent: `stock.low`). A successful `transfer()` should therefore publish `stock.transferred` with `sku`, `qty`, `source`, `destination` — only after both ledger adjustments succeed, so a failed transfer announces nothing, while `transfer()` keeps its exact signature.
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.events import BUS
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    moved = Transfer(sku, qty, source, destination)
+    # Announce the completed transfer; the audit trail files it under the SKU
+    # from the payload and webhooks/notifications pick it up via the bus.
+    BUS.publish("stock.transferred", sku=sku, qty=qty, source=source, destination=destination)
+    return moved
+</file>

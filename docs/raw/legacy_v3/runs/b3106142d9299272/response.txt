@@ -1,0 +1,593 @@
+To satisfy the task requirements, I need to modify three files:
+1. `shopkit/orders/models.py`: Add the `gift_message` field to `Order`.
+2. `shopkit/orders/fulfillment.py`: Modify `split_into_parcels` to ensure the first `Parcel` receives the order's `gift_message` (adding a `gift_message` field to `Parcel`). Modify `packing_slip` to print the gift message if present.
+3. `shopkit/api/serializers.py`: Ensure the API representation includes `gift_message`.
+
+Let's start with `shopkit/orders/models.py`.
+
+<file path="shopkit/orders/models.py">
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+    gift_message: str = ""
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+</file>
+
+Now let's look at `shopkit/orders/fulfillment.py`. Based on the context:
+```python
+@dataclass class Parcel
+    fields: order_id: str, number: int, items: list[tuple[str, int]] = ...
+    @property def item_count(self) -> int
+def split_into_parcels(order: Order, max_items: int=MAX_ITEMS_PER_PARCEL) -> list[Parcel]
+def packing_slip(parcel: Parcel, weight_g: int) -> str
+```
+I need to add `gift_message` to `Parcel`. The task says "carry it through `split_into_parcels` so that `packing_slip(parcel, weight_g)` can print it" and "printed on the packing slip of the order's first parcel only".
+So `split_into_parcels` should pass `order.gift_message` to the first `Parcel` (number 1 or 0? Usually 1 if we're talking about human-facing parcel numbers, but let's check standard implementation logic. If `number` starts at 1, the first is 1. If 0, the first is 0. Let's assume 1-indexed or 0-indexed. Usually `number` is 1 for the first. Let's pass it to the first created parcel).
+
+Wait, `split_into_parcels` currently creates parcels. I will add `gift_message: str = ""` to `Parcel`.
+In `split_into_parcels`, when creating the first `Parcel`, I will set its `gift_message` to `order.gift_message`.
+In `packing_slip`, I will check if `parcel.gift_message` is not empty, and if so, append it to the slip.
+
+Let's reconstruct `shopkit/orders/fulfillment.py` based on the repository map and standard patterns.
+```python
+import os
+from dataclasses import dataclass, field
+from shopkit.orders.models import Order, OrderLine
+
+MAX_ITEMS_PER_PARCEL = 10 # Guessing a reasonable default if not defined, or maybe it's defined elsewhere. I'll just use 10 as a placeholder if I have to, but usually it's a constant. Let's look at the signature: `max_items: int=MAX_ITEMS_PER_PARCEL`. I will import it or define it if it's missing. Wait, I don't have the body of `fulfillment.py`. I must be careful. I should provide the full file.
+
+Wait, the prompt says "Return the complete new contents of every file you create or modify".
+I don't have the bodies of `fulfillment.py` or `serializers.py`.
+If I don't have the original content, I cannot just guess the rest of the file.
+Ah! The prompt says: "If something you need is not shown, make the most reasonable assumption consistent with what is shown, and implement it."
+But wait, if I don't have the file contents, I can't return the *complete* new contents unless I write the whole file from scratch based on the signatures.
+Let's look at the instruction: "Your reply is the code change itself. Return the complete new contents of every file you create or modify... Files you don't change are left out."
+Since I only have the repository map (signatures and docstrings) for `fulfillment.py` and `serializers.py`, I have to write the complete files? Or do I only need to modify `models.py`?
+"Target file: shopkit/orders/models.py"
+Wait, the task says: "Add `gift_message: str = ""` to `Order`. The message must be printed on the packing slip of the order's first parcel only: carry it through `split_into_parcels` so that `packing_slip(parcel, weight_g)` can print it. The order representation the API returns must include it as `gift_message`. Customer invoices must not show it."
+If the target file is `shopkit/orders/models.py`, maybe I only need to change `models.py`?
+But the task explicitly says "carry it through `split_into_parcels`" and "API returns must include it". This implies changes to `fulfillment.py` and `serializers.py`.
+If I don't have the contents of `fulfillment.py`, I must write it out.
+Let's reconstruct `shopkit/orders/fulfillment.py` based on the map:
+```python
+from dataclasses import dataclass, field
+from shopkit.orders.models import Order, OrderLine
+
+MAX_ITEMS_PER_PARCEL = 10
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)
+    gift_message: str = ""
+
+    @property
+    def item_count(self) -> int:
+        return sum(qty for _, qty in self.items)
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for order in orders:
+        for line in order.lines:
+            counts[line.sku] = counts.get(line.sku, 0) + line.qty
+    return sorted(counts.items())
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    parcels = []
+    current_items = []
+    current_count = 0
+    parcel_number = 1
+    
+    def flush():
+        nonlocal current_items, current_count, parcel_number
+        if current_items:
+            gm = order.gift_message if parcel_number == 1 else ""
+            parcels.append(Parcel(order_id=order.id, number=parcel_number, items=current_items, gift_message=gm))
+            current_items = []
+            current_count = 0
+            parcel_number += 1
+
+    for line in order.lines:
+        for _ in range(line.qty):
+            if current_count >= max_items:
+                flush()
+            current_items.append((line.sku, 1))
+            current_count += 1
+    flush()
+    return parcels
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    lines = [
+        f"Order: {parcel.order_id}",
+        f"Parcel: {parcel.number}",
+        "",
+        "Items:",
+    ]
+    # Sort items by sku for readability
+    for sku, qty in sorted(parcel.items):
+        lines.append(f"  {sku} x {qty}")
+    
+    lines.append("")
+    lines.append(f"Weight: {weight_g}g")
+    
+    if parcel.gift_message:
+        lines.append("")
+        lines.append("Gift Message:")
+        lines.append(f"  {parcel.gift_message}")
+        
+    return "\n".join(lines)
+```
+
+And `shopkit/api/serializers.py`:
+```python
+from shopkit.orders.models import Order, OrderLine
+from shopkit.catalog.models import Product
+from shopkit.customers.models import Customer
+from shopkit.money import format_money
+
+def money(cents: int, currency: str = 'USD') -> dict:
+    return {
+        "cents": cents,
+        "currency": currency,
+        "display": format_money(cents, currency)
+    }
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price_cents": p.price_cents,
+        "active": p.active
+    }
+
+def order(o: Order, status: str | None = None) -> dict:
+    data = {
+        "id": o.id,
+        "currency": o.currency,
+        "gift_message": o.gift_message,
+        "total_cents": o.total_cents,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit_cents": line.unit_cents,
+                "total_cents": line.total_cents
+            }
+            for line in o.lines
+        ]
+    }
+    if status:
+        data["status"] = status
+    return data
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier
+    }
+```
+
+Wait, is it safe to guess the rest of the file? "Return the complete new contents of every file you create or modify... Files you don't change are left out."
+If I provide the whole file, I might overwrite existing logic that I don't know about (like exact formatting of `packing_slip` or `order` serializer).
+However, the prompt says "If something you need is not shown, make the most reasonable assumption consistent with what is shown, and implement it."
+But usually, in these prompts, if the context only gives the target file's content, and the repository map for others, it implies I *should* modify the others if required by the task, and I should write the full file.
+Wait! I only have the content of `shopkit/orders/models.py` in the `<context>` block as a full file. The other files are only in the "Repository map".
+If I modify `fulfillment.py` and `serializers.py`, I have to write the full file.
+Let's double check if I can just modify `models.py`?
+"The message must be printed on the packing slip of the order's first parcel only: carry it through `split_into_parcels` so that `packing_slip(parcel, weight_g)` can print it."
+This explicitly requires changing `split_into_parcels` and `packing_slip` in `fulfillment.py`.
+"The order representation the API returns must include it as `gift_message`."
+This explicitly requires changing `order` in `serializers.py`.
+
+I will write the complete files for `shopkit/orders/fulfillment.py` and `shopkit/api/serializers.py` with reasonable assumptions, incorporating the `gift_message` logic.
+
+For `shopkit/orders/fulfillment.py`:
+I need to be careful with `split_into_parcels`. The docstring says: "One unit per slot, at most `max_items` units per parcel, lines kept together where possible."
+"lines kept together where possible" means if a line has qty 5 and max_items is 10, it might stay in one parcel. If qty 15, it splits.
+Let's implement "lines kept together where possible":
+```python
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    parcels = []
+    current_items = []
+    current_count = 0
+    parcel_number = 1
+    
+    def flush():
+        nonlocal current_items, current_count, parcel_number
+        if current_items:
+            gm = order.gift_message if parcel_number == 1 else ""
+            parcels.append(Parcel(order_id=order.id, number=parcel_number, items=current_items, gift_message=gm))
+            current_items = []
+            current_count = 0
+            parcel_number += 1
+
+    for line in order.lines:
+        # If the line alone is bigger than max_items, we must split it
+        if line.qty > max_items:
+            # Flush current if any
+            if current_items:
+                flush()
+            # Split the line
+            remaining = line.qty
+            while remaining > 0:
+                take = min(remaining, max_items)
+                current_items.append((line.sku, take))
+                current_count += take
+                remaining -= take
+                if remaining > 0:
+                    flush()
+        else:
+            # Line fits in a parcel
+            if current_count + line.qty > max_items:
+                flush()
+            current_items.append((line.sku, line.qty))
+            current_count += line.qty
+            
+    flush()
+    return parcels
+```
+
+For `packing_slip`:
+"Slip packed inside each parcel: order, parcel number, contents and weight."
+```python
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    lines = [
+        f"Order: {parcel.order_id}",
+        f"Parcel {parcel.number}",
+        "",
+        "Contents:",
+    ]
+    for sku, qty in sorted(parcel.items):
+        lines.append(f"  {sku} x {qty}")
+    lines.append("")
+    lines.append(f"Weight: {weight_g}g")
+    
+    if parcel.gift_message:
+        lines.append("")
+        lines.append("Gift Message:")
+        lines.append(f"  {parcel.gift_message}")
+        
+    return "\n".join(lines)
+```
+
+For `shopkit/api/serializers.py`:
+```python
+from shopkit.orders.models import Order, OrderLine
+from shopkit.catalog.models import Product
+from shopkit.customers.models import Customer
+from shopkit.money import format_money
+
+def money(cents: int, currency: str = 'USD') -> dict:
+    return {
+        "cents": cents,
+        "currency": currency,
+        "display": format_money(cents, currency)
+    }
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price_cents": p.price_cents,
+        "active": p.active
+    }
+
+def order(o: Order, status: str | None = None) -> dict:
+    data = {
+        "id": o.id,
+        "currency": o.currency,
+        "gift_message": o.gift_message,
+        "total_cents": o.total_cents,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit_cents": line.unit_cents,
+                "total_cents": line.total_cents
+            }
+            for line in o.lines
+        ]
+    }
+    if status is not None:
+        data["status"] = status
+    return data
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier
+    }
+```
+
+Wait, what if `MAX_ITEMS_PER_PARCEL` is not defined in `fulfillment.py`? It might be imported from a config or defined there. The signature says `max_items: int=MAX_ITEMS_PER_PARCEL`. I will define it as `10` or import it if it's standard. Given `shopkit/config.py` has `page_size`, maybe `MAX_ITEMS_PER_PARCEL` is in config? But `fulfillment.py` doesn't show an import. I'll just define `MAX_ITEMS_PER_PARCEL = 10` at the top of the file to be safe, or use `10` directly if I don't want to risk it. Actually, `MAX_ITEMS_PER_PARCEL` is likely a constant in that file. I will define it.
+
+Let's review the requirements:
+1. Add `gift_message: str = ""` to `Order`. (Done in `models.py`)
+2. Message printed on packing slip of first parcel only. (Done in `fulfillment.py` by passing it to the first `Parcel` and printing it in `packing_slip`)
+3. Carry it through `split_into_parcels`. (Done)
+4. API representation includes it as `gift_message`. (Done in `serializers.py`)
+5. Customer invoices must not show it. (Invoices are in `shopkit/invoices/`. The task says "Customer invoices must not show it." Since I am not modifying `shopkit/invoices/render.py` or `layout.py`, they won't show it. I should check if `render_invoice_text` uses `order` and iterates over its fields. If it just uses `lines` and `total_cents`, it's safe. The map says `render_invoice_text(order: Order) -> str`. I don't need to change it unless it's currently showing it. Since I'm adding a new field, existing code won't show it. So no change needed there.)
+
+One detail: `split_into_parcels` signature is `def split_into_parcels(order: Order, max_items: int=MAX_ITEMS_PER_PARCEL) -> list[Parcel]`.
+If I define `MAX_ITEMS_PER_PARCEL = 10` in the file, it will work.
+
+Let's refine `fulfillment.py` to ensure it matches the "lines kept together where possible" logic correctly.
+If `line.qty` is 12 and `max_items` is 10.
+`line.qty > max_items` -> True.
+Flush current.
+Remaining 12.
+Take 10. `current_items = [(sku, 10)]`, `current_count = 10`. Remaining 2.
+Flush. Parcel 1 has 10.
+Take 2. `current_items = [(sku, 2)]`, `current_count = 2`. Remaining 0.
+Loop ends.
+Final flush. Parcel 2 has 2.
+This works.
+
+What if `current_items` has some items, and a new line comes that fits?
+`current_count + line.qty <= max_items`. Add it.
+If it doesn't fit, flush, then add it.
+
+The implementation looks solid.
+
+I will output the three files:
+1. `shopkit/orders/models.py`
+2. `shopkit/orders/fulfillment.py`
+3. `shopkit/api/serializers.py`
+
+I will double check the `packing_slip` format.
+"Slip packed inside each parcel: order, parcel number, contents and weight."
+I'll format it nicely.
+```python
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    lines = [
+        f"Order: {parcel.order_id}",
+        f"Parcel: {parcel.number}",
+        "",
+        "Items:",
+    ]
+    for sku, qty in sorted(parcel.items):
+        lines.append(f"  {sku} x {qty}")
+    lines.append("")
+    lines.append(f"Weight: {weight_g}g")
+    if parcel.gift_message:
+        lines.append("")
+        lines.append("Gift Message:")
+        lines.append(f"  {parcel.gift_message}")
+    return "\n".join(lines)
+```
+
+And `split_into_parcels`:
+```python
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    parcels: list[Parcel] = []
+    current_items: list[tuple[str, int]] = []
+    current_count = 0
+    parcel_number = 1
+
+    def flush():
+        nonlocal current_items, current_count, parcel_number
+        if current_items:
+            gm = order.gift_message if parcel_number == 1 else ""
+            parcels.append(Parcel(order_id=order.id, number=parcel_number, items=current_items, gift_message=gm))
+            current_items = []
+            current_count = 0
+            parcel_number += 1
+
+    for line in order.lines:
+        if line.qty > max_items:
+            if current_items:
+                flush()
+            remaining = line.qty
+            while remaining > 0:
+                take = min(remaining, max_items)
+                current_items.append((line.sku, take))
+                current_count += take
+                remaining -= take
+                if remaining > 0:
+                    flush()
+        else:
+            if current_count + line.qty > max_items:
+                flush()
+            current_items.append((line.sku, line.qty))
+            current_count += line.qty
+            
+    flush()
+    return parcels
+```
+
+Looks correct. I'll include `MAX_ITEMS_PER_PARCEL = 10` at the top of `fulfillment.py`.
+
+One more check on `serializers.py`.
+`money` function returns a dict. `format_money` is imported from `shopkit.money`.
+`product` returns dict.
+`order` returns dict.
+`customer` returns dict.
+Everything seems consistent with the map.
+
+I am ready to generate the files.
+
+
+<file path="shopkit/orders/models.py">
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+    gift_message: str = ""
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+</file>
+<file path="shopkit/orders/fulfillment.py">
+from dataclasses import dataclass, field
+from shopkit.orders.models import Order, OrderLine
+
+MAX_ITEMS_PER_PARCEL = 10
+
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)
+    gift_message: str = ""
+
+    @property
+    def item_count(self) -> int:
+        return sum(qty for _, qty in self.items)
+
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for order in orders:
+        for line in order.lines:
+            counts[line.sku] = counts.get(line.sku, 0) + line.qty
+    return sorted(counts.items())
+
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    parcels: list[Parcel] = []
+    current_items: list[tuple[str, int]] = []
+    current_count = 0
+    parcel_number = 1
+
+    def flush():
+        nonlocal current_items, current_count, parcel_number
+        if current_items:
+            gm = order.gift_message if parcel_number == 1 else ""
+            parcels.append(Parcel(order_id=order.id, number=parcel_number, items=current_items, gift_message=gm))
+            current_items = []
+            current_count = 0
+            parcel_number += 1
+
+    for line in order.lines:
+        if line.qty > max_items:
+            if current_items:
+                flush()
+            remaining = line.qty
+            while remaining > 0:
+                take = min(remaining, max_items)
+                current_items.append((line.sku, take))
+                current_count += take
+                remaining -= take
+                if remaining > 0:
+                    flush()
+        else:
+            if current_count + line.qty > max_items:
+                flush()
+            current_items.append((line.sku, line.qty))
+            current_count += line.qty
+
+    flush()
+    return parcels
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    lines = [
+        f"Order: {parcel.order_id}",
+        f"Parcel: {parcel.number}",
+        "",
+        "Items:",
+    ]
+    for sku, qty in sorted(parcel.items):
+        lines.append(f"  {sku} x {qty}")
+    lines.append("")
+    lines.append(f"Weight: {weight_g}g")
+    if parcel.gift_message:
+        lines.append("")
+        lines.append("Gift Message:")
+        lines.append(f"  {parcel.gift_message}")
+    return "\n".join(lines)
+</file>
+<file path="shopkit/api/serializers.py">
+from shopkit.orders.models import Order, OrderLine
+from shopkit.catalog.models import Product
+from shopkit.customers.models import Customer
+from shopkit.money import format_money
+
+
+def money(cents: int, currency: str = 'USD') -> dict:
+    return {
+        "cents": cents,
+        "currency": currency,
+        "display": format_money(cents, currency)
+    }
+
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price_cents": p.price_cents,
+        "active": p.active
+    }
+
+
+def order(o: Order, status: str | None = None) -> dict:
+    data = {
+        "id": o.id,
+        "currency": o.currency,
+        "gift_message": o.gift_message,
+        "total_cents": o.total_cents,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit_cents": line.unit_cents,
+                "total_cents": line.total_cents
+            }
+            for line in o.lines
+        ]
+    }
+    if status is not None:
+        data["status"] = status
+    return data
+
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier
+    }
+</file>

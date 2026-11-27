@@ -1,0 +1,235 @@
+Let me understand the task:
+
+1. Add a `restocking_fee_cents(order)` method to `ReturnRequest`.
+2. For `changed_mind` returns, it should be 12.5% of the return refund amount, and 0 for all other reasons.
+3. The rounding must match the way the shop rounds other percentage amounts like tax and discounts.
+
+I need to figure out how the shop rounds percentage amounts. Looking at the context:
+
+- `shopkit/tax/calculator.py` uses `apply_rate` from `shopkit.utils.numbers`.
+- `shopkit/promotions/rules.py` also uses `apply_rate` from `shopkit.utils.numbers`.
+
+So the shop's percentage rounding is via `apply_rate`. However, the actual implementation of `apply_rate` isn't shown. Let me think about what it probably does.
+
+From `tests/test_coupons.py`:
+```python
+def test_discount():
+    assert discount_cents(Coupon("P", PERCENT, 10, *NOV), 1995, date(2026, 11, 2)) == 200
+```
+
+10% of 1995 cents = 199.5 cents, rounded to 200. So it's rounded to the nearest cent (banker's rounding? 199.5 with round-half-even is 200, because 200 is even. With round-half-up it's also 200. Hmm, this doesn't distinguish.)
+
+Let me check `apply_rate` — it's not shown in the context. But it's a utility in `shopkit/utils/numbers.py`. The name `apply_rate(amount, percent)` suggests it applies a percentage to an amount (in cents) and returns the rounded integer cents.
+
+Common implementations:
+```python
+def apply_rate(cents: int, percent: int) -> int:
+    return round(cents * percent / 100)
+```
+
+But the percent here might be 12.5, which is not an integer. In `SkuPercentOff`, `percent: int` is used. The restocking fee is 12.5%, so percent might need to be a float.
+
+Since I can't see the implementation of `apply_rate`, I have to make a reasonable assumption. The safest approach: use `apply_rate` from `shopkit.utils.numbers`, because that's what the tax and discount code uses. If `apply_rate` only accepts an int percent, then 12.5 won't work.
+
+Hmm. Let me think. In `tax/calculator.py`:
+```python
+def line_tax(line, address, tax_classes=None):
+    tax_class = ...
+    return tax_for(line.total_cents, address.country, address.region, tax_class)
+```
+This uses `rate_for` and `apply_rate` — although the shown snippet of `line_tax` uses `tax_for`. Probably `tax_for` internally uses `apply_rate`.
+
+In `rules.py`:
+```python
+def discount(self, order: Order) -> int:
+    return sum(apply_rate(l.total_cents, self.percent) for l in order.lines if l.sku in self.skus)
+```
+
+So `apply_rate(cents, percent)` returns the rounded integer cents.
+
+The restocking fee is 12.5%. If `apply_rate` is `round(cents * percent / 100)`, then it works with float percent too. But if it validates or uses integer arithmetic like `(cents * percent) // 100`, then 12.5 would break it.
+
+Given that the task says "round exactly like the shop rounds other percentage amounts like tax and discounts," the intent is to use the same rounding utility. The cleanest implementation consistent with the codebase:
+
+```python
+from shopkit.utils.numbers import apply_rate
+
+def restocking_fee_cents(self, order: Order) -> int:
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), 12.5)
+```
+
+But wait — will `apply_rate` accept 12.5? Since I can't see it, I have to make a reasonable assumption. Or, maybe I should implement the rounding directly in a way that matches the shop's rounding: probably half-up or round-half-even.
+
+Let me look for more clues. The `discount_cents` in the coupons module:
+
+```python
+assert discount_cents(Coupon("P", PERCENT, 10, *NOV), 1995, date(2026, 11, 2)) == 200
+```
+
+10% of 1995 = 199.5 → 200. Both half-up and half-even give 200 here (199.5 → half-even: 200, since 199 is odd and 200 is even. Half-up: 200). Not distinctive.
+
+There's also `shopkit/common/TaxHelper.py` — a legacy module: `round(amount * getTaxRate(state), 2)` — Python's `round` is banker's rounding (round-half-even). But that's a legacy/common module dealing with float dollars, probably not the "shop's" rounding for cents. The modern modules (`shopkit/tax/calculator.py`, `shopkit/promotions/rules.py`) use `apply_rate` from `shopkit.utils.numbers`.
+
+The task explicitly says: "round exactly like the shop rounds other percentage amounts like tax and discounts." Tax → `shopkit/tax/calculator.py` → uses `apply_rate` (probably via `tax_for`). Discounts → `shopkit/promotions/rules.py` → uses `apply_rate` directly. So `apply_rate` is the shop's percentage rounding.
+
+So the best implementation is to use `apply_rate`. Assumption: `apply_rate(cents, percent)` applies `percent` (possibly a float) to `cents` and rounds to the nearest integer cent. This is a reasonable assumption.
+
+But there's a risk: what if `apply_rate` is typed as `percent: int` and does integer arithmetic? For 12.5 that would fail. Alternative: manually implement `apply_rate`'s rounding: `round(refund_cents * 12.5 / 100)`. Python's `round` does round-half-even. If `apply_rate` uses `round`, then `round(x * 12.5 / 100)` matches exactly.
+
+Hmm, which is safer? If I call `apply_rate(self.refund_cents(order), 12.5)` and apply_rate can handle floats, great — by construction, exactly the same rounding as tax and discounts. If it can't handle floats, the tests will fail.
+
+If I inline `round(refund * 12.5 / 100)`, it matches only if `apply_rate` uses the same rounding.
+
+Actually, a hybrid: use `apply_rate` but... no. Let me think about what a careful engineer would do. The codebase clearly centralizes percentage rounding in `shopkit/utils/numbers.py::apply_rate`. The task asks for "round exactly like the shop rounds other percentage amounts like tax and discounts." The most faithful interpretation: reuse `apply_rate`.
+
+About the 12.5%: `apply_rate` probably does something like:
+
+```python
+def apply_rate(cents: int, percent: float) -> int:
+    """Apply a percentage (0-100 scale) to a cents amount, rounding half up... """
+```
+
+I've seen similar utility functions. The common implementation to avoid float issues:
+
+```python
+def apply_rate(cents: int, percent: float) -> int:
+    return round(cents * percent) // 100
+```
+
+Hmm, that's a hack: `round(cents * percent) / 100`. For 1995 and 10: round(19950)/100 = 199.5 → no wait, `round(19950) // 100 = 199`. That gives 199, but the test expects 200. So no.
+
+Another possibility: `math.floor(cents * percent / 100 + 0.5)` — half-up: 199.5 → 200. ✓.
+
+Or `round(cents * percent / 100)`: 199.5 → round-half-even → 200 (since 199 is odd, 199.5 rounds to 200). ✓.
+
+Either is possible. But if `apply_rate` exists and is used in both tax and discounts, then calling it is the right move. The only uncertainty is the percent type.
+
+Actually, maybe I can hedge: the restocking fee is exactly 12.5%. I could express it as `apply_rate(refund_cents, 12.5)`. If `apply_rate`'s signature is `(cents: int, percent: int)`, passing 12.5 would be a type error under strict checking, and probably a runtime failure if it does integer arithmetic.
+
+Alternatively, 12.5% of X = 25% of X / 2, or X * 125 // 1000 with rounding. But the "exactly like the shop" constraint pushes toward `apply_rate`.
+
+Let me reconsider: what does `apply_rate` most plausibly look like? It's in `shopkit/utils/numbers.py`. It's used for tax rates and percentage discounts, and given that tax rates can be fractional (state sales tax rates are often like 8.25%!), it almost certainly accepts a float percent. `rate_for` returns a tax rate — tax rates are very often non-integer (e.g., 0.0825 or 8.25). So `apply_rate` should handle float percents.
+
+So: `apply_rate(cents: int, percent: float) -> int`.
+
+Implementation:
+
+```python
+RESTOCKING_FEE_PERCENT = 12.5
+CHANGED_MIND = "changed_mind"  # maybe not needed
+
+def restocking_fee_cents(self, order: Order) -> int:
+    """Restocking fee for changed-mind returns: 12.5% of the refund, rounded like other percentages."""
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PERCENT)
+```
+
+Note that `open_return` also uses `reason != "changed_mind"` for approval. So using the literal "changed_mind" is consistent with the existing code style. The existing code uses the raw string literal in `open_return`, so I'll do the same. Or define a constant. The existing file has `REASONS` and uses the literal `"changed_mind"` in `open_return`. Keep the literal to match.
+
+Where should the method go? After `refund_cents` in `ReturnRequest`.
+
+Imports: add `from shopkit.utils.numbers import apply_rate`.
+
+Check the import ordering: current imports:
+
+```python
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+```
+
+`shopkit.utils.numbers` comes after `shopkit.utils.ids` alphabetically (ids < numbers). So:
+
+```python
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+```
+
+Now the fee percent: should it be a module-level constant `RESTOCKING_FEE_PERCENT = 12.5`? The file already has module constants `RETURN_WINDOW_DAYS` and `REASONS`. Adding `RESTOCKING_FEE_PERCENT = 12.5` fits well.
+
+Docstring: the file has minimal docstrings. `refund_cents` doesn't have one. `best_discount` does. Let me add a short docstring for clarity since the 12.5% and the conditional behavior are the point:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    """Restocking fee: 12.5% of the refund for changed-mind returns, 0 otherwise."""
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PERCENT)
+```
+
+This is clean.
+
+One consideration: is the restocking fee computed on the refund amount (gross) — yes, the task says "12.5% of the return refund amount." `refund_cents(order)` computes exactly that.
+
+Edge case: empty items → refund 0 → fee 0. `apply_rate(0, 12.5)` = 0`. No problem.
+
+Now, am I sure about the existence and signature of `apply_rate`? From `rules.py`: `apply_rate(l.total_cents, self.percent)` — `(cents, percent) -> int`. From `tax/calculator.py`: it imports `apply_rate` (used in `tax_for` which is not fully shown, but the import confirms the name and module). So `shopkit.utils.numbers.apply_rate(cents, percent)` exists. Good.
+
+Let me double check whether there might be other rounding helpers like `round_cents`. The context only shows `apply_rate`. The task's mention of "tax and discounts" directly points to `tax/calculator.py` and `promotions/rules.py`, both of which use `apply_rate`. Confident.
+
+Also, let me check `discount_cents` in coupons: `discount_cents(Coupon("P", PERCENT, 10, *NOV), 1995, ...) == 200`. 10% of 1995 = 199.5 → 200. If `discount_cents` uses `apply_rate`, then `apply_rate(1995, 10) == 200`. Either half-up or half-even gives 200. Either way, using `apply_rate` makes us "exactly like" by construction.
+
+Final file:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+RESTOCKING_FEE_PERCENT = 12.5
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        """Restocking fee: 12.5% of the refund for changed-mind returns, 0 for every other reason."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PERCENT)
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    ...
+```
+
+Keep the rest identical.
+
+One question: should the constant name be `RESTOCKING_FEE_PERCENT`? It fits the file's style (`RETURN_WINDOW_DAYS`). Good.
+
+Re-check: "0 for all other reasons" — `if self.reason != "changed_mind": return 0`. Good.
+
+Type annotations match the codebase style. Done.
+
+Output: a single file block containing the full contents of the new file. Nothing outside the block.

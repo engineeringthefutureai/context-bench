@@ -1,0 +1,267 @@
+Let me understand the task.
+
+I need to add a `restocking_fee_cents(order)` method to `ReturnRequest` in `shopkit/orders/returns.py`.
+
+The method should:
+- For "changed_mind" returns: 12.5% of the return's refund amount, rounded the same way the shop rounds other percentage amounts (like tax and discounts).
+- For all other reasons: 0.
+
+I need to find out how the shop rounds percentage amounts. Looking at the context:
+
+From `shopkit/tax/calculator.py`:
+```python
+from shopkit.utils.numbers import apply_rate
+
+def tax_for(amount_cents: int, country: str, region: str = "", tax_class: str = STANDARD) -> int:
+    """Tax on a tax-exclusive amount for a destination, rounded half-up to the cent."""
+    return apply_rate(amount_cents, rate_for(country, region, tax_class))
+```
+
+So there's `shopkit.utils.numbers.apply_rate` which rounds half-up to the cent. Let me think about what `apply_rate` does. It's probably:
+
+```python
+def apply_rate(amount_cents: int, rate: float) -> int:
+    return (amount_cents * rate * 100 + 50) // 100  # or something with Decimal
+```
+
+The exact implementation isn't shown, but the docstring says "rounded half-up to the cent." For an integer percentage like 12.5%, the cleanest way to round exactly half-up is to use integer arithmetic: `amount * 125 // 1000` isn't exact half-up for all cases… let me think.
+
+12.5% of amount: `amount * 12.5 / 100 = amount * 25 / 200 = amount * 5 / 40 = amount / 8`.
+
+Actually, 12.5% = 1/8. So the fee is amount_cents / 8. Rounded half-up: `(amount + 4) // 8`? Let me verify: half-up rounding of amount/8 means floor(amount/8 + 0.5) = floor((amount*2 + 8) / 16)… hmm, let me be careful.
+
+Half-up rounding of x = floor(x + 0.5). For x = amount/8:
+floor(amount/8 + 0.5) = floor((amount + 4)/8) = (amount + 4) // 8 for non-negative amount.
+
+Wait: amount/8 + 1/2 = (amount + 4)/8. Yes, so floor((amount + 4)/8). In integer division: (amount + 4) // 8.
+
+Verify: amount = 1: 1/8 = 0.125 → half-up → 0. (1+4)//8 = 5//8 = 0. ✓
+amount = 4: 4/8 = 0.5 → half-up → 1. (4+4)//8 = 1. ✓
+amount = 5: 5/8 = 0.625 → 1. (9)//8 = 1. ✓
+amount = 1000: 1000/8 = 125 → 125. (1004)//8 = 125. ✓
+amount = 1001: 125.125 → 125. (1005)//8 = 125. ✓
+amount = 1003: 125.375 → 125. (1007)//8 = 125. ✓
+amount = 1005: 125.625 → 126. (1009)//8 = 126. ✓
+
+Hmm, but wait: the exact half case for amount/8 happens when amount ≡ 4 (mod 8). amount = 4: 0.5 → 1 ✓. amount = 12: 1.5 → 2. (16)//8 = 2 ✓.
+
+But better: rather than hardcoding /8, I should follow the codebase's pattern. The task says "rounded exactly the way the shop rounds other percentage amounts such as tax and discounts." The codebase has `shopkit.utils.numbers.apply_rate` used by `tax_for`. So the most consistent implementation is to use `apply_rate(refund_cents, 0.125)`.
+
+But I can't see the implementation of `apply_rate`. It's imported as `from shopkit.utils.numbers import apply_rate` in `shopkit/tax/calculator.py`. The docstring of `tax_for` says "rounded half-up to the cent." So `apply_rate(amount_cents, rate)` probably does half-up rounding: e.g. `int(Decimal(amount_cents) * Decimal(str(rate)) + "0.5")` or `(amount_cents * rate + 0.5).__floor__()` — some implementation.
+
+Since 0.125 is exactly representable in binary (1/8), even a float-based implementation will be fine: amount * 0.125 is exact for any integer amount (multiplication by 1/8 is exact as long as the result fits; for integers up to 2^53/8 it's exact). So `apply_rate(cents, 0.125)` will be exact in any reasonable implementation.
+
+How is `apply_rate` called elsewhere? `apply_rate(amount_cents, rate_for(...))` where rate is probably a float like 0.19. So the rate argument is a fraction (0.19), not a percentage number. So `apply_rate(cents, 0.125)` is the right call.
+
+Alternatively, there might be a discount module that uses `apply_rate` similarly. I don't have that context, but tax is a strong signal.
+
+So the implementation:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    """Restocking fee: 12.5% of the refund for changed-mind returns, 0 otherwise."""
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), RESTOCKING_FEE_RATE)
+```
+
+Where `RESTOCKING_FEE_RATE = 0.125` is a module constant near `RETURN_WINDOW_DAYS`.
+
+Should I define a constant? The codebase has `RETURN_WINDOW_DAYS = 30` and `REASONS` at the module level. So defining `RESTOCKING_FEE_RATE = 0.125` at the top fits the style.
+
+Now, is `apply_rate` definitely the right helper? Let me double-check: the context shows `shopkit/utils/numbers.py` contains `apply_rate`. I don't have its source, but its name and usage in `tax_for` strongly suggest: apply a fractional rate to an integer cent amount and round half-up to cent. That's exactly "the way the shop rounds other percentage amounts such as tax." The task explicitly says "such as tax and discounts" — tax uses `apply_rate`. So yes, use `apply_rate`.
+
+Edge cases:
+- items is empty: refund_cents = 0, fee = 0. No problem.
+- The reason check: `self.reason != "changed_mind"` — reasons are validated against REASONS on open_return, so it's one of the four.
+
+Should the fee method be a method of ReturnRequest? Yes: "Add `restocking_fee_cents(order)` to `ReturnRequest`" — with an order argument, mirroring `refund_cents(self, order)`.
+
+Let me also think about whether the refund amount should be computed from `refund_cents(order)` — yes: "12.5% of the return's refund amount."
+
+Import: I need to add `from shopkit.utils.numbers import apply_rate` to the imports in returns.py.
+
+Now let me write the whole file:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+RESTOCKING_FEE_RATE = 0.125
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+```
+
+Hmm, import ordering: current imports are `shopkit.errors`, `shopkit.orders.models`, `shopkit.utils.ids`. Adding `shopkit.utils.numbers` after `shopkit.utils.ids` preserves alphabetical order. Good.
+
+Method:
+
+```python
+    def restocking_fee_cents(self, order: Order) -> int:
+        """Restocking fee, charged only on changed-mind returns (12.5% of the refund)."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_RATE)
+```
+
+Should I reference the string "changed_mind" directly, or via REASONS? Directly is fine — `open_return` already compares `reason != "changed_mind"` directly. So consistent.
+
+One consideration: does `apply_rate` accept a float rate and return int? From `tax_for` which returns int, probably yes. Good.
+
+Type hint: `-> int` matches `refund_cents`.
+
+Now, is there any chance the intended rounding is via `apply_rate`? Or via `round()` with banker's rounding? The task says "rounded exactly the way the shop rounds other percentage amounts such as tax and discounts" — tax uses `apply_rate` (half-up per docstring). So use `apply_rate`.
+
+Alternatively, `shopkit/money.py` might have `format_money` and something like `percent_of`. But the most visible evidence is `apply_rate`. I'll go with that.
+
+Let me also double-check that `refund_cents` handles missing SKUs: `prices[sku]` would raise KeyError if sku is not in the order. But `open_return` validates all SKUs are in ordered, so for a well-formed return request it's fine. I'm not changing that behavior.
+
+Full file:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+RESTOCKING_FEE_RATE = 0.125
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        """12.5% of the refund on changed-mind returns, rounded half-up like tax; 0 otherwise."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate... 
+```
+
+Wait, let me be careful — write the return statement:
+
+```python
+    def restocking_fee_cents(self, order: Order) -> int:
+        """Restocking fee: 12.5% of the refund for changed-mind returns, 0 otherwise."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_RATE)
+```
+
+The docstring of tax_for says "rounded half-up to the cent" — I might mention that the rounding follows the same half-up as `apply_rate` does. A concise docstring: "Restocking fee: 12.5% of the refund for changed-mind returns (same half-up rounding as tax), 0 otherwise."
+
+Placement of constant: before or after REASONS? Order: RETURN_WINDOW_DAYS, then REASONS. I'll add RESTOCKING_FEE_RATE after RETURN_WINDOW_DAYS. Fine.
+
+One more thought: is there any risk that `apply_rate` expects rate as a percentage like 12.5 rather than 0.125? `rate_for` in `shopkit.tax.rates` — the rates module has `STANDARD` and `rate_for(country, region, tax_class)`. German VAT is 19%, so rate_for("DE") would return 0.19 (a fraction), since `tax_for(333, "DE") == 63` → 333 * 0.19 = 63.27 → 63 (half-up). Yes: 333 * 0.19 = 63.27 → 63. ✓. So rate is a fraction. `apply_rate(333, 0.19) == 63`. Therefore `apply_rate(cents, 0.125)` is correct.
+
+Verify with gross_total test: order A:333, B:333 → tax 126, gross 792 = 666 + 126. ✓ Consistent.
+
+So the answer is one file block.
+
+Also, per the output format: return nothing outside the file blocks.
+
+Let me finalize the file contents, preserving all other lines exactly.
+
+Also, preserve the comment line `# changed-mind returns need manual approval; faults are approved automatically` unchanged.
+
+Final file:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+RESTOCKING_FEE_RATE = 0.125
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        """Restocking fee: 12.5% of the refund for changed-mind returns, 0 otherwise."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_RATE)
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0... 
+```
+
+Careful, let me copy the original exactly:
+
+```python
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+```
+
+Good.
+
+Double-check: no other changes needed. The method name and signature match the task exactly: `restocking_fee_cents(order)` — a method on ReturnRequest that takes order. ✓
+
+Done.

@@ -1,0 +1,89 @@
+<file path="shopkit/settings.py">
+"""Deployment settings.
+
+Values that differ between deployments (e.g. how long customers have to return a
+delivered order) live here so every module reads one canonical source. Environment
+overrides keep the defaults sensible for local development while letting an
+operator tune the behaviour of a deployment without a code change.
+"""
+import os
+
+_DEFAULTS = {
+    "return_window_days": "30",
+}
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as e:
+        raise ValueError(f"environment variable {name!r} must be an integer, got {raw!r}") from e
+
+
+def get(name: str) -> int:
+    if name not in _DEFAULTS:
+        raise KeyError(name)
+    env = f"SHOPKIT_{name.upper()}"
+    return _int_env(env, int(_DEFAULTS[name]))
+
+
+def return_window_days() -> int:
+    """Number of days a customer has to return a delivered order."""
+    return get("return_window_days")
+</file>
+<file path="shopkit/orders/returns.py">
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.settings import return_window_days
+from shopkit.utils.ids import short_code
+
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    window = return_window_days()
+    if today > delivered_on + timedelta(days=window):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+</file>

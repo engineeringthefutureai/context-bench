@@ -37,7 +37,7 @@
   // ---------- run list ----------
   // report outcomes (stored labels stay ok/broken/...): PASS, FAIL, UNPARSABLE, ASKED TO EXPLORE, NO ANSWER,
   // STOPPED EARLY, INVALID, OUT OF TOKENS, OUT OF TIME, NO FIT
-  const badge = (o) => `<span class="badge ${o === "PASS" ? "b-ok" : o === "FAIL" ? "b-broken" : "b-other"}">${esc(o)}</span>`;
+  const badge = (o) => `<span class="badge ${o === "PASS" ? "b-ok" : o === "FAIL" || o === "BROKE KNOWN TESTS" ? "b-broken" : "b-other"}">${esc(o)}</span>`;
   const yn = (v) => (v == null ? "–" : v ? "yes" : "no");
   const frac = (a, b) => (b ? `${a}/${b}` : "–");
   const COLS = [
@@ -85,7 +85,7 @@
 
   // ---------- matrix view: tasks (rows) x harness levels (columns); each cell stacks the repos S, M, L ----------
   // Outcome colours are the Results page's (.o-*); the tooltip and the table view carry the same facts as text.
-  const OCLS = {"PASS": "o-pass", "FAIL": "o-fail", "UNPARSABLE": "o-unparsable", "ASKED TO EXPLORE": "o-explore",
+  const OCLS = {"PASS": "o-pass", "BROKE KNOWN TESTS": "o-breaks", "FAIL": "o-fail", "UNPARSABLE": "o-unparsable", "ASKED TO EXPLORE": "o-explore",
     "NO ANSWER": "o-noanswer", "STOPPED EARLY": "o-stopped", "INVALID": "o-invalid", "OUT OF TOKENS": "o-oot",
     "OUT OF TIME": "o-time", "NO FIT": "o-nofit"};
   const REPOS = ["S", "M", "L"];
@@ -510,6 +510,8 @@
       ["in", fmt(m.tokens_in)], ["cached", fmt(m.tokens_cached)], ["out", fmt(m.tokens_out)],
       ["sec", m.latency_s == null ? "–" : Math.round(m.latency_s)], ["tools", m.tool_calls ?? 0],
       ["helper seen", m.helper_body_in_context ? "body" : m.helper_in_context ? "signature" : "no"],
+      ...(m.known_tests_broken && m.known_tests_broken.length ? [["known tests broken",
+        `${m.known_tests_broken.length} of ${m.known_tests_total}: ${m.known_tests_broken.slice(0, 4).map((t) => t.replace(/^tests\//, "")).join(", ")}${m.known_tests_broken.length > 4 ? ", ..." : ""}`]] : []),
       ...(m.drops == null ? [] : [["dropped", `${m.drops} (${m.drop_calls} calls)`],
         ["helper body at answer", yn(m.helper_body_at_answer)]]),
     ].map(([k, v]) => `<span>${k} <b>${esc(v)}</b></span>`).join("");

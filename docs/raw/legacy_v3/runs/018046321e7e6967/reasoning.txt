@@ -1,0 +1,89 @@
+Let's start by investigating the repository to understand its structure. In particular, I'll focus on how email validation is done at signup and checkout.
+
+
+Let's check the validation module, the customer service (registration/checkout check), and the newsletter tests.
+
+
+Let's take a look at the Customer model to understand how the email attribute is set (is it a str?). Also, let's check how `is_valid_email` is used in checkout (the task says "the same check that the shop applies at signup and checkout"). I'll look at the Customer model in customers/models.py, and search for is_valid_email in checkout/orders.
+
+
+The task: newsletter recipients must also have a valid email address (per `is_valid_email` in `shopkit/utils/validation.py`, which is the same check used at signup and checkout). Everyone else is skipped.
+
+Change in `shopkit/marketing/newsletter.py`:
+
+```python
+"""Newsletter send. Only customers who have opted in receive marketing emails."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # Provider's per-API-call limit
+
+BODY = "Hi {{ first_name }},\n\n{{ intro }}\n\nShop now: {{ link }}\n\nUnsubscribe: {{ unsubscribe }}"
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+
+
+def render_for(customer: Customer, campaign: Campaign, intro: str) -> str:
+    return render_template(BODY, {"first_name": customer.first_name or "there", "intro": intro,
+                                  "link": campaign.link(),
+                                  "unsubscribe": f"https://shop.example/unsubscribe/{customer.id}"})
+
+
+def batches(customers: list[Customer]) -> list[list[str]]:
+    return [[c.email for c in batch] for batch in chunked(recipients(customers), BATCH_SIZE)]
+```
+
+Edge cases:
+- `c.email` could be None or missing? The Customer model has `email: str` required. `is_valid_email` calls `address.strip()`, which would fail on None. The dataclass requires email as a str, so this is fine. However, "badly formatted addresses imported from an old system" — those would be malformed strings, and `is_valid_email` handles them by returning False.
+- Should we check email before opt_in, or after? Doesn't matter functionally. To preserve the priority, keep opt_in first.
+- Note that `is_valid_email` strips, so " foo@bar.com " passes. That's consistent with signup, which strips. No problem.
+- Should `batches` use a helper? `batches` calls `recipients(customers)`, so filtering via `recipients` automatically covers it. `render_for` takes a single customer, and is presumably called with customers already obtained from `recipients`. The task says "newsletter recipients must have an email that passes the same check… everyone else is skipped". Skipping happens in `recipients` (and by extension in `batches`).
+
+Should I update the module docstring? "Only customers who opted in receive marketing emails." — I could add "with a valid email address". This is a small docstring update that's fine and fits the intent. Keep it minimal: "Only customers who opted in and have a valid email address receive marketing emails."
+
+Also update the `recipients` docstring? The existing code doesn't have one. Keep the style consistent — minimal comments. I could add a brief comment. The existing file's style uses inline comments on constants. Add a brief comment like `# skip addresses that would bounce (same check as signup/checkout)`. Actually, keep it simple. Let's just make the change.
+
+I'll update the module docstring to reflect the new behavior, import is_valid_email, and add the check to recipients.
+
+Double-checking that there's no circular import concern: shopkit.utils.validation only imports re. No problem.
+
+Final file:
+
+```python
+"""Newsletter send. Only customers who opted in and have a valid email receive marketing emails."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # Provider's per-API-call limit
+
+BODY = "Hi {{ first_name }},\n\n{{ intro }}\n\nShop now: {{ link }}\n\nUnsubscribe: {{ unsubscribe }}"
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    # Skip bad addresses from old imports; same check as signup and checkout
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+
+
+def render_for(customer: Customer, campaign: Campaign, intro: str) -> str:
+    return render_template(BODY, {"first_name": customer.first_name or "there", "intro": intro,
+                                  "link": campaign.link(),
+                                  "unsubscribe": f"https://shop.example/unsubscribe/{customer.id}"})
+
+
+def batches(customers: list[Customer]) -> list[list[str]]:
+    return [[c.email for c in batch] for batch in chunked(recipients(customers), BATCH_SIZE)]
+```
+
+This is the minimal correct change. `batches` is automatically filtered too since it uses `recipients`.
+
+One more consideration: the check order — `c.marketing_opt_in and is_valid_email(c.email)`. Either order works. Putting opt_in first preserves the traditional behavior and avoids validation cost for non-subscribers. No problem.
+
+Replying with just the file block.

@@ -1,0 +1,144 @@
+Let me understand the task.
+
+The task: "Marketing's CRM sync needs a lookup from email address to customer. Add `by_email(customers) -> dict[str, Customer]` to the customers report module, keyed by the email address trimmed and lowercased, and built the same way the shop builds its other lookup tables."
+
+Target file: `shopkit/reports/customers_report.py`.
+
+Looking at the existing customers report module:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = [c for c in customers if c.joined]
+    groups = group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))
+    return {m: len(cs) for m, cs in sorted(groups.items())}
+
+
+def opt_in_rate(customers: list[Customer]) -> float:
+    return safe_ratio(sum(c.marketing_opt_in for c in customers), len(customers))
+
+
+def tier_mix(customers: list[Customer]) -> dict[str, int]:
+    return {t: len(cs) for t, cs in sorted(group_by(customers, key=lambda c: c.tier).items())}
+
+
+def active_since(customers: list[Customer], since: date) -> list[Customer]:
+    return [c for c in customers if c.joined and c.joined >= since]
+```
+
+Now, "built the same way the shop builds its other lookup tables." What are the shop's other lookup tables? Let me look at the context:
+
+- `shopkit/customers/service.py`: `CustomerDirectory` has `self._by_id: dict[str, Customer]`, a dict keyed by id. Lookup tables in the shop: `TABLES = {'products': {}, 'customers': {}, 'orders': {}}` in `shopkit/common/db.py` — these are dicts.
+
+The phrase "built the same way the shop builds its other lookup tables" — hmm. The shop builds lookup tables as dicts mapping key -> record. E.g. `self._by_id[customer.id] = customer` in CustomerDirectory, or `TABLES['customers'][rid] = record` in db.py.
+
+Alternatively, "the same way" could refer to how keys are normalized: in `CustomerDirectory.register`, emails are normalized with `email.strip().lower()`. So the lookup should key by `c.email.strip().lower()`.
+
+Wait — the task explicitly says "keyed by the email address trimmed and lowercased." So the key normalization is given: `c.email.strip().lower()`.
+
+"Built the same way the shop builds its other lookup tables" — the shop's lookup tables (like `CustomerDirectory._by_id`) are simple dicts mapping key -> object, e.g.:
+
+```python
+self._by_id: dict[str, Customer] = {}
+...
+self._by_id[customer.id] = customer
+```
+
+So `by_email` should be a simple dict comprehension:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+Now, edge cases:
+- Duplicate emails: last one wins (dict comprehension behavior). This is consistent with `db.insert` where records are keyed by rid... Actually, in db.py, if you insert a record with the same id, it gets overwritten. In `CustomerDirectory.register`, duplicates raise EmailTaken. But for a report function over an arbitrary list of customers, the sensible behavior is last-wins or first-wins? The task says "built the same way the shop builds its other lookup tables" — a plain dict assignment, i.e. last-wins. A dict comprehension is exactly that.
+
+- Missing email: `Customer` might have `email` as empty or None? Let me check `shopkit/customers/models.py` — not given in context. From service.py, `Customer(id=new_id("cus"), email=email, name=name.strip(), marketing_opt_in=marketing_opt_in)`. So email is always a string when registered through the service. But the models file isn't shown. `joined` could be None (the report checks `if c.joined`). `tier` is presumably a string.
+
+If `c.email` were None, `.strip()` would fail. Should I guard? The existing report functions guard `joined` with a truthy check because `joined` can be None. For email, the model likely always has an email (it's the identity of the customer). But to be safe... The task says "keyed by the email address trimmed and lowercased." If email is None, keying would fail. Hmm.
+
+Given the codebase: `CustomerDirectory.find_by_email` compares `c.email == email`, and `register` always sets a stripped, lowercased, valid email. So Customer.email is a string by construction. I'll assume email is a string. Adding a None guard might deviate from the expected test behavior... Actually, if a test includes a customer with `email=None`, what would the test expect? The task doesn't mention missing emails. The most natural reading is: build the dict with `c.email.strip().lower()` as key.
+
+Hmm, but wait: should I handle duplicates by keeping the first or the last? "Built the same way the shop builds its other lookup tables" — the shop's lookup tables (`TABLES[table][rid] = record`, `self._by_id[customer.id] = customer`) are built by assignment, so if there are duplicate keys, the last wins. A dict comprehension over the list does exactly that: later entries overwrite earlier ones. That's the most consistent interpretation.
+
+Also "built the same way" might just mean: a dict mapping key -> Customer, like `_by_id`. So:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    """Map trimmed, lowercased email address to customer, like CustomerDirectory's _by_id."""
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+Where to place it in the file? The file's functions: signups_by_month, opt_in_rate, tier_mix, active_since. I can add by_email at the end. Order doesn't matter functionally. I'll add it at the end with a brief docstring matching the style? The existing functions have no docstrings (the module has a docstring). So to match style, I'll either keep it without a docstring, or with a short one? The existing functions don't have docstrings. Matching the style, I'll leave it without a docstring, or add a short one? The instructions say: "add a docstring or comment where the intent is not obvious." The function signature and body make it clear enough. The module docstring says "Customer cohort numbers for marketing." Adding this function extends the module's purpose slightly (lookup for CRM sync). I could leave the module docstring as-is. The request is just to add the function.
+
+Imports: no new imports needed. `Customer` is already imported.
+
+Type annotation: `list[Customer]` and `dict[str, Customer]` — consistent with the file's style (3.10+ syntax).
+
+Let me write the final file:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = ...
+```
+
+No, full file:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = [c for c in customers if c.joined]
+    groups = group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))
+    return {m: len(cs) for m, cs in sorted(groups.items())}
+
+
+def opt_in_rate(customers: list[Customer]) -> float:
+    return safe_ratio(sum(c.marketing_opt_in for c in customers), len(customers))
+
+
+def tier_mix(customers: list[Customer]) -> dict[str, int]:
+    return {t: len(cs) for t, cs in sorted(group_by(customers, key=lambda c: c.tier).items())}
+
+
+def active_since(customers: list[Customer], since: date) -> list[Customer]:
+    return [c for c in customers if c.joined and c.joined >= since]
+
+
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+That's the minimal change. Is there anything about "built the same way the shop builds its other lookup tables" that demands using `group_by`? No — group_by returns dict of lists. Lookup tables map key -> single record, not list. The shop's lookup tables (`_by_id`, `TABLES`) map key -> record. So a plain dict comprehension is right.
+
+Should I use a `group_by`-like utility? The task says "built the same way the shop builds its other lookup tables" — the shop builds lookup tables by direct dict assignment (last-wins on collision, as in db.py's `TABLES[table][rid] = record`). So a dict comprehension is exactly that.
+
+Edge case consideration: what if `c.email` has mixed case or whitespace? `.strip().lower()` handles it, matching `CustomerDirectory.register` normalization (`email.strip().lower()`).
+
+What if two customers share the same normalized email? Last wins, consistent with plain dict assignment. Good.
+
+I think that's it. One file change, minimal.
+
+Output: only the `<file>` block with the full new contents of `shopkit/reports/customers_report.py`.

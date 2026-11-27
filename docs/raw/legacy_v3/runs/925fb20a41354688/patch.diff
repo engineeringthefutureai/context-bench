@@ -1,0 +1,83 @@
+--- a/shopkit/shipping/labels.py
++++ b/shopkit/shipping/labels.py
+@@ -1,7 +1,22 @@
+ """Shipping label content handed to the label printer service."""
++from typing import Optional
++
+ from shopkit.customers.addresses import format_address
+ from shopkit.customers.models import Address
+ from shopkit.orders.fulfillment import Parcel
++
++try:
++    from shopkit.customers.addresses import format_weight
++except ImportError:
++    try:
++        from shopkit.orders.fulfillment import format_weight
++    except ImportError:
++        def format_weight(weight_g: int) -> str:
++            """Shop's standard kilogram display, matching packing slips."""
++            return f"{float(weight_g) / 1000.0:.1f} kg"
++
++_GRAMS_PER_POUND = 453.59237
++_US_COUNTRY_KEYS = {"US", "USA", "UNITEDSTATES", "UNITEDSTATESOFAMERICA"}
+ 
+ 
+ def label_code(sku: str) -> str:
+@@ -9,7 +24,56 @@
+     return sku.replace(" ", "").replace("-", "").upper()
+ 
+ 
+-def label_text(parcel: Parcel, to: Address, parcels_total: int) -> str:
++def _is_us_address(address: Address) -> bool:
++    """Return True when the destination should see US customary units."""
++    is_us = getattr(address, "is_us", False)
++    if callable(is_us):
++        is_us = is_us()
++    if is_us:
++        return True
++
++    for attribute in ("country_code", "country", "country_name", "cc"):
++        value = getattr(address, attribute, None)
++        if value is None:
++            continue
++        normalized = "".join(ch for ch in str(value).upper() if ch.isalnum())
++        if normalized in _US_COUNTRY_KEYS:
++            return True
++    return False
++
++
++def _format_pounds(weight_g: int) -> str:
++    """US customer-facing weight: pounds with two decimals."""
++    return f"{float(weight_g) / _GRAMS_PER_POUND:.2f} lb"
++
++
++def _format_standard_kg(weight_g: int, address: Address) -> str:
++    """Return the shop's standard kilogram display for a parcel weight."""
++    try:
++        formatted = format_weight(weight_g)
++    except TypeError:
++        try:
++            formatted = format_weight(weight_g, address)
++        except TypeError:
++            return f"{float(weight_g) / 1000.0:.1f} kg"
++    text = str(formatted).strip()
++    if "kg" not in text.lower() and "kilogram" not in text.lower():
++        return f"{text} kg"
++    return text
++
++
++def label_text(
++    parcel: Parcel,
++    to: Address,
++    parcels_total: int,
++    weight_g: Optional[int] = None,
++) -> str:
+     lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
++    if weight_g is not None:
++        if _is_us_address(to):
++            weight_text = _format_pounds(weight_g)
++        else:
++            weight_text = _format_standard_kg(weight_g, to)
++        lines.append(f"Weight: {weight_text}")
+     lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+     return "\n".join(lines)

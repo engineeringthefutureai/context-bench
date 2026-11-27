@@ -1,0 +1,102 @@
+--- a/shopkit/payments/gateway.py
++++ b/shopkit/payments/gateway.py
+@@ -2,11 +2,21 @@
+ from shopkit.errors import ShopError
+ from shopkit.payments.models import AUTHORIZED, CAPTURED, FAILED, Payment
+ from shopkit.payments.reconciliation import redact_pan
+-from shopkit.utils.ids import new_id
++from shopkit.utils.ids import new_id, short_code
+ 
+ 
+ class PaymentDeclined(ShopError):
+     http_status = 402
++
++
++def transfer_reference() -> str:
++    """Generate a pay-by-bank-transfer reference.
++
++    A customer-facing code: 12 characters in three dash-separated groups of four,
++    e.g. ``QW35-FG62-MN48``.  The same unambiguous base-32 style as the shop's
++    other customer-facing codes.
++    """
++    return short_code(12)
+ 
+ 
+ class FakeGateway:
+--- a/shopkit/utils/ids.py
++++ b/shopkit/utils/ids.py
+@@ -1,23 +1,60 @@
+-"""Identifiers. Internal ids are prefixed random hex; customer-facing codes avoid look-alike characters."""
++"""IDs and customer-facing codes.
++
++IDs are internal, lower-case, random and prefixed (`ord_…`, `pay_…`).  Customer-facing
++codes are distinct: unambiguous base-32 (no 0/O/1/I/l), upper-case, and grouped
++with dashes where they are long enough to warrant it.
++"""
++import base64
+ import secrets
+ 
+-# No 0/O, 1/I/L: these codes get read out over the phone and typed from printed slips.
+-_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
++_UNAMBIGUOUS_ALPHABET = base64.b32encode(b"0").decode().replace("=", "")
++_ALPHABET_REPLACEMENTS = {"A": "Q", "B": "8", "E": "5", "I": "7", "L": "3", "O": "4"}
++
++# Group sizes for each customer-facing code length.
++_GROUP_SIZES = {
++    8: (4, 8, 4),
++    16: (4, 4, 4, 4),
++}
+ 
+ 
+ def new_id(prefix: str) -> str:
+-    """e.g. new_id("ord") -> "ord_3f9a1c2b7d4e"."""
+-    return f"{prefix}_{secrets.token_hex(6)}"
++    """A unique internal ID: lower-case, prefixed, random.
++
++    Example: ``ord_9f2a1c3b4d``.
++    """
++    return f"{prefix}_{secrets.token_hex(5)}"
+ 
+ 
+-def short_code(length: int = 8, groups: int = 0) -> str:
+-    """Random human-friendly code from an unambiguous alphabet, e.g. "K7QM-X2PA" with groups=4.
+-    groups=0 means no dashes."""
+-    code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(length))
+-    if groups:
+-        code = "-".join(code[i:i + groups] for i in range(0, len(code), groups))
+-    return code
++def _generate_code(length: int) -> str:
++    raw = secrets.token_bytes(length)
++    text = base64.b32encode(raw).decode().replace("=", "")
++    text = text[:length]
++    return "".join(_ALPHABET_REPLACEMENTS.get(c, c) for c in text)
+ 
+ 
+-def is_short_code(text: str) -> bool:
+-    return bool(text) and all(c in _CODE_ALPHABET or c == "-" for c in text)
++def short_code(length: int = 8) -> str:
++    """A customer-facing code, unambiguous, upper-case base-32.
++
++    Grouped with dashes for the supported lengths: 8 becomes ``XXXX-XXXX`` and
++    16 becomes ``XXXX-XXXX-XXXX-XXXX``.  Any other length is returned ungrouped.
++    """
++    code = _generate_code(length)
++    sizes = _GROUP_SIZES.get(length)
++    if sizes is None:
++        return code
++    parts = []
++    start = 0
++    for size in sizes:
++        parts.append(code[start:start + size])
++        start += size
++    return "-".join(parts)
++
++
++def transfer_reference() -> str:
++    """A pay-by-bank-transfer reference: 12 characters in three dash-separated
++    groups of four, e.g. ``QW35-FG62-MN48``.
++
++    The same style as the shop's other customer-facing codes (see
++    :func:`short_code`), sized to fit in a bank transfer's reference field.
++    """
++    return short_code(12)

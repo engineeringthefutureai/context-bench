@@ -1,0 +1,42 @@
+To satisfy the task requirements, we need to publish an event when a stock transfer succeeds. This event should contain the necessary details (SKU, quantity, source, destination) so that subscribers like the audit log can process it correctly.
+
+I will update the `transfer` function in `shopkit/inventory/transfers.py` to import `BUS` from `shopkit.events` and call `BUS.publish` after the stock has been successfully moved.
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.events import BUS
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    t = Transfer(sku, qty, source, destination)
+    BUS.publish("transfer.completed", sku=t.sku, qty=t.qty, source=t.source, destination=t.destination)
+    return t
+</file>

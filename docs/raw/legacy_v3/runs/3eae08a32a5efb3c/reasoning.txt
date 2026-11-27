@@ -1,0 +1,59 @@
+Let me understand the task: "Our email provider is penalising us for bounces from badly typed addresses imported from an old system. Newsletter recipients must now also have an email address that passes the same check the shop applies at signup and checkout; everyone else is skipped."
+
+Target file: shopkit/marketing/newsletter.py
+
+The shop applies `is_valid_email` from `shopkit.utils.validation` at signup and checkout (used in `CustomerDirectory.register` and `Outbox.send`). So the `recipients` function in newsletter.py should filter customers who have opted in AND have a valid email.
+
+Current code:
+
+```python
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers if c.marketing_opt_in]
+```
+
+New code:
+
+```python
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+```
+
+And add the import: `from shopkit.utils.validation import is_valid_email`.
+
+Note that `is_valid_email` itself strips the address: `address = address.strip()`. So emails with surrounding whitespace will still pass. This is consistent with "the same check the shop applies at signup and checkout" — since signup uses `email.strip().lower()` before calling `is_valid_email`, and Outbox.send calls `is_valid_email(to)` directly. The task says "the same check the shop applies at signup and checkout", so calling `is_valid_email(c.email)` is exactly what Outbox does. Should I lowercase/strip first? The check itself strips. Lowercasing is irrelevant to the regex (it's case-insensitive on both sides). So just `is_valid_email(c.email)` is fine and matches exactly what `Outbox.send` does.
+
+Also, is `recipients` used elsewhere? Let me check: `batches` uses `chunked(recipients(customers), BATCH_SIZE)`. So filtering in `recipients` will automatically fix batches too. Good — "everyone else is skipped" applies to both send paths.
+
+Let me also check `render_for` — no change needed; it takes a single customer.
+
+So the change is minimal:
+
+```python
+"""Newsletter sends. Only customers who opted in receive marketing email."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # provider limit per API call
+
+BODY = "Hi {{ first_name }},\n\n{{ intro }}\n\nShop now: {{ link }}\n\nUnsubscribe: {{ unsubscribe }}"
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    """Opted-in customers with an email that passes the same check as signup and checkout."""
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email)]
+```
+
+Should I update the docstring? Currently the module docstring says "Only customers who opted in receive marketing email." Maybe I should update it to mention valid email. Keeping the change small, but the docstring is slightly inaccurate now. A small docstring update is reasonable and fits with "add a docstring or comment where the intent is not obvious". Let me update the module docstring minimally: "Only opted-in customers with a valid email address receive marketing email." Hmm, keep it close to the original. Original: "Only customers who opted in receive marketing email." I could make it "Only customers who opted in and have a valid email receive marketing email." That's fine.
+
+Import order: the codebase imports roughly alphabetically: `from shopkit.customers.models import Customer`, `from shopkit.marketing.campaigns import Campaign`, `from shopkit.notifications.templates import render_template`, `from shopkit.utils.collections import chunked`. So `from shopkit.utils.validation import is_valid_email` goes after the collections import. Good.
+
+Let me double-check `is_valid_email` signature: `def is_valid_email(address: str) -> bool`. It calls `address.strip()` — if `c.email` were None it would fail, but Customer.email is typed as str so no issue.
+
+Edge cases: customers who opted in but have an empty email → skipped. Good.
+
+No other changes needed. The `batches` function continues to work.
+
+Output: full contents of shopkit/marketing/newsletter.py in a file block, and nothing else.

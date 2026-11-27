@@ -191,8 +191,12 @@ Optional model axis (later): an older and a current model of the same family and
 L1/L2/L3/L5/L7, to separate the effect of the model from the effect of context building.
 
 ## Labels and reuse
-Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `ok`.
-In the report and viewer the labels show as outcomes (stored labels unchanged): PASS (ok), FAIL
+Label: `no_fit` > `tool_error` > `broken` (a correctness test failed) > `breaks_tests` > `ok`.
+`breaks_tests` (2026-11-26, applied retroactively by rescore, the v3 archive included): the hidden tests pass,
+but one of the repo's original tests no longer does (`known_tests_broken`: ids that pass on the unmodified fixture
+and don't after the patch, incl. modules that no longer import; `known_tests_total`).
+In the report and viewer the labels show as outcomes (stored labels unchanged): PASS (ok), BROKE KNOWN TESTS
+(breaks_tests; not a pass), FAIL
 (valid answer, a hidden test failed), UNPARSABLE (code, but not in `<file>` blocks: `bad_format`), ASKED TO
 EXPLORE (no code, asked to look at the repo first, in prose or a pretend tool call: `no_code`,
 `tool_request`; checked 2026-11-24 by embeddings: all 231 such thinking-off replies are "let me look first",
@@ -202,9 +206,10 @@ can explore, so not ASKED TO EXPLORE; typically it announced its next step in pr
 (an agent's run with no answer ended by the harness's own limit, L-AG's 1 h or 100 model calls), INVALID (anything else: a run whose reply doesn't say; the reply decides,
 not the stored label, since an agent's `tool_error` only means some call failed along the way), OUT OF TOKENS
 (hit max output), NO FIT. Never "broken" in reader-facing text. Labeling techniques (outcome rules, badges, the embedding checks): `docs/labeling-design.md`.
-Regression check, also separate: `repo_tests_passed/total` = the repo's own `tests/` after the patch
-(catches patches that pass the hidden tests while breaking or deleting code elsewhere; `cbench rescore`
-backfills it from saved replies). Every task's reference solution keeps them green.
+Regression check: `repo_tests_passed/total` = the repo's own `tests/` after the patch (pytest with
+`--continue-on-collection-errors`; total = the original tests plus any the patch added), and it decides
+`breaks_tests` above (catches patches that pass the hidden tests while breaking or deleting code elsewhere;
+`cbench rescore` backfills it from saved replies). Every task's reference solution keeps them green.
 Patch coverage, also separate (`evaluate/patch_coverage.py`, stdlib line tracing, backfilled by rescore):
 `patch_stmts` / `patch_stmts_covered` / `patch_coverage` = the patch's changed statements outside test
 files that the hidden tests ran (a PASS with low coverage = much of the new code unverified; every

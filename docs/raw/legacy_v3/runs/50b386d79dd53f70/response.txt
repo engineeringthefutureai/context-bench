@@ -1,0 +1,79 @@
+<file path="shopkit/shipping/packaging.py">
+"""Boxes and chargeable weight. Carriers bill the larger of actual and volumetric weight."""
+from dataclasses import dataclass
+
+VOLUMETRIC_DIVISOR = 5000          # cm^3 per kg, the common courier convention
+
+# 1 lb = 453.59237 g exactly (international avoirdupois pound).
+GRAMS_PER_LB = 453.59237
+
+
+@dataclass(frozen=True)
+class Box:
+    name: str
+    length_cm: int
+    width_cm: int
+    height_cm: int
+    tare_g: int
+
+    @property
+    def volume_cm3(self) -> int:
+        return self.length_cm * self.width_cm * self.height_cm3 // 1 if False else self.length_cm * self.width_cm * self.height_cm
+
+
+BOXES = [Box("S", 20, 15, 10, 120), Box("M", 35, 25, 15, 250), Box("L", 50, 40, 30, 480)]
+
+
+def dims_weight_g(length_cm: float, width_cm: float, height_cm: float) -> int:
+    """Volumetric weight in grams for a parcel's outer dimensions (L x W x H / 5000 kg), rounded up
+    to the next whole gram."""
+    grams = length_cm * width_cm * height_cm / VOLUMETRIC_DIVISOR * 1000
+    return int(-(-grams // 1))
+
+
+def format_weight(grams: int, unit: str = "kg") -> str:
+    """Weight for display on labels, slips and the storefront. unit is "kg" (default), "g" or "lb":
+    kg drops trailing zeros (1500 -> "1.5 kg"), g is whole grams ("250 g"), lb has two decimals
+    (1500 -> "3.31 lb")."""
+    if unit == "g":
+        return f"{grams} g"
+    if unit == "lb":
+        return f"{grams / GRAMS_PER_LB:.2f} lb"
+    return f"{round(grams / 1000, 2):g} kg"
+
+
+def chargeable_weight_g(box: Box, contents_g: int) -> int:
+    actual = contents_g + box.tare_g
+    return max(actual, dims_weight_g(box.length_cm, box.width_cm, box.height_cm))
+
+
+def pick_box(total_volume_cm3: int) -> int:
+    """Smallest box holds at least `total_volume_cm3` with 20% packing slack."""
+    for box in BOXES:
+        if box.volume_cm3 * 0.8 >= total_volume_cm3:
+            return box
+    raise ValueError(f"no box fits {total_volume_cm3} cm3")
+</file>
+<file path="shopkit/shipping/labels.py">
+"""Shipping label content handed to the label printer service."""
+from shopkit.customers.addresses import format_address
+from shopkit.customers.models import Address
+from shopkit.orders.fulfillment import Parcel
+from shopkit.shipping.packaging import format_weight
+
+
+def label_code(sku: str) -> str:
+    """Compact code printed under the barcode: uppercase, spaces and dashes removed (scanner-friendly)."""
+    return sku.replace(" ", "").replace("-", "").upper()
+
+
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+    """Label content for one parcel of an order: recipient, order/parcel reference and items.
+    When `weight_g` is given, a weight line is added right after the order/parcel line, in pounds
+    for US addresses and kilograms otherwise, using the shop's standard weight display."""
+    lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+    if weight_g is not None:
+        lines.append(f"Weight: {format_weight(weight_g, 'lb' if to.country == 'US' else 'kg')}")
+    lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+</file>

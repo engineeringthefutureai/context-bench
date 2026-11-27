@@ -1,0 +1,197 @@
+To satisfy the task requirements, I need to modify three files:
+1. `shopkit/orders/models.py`: Add the `gift_message` field to `Order`.
+2. `shopkit/orders/fulfillment.py`: Modify `split_into_parcels` to ensure the first `Parcel` retains the order's `gift_message` (adding a field to `Parcel` to hold it), and update `packing_slip` to print it if present.
+3. `shopkit/api/serializers.py`: Include `gift_message` in the `order` serialization dictionary.
+
+I don't see the customer invoice rendering logic explicitly requested to be changed beyond ensuring it doesn't show up. `render_invoice_text` in `shopkit/invoices/render.py` likely uses `order.lines`, `order.id`, etc. Since it's a separate function and likely doesn't iterate over all attributes or specifically request `gift_message`, it won't appear unless explicitly added. I will leave it alone.
+
+Here are the file modifications.
+
+<file path="shopkit/orders/models.py">
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+    gift_message: str = ""
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+</file>
+<file path="shopkit/orders/fulfillment.py">
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from .models import Order, OrderLine
+
+
+MAX_ITEMS_PER_PARCEL = 10
+
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)
+    gift_message: str = ""
+
+    @property
+    def item_count(self) -> int:
+        return sum(qty for _, qty in self.items)
+
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    """
+    Flatten all order lines into a single pick list.
+    """
+    items: list[tuple[str, int]] = []
+    for order in orders:
+        for line in order.lines:
+            items.append((line.sku, line.qty))
+    return items
+
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    """
+    Split an order's lines into parcels, each containing at most `max_items` units.
+    The first parcel carries the order's gift message.
+    """
+    total_items = sum(line.qty for line in order.lines)
+    if total_items == 0:
+        return []
+
+    parcels: list[Parcel] = []
+    current_items: list[tuple[str, int]] = []
+    current_count = 0
+    parcel_number = 0
+
+    for line in order.lines:
+        remaining = line.qty
+        while remaining > 0:
+            if parcel_number == 0 and not parcels:
+                # Ensure the first parcel is created even if empty initially?
+                # Actually, we create parcels as we fill them.
+                pass
+            
+            space = max_items - current_count
+            take = min(remaining, space)
+            
+            if take > 0:
+                if not current_items and parcel_number == 0:
+                    # First parcel
+                    pass
+                current_items.append((line.sku, take))
+                current_count += take
+                remaining -= take
+            
+            # If current parcel is full, finalize it
+            if current_count >= max_items:
+                parcels.append(Parcel(
+                    order_id=order.id,
+                    number=parcel_number,
+                    items=current_items,
+                    gift_message=order.gift_message if parcel_number == 0 else ""
+                ))
+                parcel_number += 1
+                current_items = []
+                current_count = 0
+
+    # Finalize the last parcel if it has items
+    if current_items:
+        parcels.append(Parcel(
+            order_id=order.id,
+            number=parcel_number,
+            items=current_items,
+            gift_message=order.gift_message if parcel_number == 0 else ""
+        ))
+
+    return parcels
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    """
+    Render a packing slip for a parcel.
+    """
+    lines = [
+        f"Packing Slip - Parcel #{parcel.number}",
+        f"Order ID: {parcel.order_id}",
+        f"Weight: {weight_g}g",
+        "-" * 30,
+    ]
+
+    for sku, qty in parcel.items:
+        lines.append(f"{sku} x{qty}")
+
+    if parcel.gift_message:
+        lines.append("-" * 30)
+        lines.append(f"Gift Message: {parcel.gift_message}")
+
+    return "\n".join(lines)
+</file>
+<file path="shopkit/api/serializers.py">
+from shopkit.orders.models import Order
+from shopkit.customers.models import Customer
+from shopkit.catalog.models import Product
+from shopkit.api.auth import ApiKey
+from shopkit.money import format_money
+
+
+def money(cents: int, currency: str = 'USD') -> dict:
+    return {
+        "amount": cents / 100,
+        "currency": currency,
+        "display": format_money(cents, currency)
+    }
+
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price": money(p.price_cents),
+        "active": p.active
+    }
+
+
+def order(o: Order, status: str | None = None) -> dict:
+    return {
+        "id": o.id,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit_cents": line.unit_cents,
+                "total_cents": line.total_cents
+            }
+            for line in o.lines
+        ],
+        "currency": o.currency,
+        "gift_message": o.gift_message,
+        "total": money(o.total_cents, o.currency),
+        **({"status": status} if status is not None else {})
+    }
+
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier
+    }
+</file>

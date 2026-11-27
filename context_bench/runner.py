@@ -37,7 +37,7 @@ import httpx
 from . import bundle, results
 from .apply import (UnsafePath, apply_files, changed_files, format_status, make_sandbox, parse_files,
                     parse_files_lenient, unified_patch)
-from .evaluate.hidden_tests import run_hidden_tests, run_repo_tests
+from .evaluate.hidden_tests import known_tests_broken, repo_test_ids, run_hidden_tests, run_repo_tests
 from .levels import LEVELS
 from .levels.l_ag_antigravity import (ModelQuotaError, percentiles as ag_percentiles, quota_detail as ag_quota_detail,
                                      server_error as ag_server_error, container_error as ag_container_error, quota_error as ag_quota_error, run_ag,
@@ -366,8 +366,8 @@ class Experiment:
                 error = f"unsafe path: {e}"
             passed, total, reuse, tests_out = run_hidden_tests(sandbox, task.hidden_tests, self.shared_dir)
             if files:
-                r_passed, r_total, r_out = run_repo_tests(sandbox, self.shared_dir)
-                perf.update(repo_tests_passed=r_passed, repo_tests_total=r_total)
+                repo_fields, r_out = self._repo_test_fields(rc.repo_size, sandbox)
+                perf.update(repo_fields)
                 tests_out += "\n--- repo's own tests ---\n" + r_out
                 if patch is not None:
                     perf.update(patch_coverage(sandbox, task.hidden_tests, self.shared_dir, before, files),
@@ -382,6 +382,8 @@ class Experiment:
             perf["format_status"] = "tool_request"
 
         label = "ok" if total > 0 and passed == total else "broken"
+        if label == "ok" and perf.get("known_tests_broken"):
+            label = "breaks_tests"      # the hidden tests pass, but some of the repo's own tests no longer do
         if agent and agent.tool_errors and not files:
             label, error = "tool_error", f"{agent.tool_errors} tool errors and no <file> blocks"
         result = _result(**base, label=label, ctx_fits=True, tests=(passed, total, reuse),
@@ -465,8 +467,10 @@ class Experiment:
                 patch_file = self.runs_dir / r["run_id"] / "patch.diff"
                 r.update(self._seen_metrics(task, seen, ws,
                                             patch_file.read_text() if patch_file.is_file() else None))
-            if "repo_tests_total" not in r:
+            if "known_tests_total" not in r:          # before 2026-11-26: no per-test ids, collection errors miscounted
                 r.update(self._repo_tests(r["repo_size"], files))
+            if r["label"] in ("ok", "breaks_tests"):
+                r["label"] = "breaks_tests" if r.get("known_tests_broken") else "ok"
             tests_file = self.runs_dir / r["run_id"] / "tests.txt"
             if r.get("reuse_passed") is False and tests_file.is_file():
                 section = tests_file.read_text().partition("--- reuse test ---")[2]
@@ -499,18 +503,40 @@ class Experiment:
                     **tests_added(before, files)}
 
     def _repo_tests(self, repo_size: str, files: dict[str, str]) -> dict:
-        """repo_tests_passed/total for a saved reply: apply its <file> blocks to a fresh sandbox and run
-        the repo's own tests (None/None without file blocks)."""
+        """The repo's-own-tests fields for a saved reply: apply its <file> blocks to a fresh sandbox and run
+        the repo's own tests (all None without file blocks)."""
+        empty = dict.fromkeys(("repo_tests_passed", "repo_tests_total", "known_tests_total", "known_tests_broken"))
         if not files:
-            return {"repo_tests_passed": None, "repo_tests_total": None}
+            return empty
         with tempfile.TemporaryDirectory(prefix="cbench-repotests-") as tmp:
             box = make_sandbox(self._path(self.config["repos"][repo_size]), Path(tmp) / "repo")
             try:
                 apply_files(box, files)
             except UnsafePath:
-                return {"repo_tests_passed": None, "repo_tests_total": None}
-            passed, total, _ = run_repo_tests(box, self.shared_dir)
-        return {"repo_tests_passed": passed, "repo_tests_total": total}
+                return empty
+            return self._repo_test_fields(repo_size, box)[0]
+
+    def _known_tests(self, repo_size: str) -> set[str]:
+        """Ids of the repo's own tests on the unmodified fixture (all of them pass; cached per repo)."""
+        cache = self.__dict__.setdefault("_known_cache", {})
+        if repo_size not in cache:
+            with tempfile.TemporaryDirectory(prefix="cbench-known-") as tmp:
+                box = make_sandbox(self._path(self.config["repos"][repo_size]), Path(tmp) / "repo")
+                passed, collected, out = repo_test_ids(box, self.shared_dir)
+            if passed != collected:
+                raise RuntimeError(f"repo {repo_size}: its own tests don't all pass unmodified:\n{out[-2000:]}")
+            cache[repo_size] = passed
+        return cache[repo_size]
+
+    def _repo_test_fields(self, repo_size: str, sandbox: Path) -> tuple[dict, str]:
+        """Run the repo's own tests in a patched sandbox: repo_tests_passed/total (total = the original tests
+        plus any the patch added, so a module that no longer imports counts all its tests as failed),
+        known_tests_total and known_tests_broken (original tests that don't pass), and the output."""
+        known = self._known_tests(repo_size)
+        passed, collected, out = repo_test_ids(sandbox, self.shared_dir)
+        total = known | {t for t in collected if "::" in t}     # leave out module-level collection errors
+        return {"repo_tests_passed": len(passed & total), "repo_tests_total": len(total),
+                "known_tests_total": len(known), "known_tests_broken": known_tests_broken(known, passed)}, out
 
     def backfill_cacheable(self, model_key: str) -> int:
         """tokens_cacheable (and the true per-turn peak) for L7 runs recorded before they existed or

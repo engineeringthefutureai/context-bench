@@ -1,0 +1,85 @@
+Let me understand the task.
+
+The task: "Marketing's CRM sync needs a lookup from email address to customer. Add `by_email(customers) -> dict[str, Customer]` to the customers report module, keyed by the email address trimmed and lowercased, and built the same way the shop builds its other lookup tables."
+
+Target file: `shopkit/reports/customers_report.py`.
+
+Looking at the context:
+- `shopkit/customers/models.py`: `Customer` has an `email: str` field.
+- `shopkit/customers/service.py`: `find_by_email` does `email = email.strip().lower()`, and the service keeps a `_by_id` dict. Hmm, "the same way the shop builds its other lookup tables" — probably referring to a dict comprehension or `group_by`? Let me look at the available utils.
+
+The report module uses:
+```python
+from shopkit.utils.collections import group_by
+from shopkit.utils.numbers import safe_ratio
+```
+
+"Built the same way the shop builds its other lookup tables" — in the service it's `self._by_id[customer.id] = customer`, and the find functions are lookups into `self._by_id`. But the report module's other functions are… The report module builds dicts with dict comprehensions: `{m: len(cs) for m, cs in sorted(groups.items())}` and `{t: len(cs) ...}`.
+
+Probably "the same way the shop builds its other lookup tables" is a generic expression meaning a simple dict mapping. The key point: key by the email address trimmed and lowercased: `c.email.strip().lower()`.
+
+Duplicates? If two customers share the same email after normalization, what happens? In the service, registering a duplicate raises EmailTaken, so duplicates shouldn't happen, but in the report's context we just need a simple lookup. The most reasonable: a dict comprehension where later entries overwrite earlier ones. Or should duplicates raise an exception? The request doesn't specify. Keep it simple: `{c.email.strip().lower(): c for c in customers}`.
+
+Should I use `group_by`? `group_by` is used for grouping with a key function, but `by_email` is a lookup table (dict[str, Customer]), not groups. The service builds `_by_id` by direct assignment. The simplest thing consistent with the module: a dict comprehension.
+
+Edge cases: email might be an empty string. `.strip().lower()` on an empty string is fine. All Customer emails are presumably strings. Should I guard against non-string emails? Models define email: str. Not necessary.
+
+Should the function sort or preserve order? For lookup tables order doesn't matter. In Python 3.7+ dict comprehensions preserve insertion order anyway.
+
+Type hints: the file uses `list[Customer]`, `dict[str, int]`, so `dict[str, Customer]`.
+
+Docstring: this module has a module docstring but no function docstrings. So no docstring needed to match the style, or maybe a short comment? The existing functions have no docstrings. Keep it consistent: no docstring, or a short one? The instruction says "add a docstring or comment where intent isn't obvious." The intent is obvious from the name and the task. Match the surrounding code: no docstring. Actually, the note about the email normalization might be worth a short comment? The key expression `c.email.strip().lower()` makes it clear enough. Keep it minimal and match the style.
+
+Implementation:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+Where to place it in the file? The order in the module is: `signups_by_month`, `opt_in_rate`, `tier_mix`, `active_since`. Append at the end, or place it near the top? Adding at the end is the most minimal change.
+
+Wait — "built the same way the shop builds its other lookup tables." Let me think about what "lookup tables" the shop has. In `service.py`, `self._by_id` is a dict keyed by id, populated on registration. `db.getCustomerByEmail` does a select. Hmm. The expression probably just means "a plain dict keyed by normalized email." There might be something like a `build_lookup` in `shopkit/utils/collections`? It's not shown. `group_by` is shown. If the shop's lookup tables are built with `group_by` and then take the first element… that would be unnatural for a lookup.
+
+Given the available context, a dict comprehension is the most reasonable interpretation. Duplicate emails: the last one wins. Alternatively, if I wanted to be defensive against silently returning wrong data on duplicates… but the service guarantees uniqueness of normalized email (register raises EmailTaken on find_by_email match). So duplicates in practice can't exist. A simple comprehension is correct.
+
+Another consideration: should I skip customers with empty email? No — emails are always present (required for registration).
+
+Final file:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = [c for c in customers if c.joined]
+    groups = group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))
+    return {m: len(cs) for m, cs in sorted(groups.items())}
+
+
+def opt_in_rate(customers: list[Customer]) -> float:
+    return safe_ratio(sum(c.marketing_opt_in for c in customers), len(customers))
+
+
+def tier_mix(customers: list[Customer]) -> dict[str, int]:
+    return {t: len(cs) for t, cs in sorted(group_by(customers, key=lambda c: c.tier).items())}
+
+
+def active_since(customers: list[Customer], since: date) -> list[Customer]:
+    return [c for c in customers if c.joined and c.joined >= since]
+
+
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return {c.email.strip().lower(): c for c in customers}
+```
+
+This is the complete change. No new imports needed (`Customer` is already imported).
+
+Double-check: `safe_ratio(sum(...), ...)` — sum of bools, fine, unchanged.
+
+The only change is adding the function. Output the entire file in the requested format.

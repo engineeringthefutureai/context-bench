@@ -1,0 +1,163 @@
+We need answer with file blocks only. Need analyze change.
+
+We need add restocking_fee_cents(order) to ReturnRequest in shopkit/orders/returns.py. 12.5% of return's refund amount for changed_mind, 0 otherwise. Round exactly like shop rounds other percentage amounts such as tax and discounts. Context has shopkit/utils/numbers.apply_rate: percent of cents rounded half-up to whole cent (half away from zero). apply_rate(1999,15)->300, -1999->-300. It says used for tax, commission, discounts. So use apply_rate(amount, 12.5) if reason == changed_mind else 0. But be careful: task says percentage of money round exactly the way shop rounds other percentage amounts such as tax and discounts. apply_rate uses Decimal(str(rate_pct)) / 100 with ROUND_HALF_UP. For 12.5, Decimal("12.5") exact? Decimal(str(12.5)) = Decimal('12.5'), yes exact decimal. For integer cents. Good.
+
+Need import apply_rate from shopkit.utils.numbers. Existing imports: dataclass, field, date, timedelta; errors, Order, short_code. Add from shopkit.utils.numbers import apply_rate.
+
+Method:
+    def restocking_fee_cents(self, order: Order) -> int:
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), 12.5)
+
+Need perhaps constant RESTOCKING_FEE_PCT = 12.5? Could add near top. But keep minimal. Maybe define RESTOCKING_FEE_PCT = "12.5" or 12.5. Since apply_rate accepts float | Decimal | str. Use 12.5 okay? It converts via str. But to be exact, string "12.5" avoids any float weirdness. The request says 12.5%, and other percentage amounts likely use apply_rate with rate_pct. In coupons, value is int percent, apply_rate(order_total_cents, coupon.value). For 12.5, use "12.5" or Decimal("12.5")? apply_rate type includes str. Simpler: RESTOCKING_FEE_PCT = "12.5" then apply_rate(..., RESTOCKING_FEE_PCT). But constants are numeric? If float 12.5, str(12.5) = '12.5' in Python, exact enough. But maybe to be precise use Decimal? Need import Decimal? Not necessary. apply_rate already converts to Decimal(str(rate_pct)). If pass 12.5, str returns '12.5'. If pass "12.5", exact. Type of constants in codebase: RETURN_WINDOW_DAYS = 30, REASONS tuple. Could add RESTOCKING_FEE_PCT = 12.5? For percentage, string is okay but maybe style: RESTOCKING_FEE_PCT = 12.5. But docstring says rate_pct float | Decimal | str. We can use "12.5" to avoid float. Is that weird? Could be:
+RESTOCKING_FEE_PCT = "12.5"  # restocking fee as a percentage
+Then method uses apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT). That's exact.
+
+But consider refund_cents may be zero? items could be empty? ReturnRequest.items dict[str,int] could be empty? open_return validation only iterates items; empty allowed? If empty, refund 0, fee 0. apply_rate(0,12.5)=0. Fine.
+
+Need ensure method does not change approval etc.
+
+Need maybe if changed_mind returns need manual approval; restocking fee still calculated regardless approved? Yes based on reason.
+
+Need consider if reason not in REASONS? ReturnRequest may be constructed directly with invalid reason; method returns 0 for every other reason. Good.
+
+Need consider rounding negative? refund_cents nonnegative if valid; if negative items not possible? Could be constructed with negative qty? open_return validates qty >=1. But method generic: apply_rate(-1999,12.5) -> -250? Actually Decimal(-1999)*12.5/100 = -249.875; ROUND_HALF_UP? Python Decimal ROUND_HALF_UP is round half away from zero? Yes. apply_rate doc says half away from zero. Good.
+
+Need output only file block. Need full file.
+
+Potential hidden tests: They may test restocking_fee_cents(order) for changed_mind returns: refund amount * 12.5% rounded half-up. E.g. refund 1001 cents: 125.125 -> 125? Half-up: 125.125 to integer: 125 (since fractional .125). 1001? Need half-up to nearest integer: .5 up. apply_rate: Decimal(1001)*12.5/100 = 125.125 quantize 1 => 125. For 1000 => 125. For 999 => 124.875 => 125. For 1999 => 249.875 => 250. For 1? 0.125 -> 0. For 4? 0.5 -> 1? ROUND_HALF_UP: .5 up away from zero. Good.
+
+Need import Order? Already imported. Need no circular import? returns already imports Order. Adding utils.numbers likely no circular.
+
+Could there be a shopkit/money module? But numbers.py explicitly. Use it.
+
+Double-check file content:
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+RESTOCKING_FEE_PCT = "12.5"
+
+...
+
+class ReturnRequest:
+    ...
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        """Restocking fee for changed-mind returns; zero otherwise.
+
+        Rounded with the shop's standard percentage rounding (half away from zero).
+        """
+        """
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+
+Maybe no docstring needed? Could add. Keep style: Existing methods no docstring. But comment for intent? Could include docstring concise.
+
+Need consider that changed_mind is in REASONS; maybe use CHANGED_MIND constant? There's tuple. Could compare to "changed_mind". Existing code uses reason != "changed_mind". So okay.
+
+Need maybe restocking fee should be computed from refund amount before fee? yes 12.5% of return's refund amount. Not of order total. Good.
+
+Could hidden tests expect method name exactly. Yes.
+
+Potential nuance: "round it exactly the way the shop rounds its other percentage amounts such as tax and discounts." In numbers.apply_rate doc: rounded half-up to a whole cent (half away from zero). Use apply_rate. Good.
+
+Need ensure no other files changed. Only target file.
+
+Let's think if there is a tax calculation elsewhere? Not provided. But numbers.apply_rate is canonical. Good.
+
+Check if apply_rate import path exists? Context shows shopkit/utils/numbers.py. Good.
+
+Now output only file.
+
+Need no explanations. Ensure valid syntax.
+
+Full file:
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+RESTOCKING_FEE_PCT = "12.5"
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=RETURN_WINDOW_DAYS):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+
+Should we include docstring for restocking? Maybe yes:
+    def restocking_fee_cents(self, order: Order) -> int:
+        """12.5% of the refund for changed-mind returns, using standard percentage rounding."""
+        ...
+But style in module methods no docstrings; utils has docstrings. Could include short docstring. Reviewer okay.
+
+Potential hidden style: no constant if not needed. Constant may be okay. But adding RESTOCKING_FEE_PCT as string maybe tests inspect? unlikely. Could simply use 12.5. Which is more natural? Task says 12.5%. In Python, rate 12.5 float. apply_rate docs supports float. If we use "12.5" maybe unexpected? It's still a rate percent. To fit surrounding code, coupons use int value, apply_rate(order_total_cents, coupon.value). There is no 12.5 elsewhere. I'd use 12.5 maybe simpler. But exact arithmetic: 12.5 float is exactly representable binary? 12.5 = 25/2 yes exactly, str gives 12.5. So no issue. Use RESTOCKING_FEE_PCT = 12.5. If someone changes to 12.55 float str maybe '12.55' okay? But float to str shortest. Still. Using string is more explicit exact. Which is more consistent? The type of rate_pct includes str, but constants are usually numbers. RESTOCKING_FEE_PCT = 12.5 seems okay.
+
+Need maybe if reason is changed_mind and refund_cents returns KeyError if sku missing? But valid request should have items only ordered skus. refund_cents currently could KeyError if item sku not in order. open_return prevents. If ReturnRequest constructed with invalid sku, both refund and fee key error. Fine.
+
+Need maybe restocking fee should not apply if approved False? No.
+
+Potential product requirement: "Changed-mind returns will now carry a 12.5% restocking fee. Add restocking_fee_cents(order) to ReturnRequest: 12.5% of the return's refund amount for changed-mind returns, 0 for every other reason." It doesn't say to deduct from refund in this method; just calculate fee. Good.
+
+Could hidden tests call ReturnRequest(order.id, items, reason).restocking_fee_cents(order). Need dataclass field order. Good.
+
+Need ensure from shopkit.utils.numbers import apply_rate doesn't create import cycle: utils.numbers only decimal, no shopkit. Fine.
+
+Need maybe shopkit.orders.models imports returns? If returns imports numbers not issue.
+
+Now final with only file. Ensure no trailing analysis. final can include file.

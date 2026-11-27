@@ -1,0 +1,125 @@
+To satisfy the requirement that stock transfers must appear in the audit trail and reach notification subscribers, I need to publish a domain event when a transfer succeeds.
+
+Looking at the existing code:
+1. `shopkit/orders/tracking.py` publishes events like `f"order.{status}"` with `order_id` using `self._bus.publish(...)`.
+2. `shopkit/audit_log.py` subscribes to events and records them under the "system" actor, using `event.payload.get("sku")` for the target. This implies events should have a `sku` key in the payload.
+3. `shopkit/notifications/subscribers.py` subscribes to specific events like `low_stock` and extracts `sku` and `available` from the payload.
+
+The task says: "announce it the same way the rest of the shop announces domain events, with the SKU, quantity, source and destination, so the audit trail files it under the SKU."
+
+I will use the `BUS` from `shopkit.events` (as imported in `tracking.py`) or create a local reference. Looking at `shopkit/orders/tracking.py`, it imports `BUS` from `shopkit.events`. I'll do the same in `transfers.py`.
+
+The event name should be descriptive. Given the pattern `order.{status}`, a name like `inventory.transfer` seems appropriate.
+The payload should include `sku`, `qty`, `source`, and `destination`. The audit log will pick up `sku` to file it under the SKU.
+
+I need to modify `shopkit/inventory/transfers.py` to:
+1. Import `BUS` from `shopkit.events`.
+2. After the successful transfer logic, publish the event.
+
+Let's refine the event name. The task doesn't specify an exact name, but "announce it the same way" implies using the `EventBus`. I'll stick to a clear name like `inventory.transfer`.
+
+Wait, looking at `shopkit/events.py` (which is not fully provided but referenced), `EventBus` likely has a `publish` method. The `BUS` object is a singleton instance of `EventBus`.
+
+Let's double check if `BUS` is available. In `tracking.py`:
+`from shopkit.events import BUS, EventBus`
+So `BUS` is an instance.
+
+In `transfers.py`, I will add:
+`from shopkit.events import BUS`
+
+And inside `transfer()`, after `network.get(destination).stock.receive(sku, qty)`:
+`BUS.publish("inventory.transfer", sku=sku, qty=qty, source=source, destination=destination)`
+
+I should also make sure `Transfer` creation happens, but the event is the key change.
+
+One detail: `TransferFailed` is raised before any changes are made, so it naturally announces nothing.
+
+Let's write the updated file.
+
+```python
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.events import BUS
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    t = Transfer(sku, qty, source, destination)
+    BUS.publish("inventory.transfer", sku=sku, qty=qty, source=source, destination=destination)
+    return t
+```
+
+I'll make sure the import for `BUS` is correct. The context shows `from shopkit.events import BUS, EventBus` in `tracking.py`. So `BUS` is the right name.
+
+One thing to check: does `EventBus.publish` take `**kwargs`?
+In `tracking.py`: `self._bus.publish(f"order.{status}", order_id=order_id)`.
+In `audit_log.py`: `event.payload` is a dict.
+It seems `publish(name, **payload)` is the signature.
+
+The code looks solid. I will now generate the file.
+
+<file path="shopkit/inventory/transfers.py">
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import BUS
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import utc_now
+
+from shopkit.errors import Conflict
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    result = Transfer(sku, qty, source, destination)
+    BUS.publish("inventory.transfer", sku=sku, qty=qty, source=source, destination=destination)
+    return result
+</file>

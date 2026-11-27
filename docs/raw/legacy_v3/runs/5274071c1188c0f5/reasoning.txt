@@ -1,0 +1,81 @@
+To understand the structure of the codebase, let's first explore the repository. In particular, I'll focus on the following points:
+1. Order model
+2. Invoice generation
+3. Warehouse JSON export
+
+Let's check the file listing and related code.
+
+
+Let's check the main files: invoices/render.py, orders/export.py, invoices/issuing.py, and promotions/rules.py.
+
+
+Let's take a look at other files: money.py (format_money), utils/numbers.py (apply_rate), checkout.py (creates orders), subscriptions.py, api/serializers.py, tax/calculator.py, returns.py, reports/sales.py, and the layout of invoices. Also, let's check how errors are handled (errors.py) — whether the codebase validates input by raising ValueError.
+
+Let's try reading these.
+
+
+Let me take a look at other files that might need to be updated: promotions/coupons.py, api/serializers.py, orders/service.py, invoices/layout.py. Also, let me check the tests to understand the expected format. Let me read a few more files.
+
+
+Okay, let me check the other files that use Order.total_cents: tax/calculator.py, reports, refunds, and also whether there's an HTML invoice renderer (layout says "shared by the text and HTML invoice renderers"). Let me list the invoices directory and orders directory, and check the HTML renderer.
+
+Also, the task is: "The order total must reflect the discount. The discount amount is rounded down to the cent." In other words, Order.total_cents should return subtotal − discount, where discount = floor(subtotal * percent / 100). Note: apply_rate uses half-up rounding, but the task explicitly says to round down, so I need to compute floor division: (subtotal * percent) // 100. For positive subtotal, that's floor. If subtotal is negative... unlikely, but the floor of (total*percent/100) — Python's // is floor for negative numbers too, and the "round down" of discount amount... I'll keep it simple: discount = (total * percent) // 100. Hmm, but if percent is 0, discount is 0.
+
+Actually wait — should discount_cents be a property? Let me think about the design:
+
+- Add `discount_percent: int = 0` field to Order, with a 0–100 range.
+- Validation: raise ValueError when out of range (fail clearly on invalid input). The codebase uses ShopError for business rule failures. In a dataclass model, a ValueError in `__post_init__` is probably appropriate. Let me check if there are other models that do validation, e.g., in customers/models.py or catalog/models.py.
+
+- `discount_cents` property: floor(total * percent / 100).
+- `total_cents` property: subtotal − discount. Need a separate subtotal property (sum of lines), which the old total_cents represented. Should I add a `subtotal_cents` property? The checkout code uses `order.total_cents` as the subtotal before discount... wait, that's for cart items, not order discounts. The checkout order itself doesn't have discount_percent (default 0), so total_cents == subtotal. But semantically, the order's total now reflects the discount.
+
+Hmm, be careful: the existing behavior of `total_cents` changes. The task says "the order total must reflect the discount" — so Order.total_cents = subtotal − discount. That's exactly what's asked for. Callers like tax, refunds, and reports use order.total_cents — they should be using the discounted total, which is correct.
+
+But is there any place relying on total_cents as the sum of lines? In checkout: `subtotal = order.total_cents`, then `tax = order_tax(order, ship_to)`. Let me check order_tax — it might compute per line. And `tax * (subtotal - discount) // subtotal`. If discount_percent were set on that order... checkout doesn't set discount_percent, so it's 0. No problem.
+
+Let me check whether tax/calculator.py computes based on order.total_cents or on lines.
+
+I also need to check the HTML renderer (invoices/text and HTML). Let me list the invoices directory and orders directory, and check refunds.
+
+
+I'm looking at the changes needed for the models file. I need to add a `discount_percent` field to the Order class with a default of 0, validate that it stays between 0 and 100, and ensure the total_cents calculation accounts for the discount.
+
+For the discount calculation, I'll compute the discount amount using floor rounding (truncating toward zero for negative values) and subtract it from the raw total. The validation can happen in a `__post_init__` method that raises a ValueError if the discount_percent falls outside the valid range.
+
+Now I'm working through whether to use the shared `apply_rate` utility from the numbers module, but it uses ROUND_HALF_UP while the requirement specifies rounding down.
+
+Writing discount calculation logic... Defining the discount calculation...
+
+Now I'm thinking through the validation for discount_percent — it needs to stay between 0 and 100, so I'll add that check in the Order class's post-init method. For the invoice display, I need to add the discount amount as its own line right before the total, but only when a discount was actually applied. Formatting the discount line with the right alignment...
+
+I'm reconsidering whether to include the "x" notation at all. Looking at the existing format for line items, each has SKU, quantity, unit price, and total. For a discount line, it's simpler to just show the label, amount, and a negative sign to indicate it's a reduction. Let me check how the test suite expects this to be formatted. I need to decide whether to use a negative sign in the discount display, but without test fixtures to reference, I should go with what makes the most sense: showing "Discount (N%)" with the formatted amount, keeping it consistent with how the codebase handles other amounts through format_money. The question is whether to include the sign or let the format handle it.
+
+Now I'm updating the export function to include the discount percentage in the JSON payload, placing it after the currency field to keep the structure clean. I'm checking what other code uses order.total_cents across the codebase — fulfillment, reports, tax calculations, and subscriptions all consume it, so I need to be careful about changes to that property. The checkout process is where I need to focus: it builds orders without discounts, calculates the subtotal from the total, then applies any coupon discount separately.
+
+If I modify total_cents to subtract the discount, checkout's behavior stays the same since it uses the default discount_percent of 0. For tax calculations, they happen before the order's own discount percent is applied in the current system, which is fine for this change. Now I'm checking the dataclass field ordering — adding discount_percent after lines works with the default factory pattern.
+
+The positional argument order is id, lines, currency, discount_percent, so existing test code that passes these positionally will work correctly. I could reorder to match the field declaration, but there's no strong reason to change the position since the current order maintains backward compatibility. For validation, I should add a __post_init__ check to ensure discount_percent stays within the 0-100 range, raising a ValueError for invalid values.
+
+I'm also considering edge cases like negative totals (though orders with negative line items would be unusual) and large values (which Python handles fine with arbitrary precision integers). Let me verify there aren't other code paths constructing orders from keyword arguments that might break.
+
+Looking at the order construction patterns across the codebase — subscriptions and checkout both use keyword arguments, and I don't see any positional currency arguments, so adding the discount_percent field after currency should be safe. I'm also checking the API serializer to confirm it's not expected to include discount information in the response, and the task only requires updating the warehouse JSON export, so that's fine. For the invoice rendering, I need to make sure the discount shows on its own line before the total.
+
+Now I'm deciding on the label format for the discount line — options like "Discount (15%)" or "Discount 15%" — and I'll go with the clearer version that includes the percentage in parentheses.
+
+I'm also working out the alignment for the amount column, which should be right-aligned to width 12 to match the existing formatting. For the sign, I'm leaning toward using a minus sign to make it clear this is a reduction, so the format would be `-` followed by the formatted amount. I'm settling on using `f"Discount ({order.discount_percent}%)"` as the label without the percent sign since `format_money` already handles the currency symbol and dollar formatting. For the models file, I'm importing the rounding mode from the decimal module to keep things self-contained rather than pulling from shared utilities.
+
+Actually, I'll just use integer floor division with `//` instead — it's cleaner and more Pythonic, giving the exact semantics of "round down to whole cents" with zero imports.
+
+Now I'm thinking through the validation logic for the discount percent. I need to decide between raising `ValueError` or using a domain-specific error like `ShopError`. Since `Order` is a plain dataclass in the models layer, importing from the errors module would be a cross-layer dependency, so `ValueError` makes more sense as the natural Python exception for invalid constructor input. I'm checking how other domain model classes in the codebase handle validation to make sure I'm following the right pattern. I need to add validation that raises ValueError if discount_percent is outside the 0-100 range. I'll create a helper method that calculates the discount amount in cents by multiplying the subtotal by the discount percentage and dividing by 100.
+
+Writing helper methods... I'm debating the alignment for the discount line in the invoice display — whether to match the 36-character width of the TOTAL label or use 34 characters, and whether to include the percentage in parentheses for clarity, and whether to prepend a minus sign to the amount. Without test visibility, I'll go with a reasonable default that looks professional and consistent with the rest of the invoice layout. I'm working through the exact formatting for the discount line, settling on a 36-character label with the formatted amount right-aligned in a 12-character field to match the total line's column positions. For the sign, I'm leaning toward displaying the discount as a positive amount since the label already indicates it's a reduction and the total line shows the net result. I'll keep the discount line positive since that's how most invoices format it—showing the discount amount itself, then the final total. Now I need to decide whether to modify the render function or have issuing.py handle it separately, and I'm leaning toward keeping it in render since that's where the main invoice text gets built. Let me also verify that credit notes don't need updating. I'll put a docstring on `discount_cents` explaining the rounding behavior to clarify the intent. Now I'm writing out the updated models file with the `Order` dataclass that includes the `discount_percent` field and its validation.
+
+Writing models code... I'm verifying the rounding behavior for the discount calculation—with the floor division approach, a 5% discount on 1999 cents correctly rounds down to 99 cents rather than 100, which is what we need. Now I'm adding a property to return this calculated discount amount, and checking that there are no naming conflicts with existing discount-related code in the promotions module.
+
+I'm also tracing through the callers to make sure the changes are backward-compatible: checkout.py uses a separate discount_cents parameter on its Quote dataclass, the API serializer will now reflect discounted totals correctly, and the order construction in subscriptions and test files all work with the new discount_percent parameter defaulting to zero.
+
+For validation, I'm checking that the type annotation `discount_percent: int = 0` properly rejects non-integers like `10.5` with a ValueError, and that edge cases like 100% discount (zeroing out the total) and 0% discount (no change) both work as expected.
+
+Now I need to finalize the three files: models.py, invoices/render.py, and orders/export.py. For the export file, I'm deciding whether to include `discount_percent` for all orders or only when it's non-zero—the task says the export "must include the discount," so I'll include it unconditionally for consistency.
+
+I'm also verifying the JSON export format matches the existing style: the payload stays as a list of dicts with keys in the same order, `discount_percent` goes after `currency`, and the dataclass fields use the same ordering as the model. I should check if there's an `orders/__init__.py` file, though it's not relevant to this change.

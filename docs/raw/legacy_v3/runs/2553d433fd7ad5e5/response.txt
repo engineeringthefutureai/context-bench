@@ -1,0 +1,77 @@
+
+
+<file path="shopkit/orders/returns.py">
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window.
+
+The window is a deployment setting: RETURN_WINDOW_DAYS (30) by default, overridden
+per deployment with the SHOPKIT_RETURN_DAYS environment variable.
+"""
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+
+RETURN_WINDOW_DAYS = 30  # Default; deployments override with SHOPKIT_RETURN_DAYS.
+RETURN_WINDOW_ENV = "SHOPKIT_RETURN_DAYS"
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+
+def return_window_days(env: Mapping[str, str] | None = None) -> int:
+    """Return window for this deployment, in days.
+
+    SHOPKIT_RETURN_DAYS overrides the default of RETURN_WINDOW_DAYS, like the
+    shop's other SHOPKIT_* deployment settings. Read at call time, so a
+    changed environment takes effect without re-importing.
+    """
+    source = os.environ if env is None else env
+    raw = (source.get(RETURN_WINDOW_ENV) or "").strip()
+    if not raw:
+        return RETURN_WINDOW_DAYS
+    if not raw.lstrip("+-").isdigit():
+        raise ShopError(f"{RETURN_WINDOW_ENV} must be a whole number of days, got {raw!r}", value=raw)
+    days = int(raw)
+    if days < 0 or days < 0:
+        raise ShopError(f"{RETURN_WINDOW_ENV} must not be negative, got {days}", value=raw)
+    return days
+
+
+def open_return(order: Order, delivered_on: date, items: dict[str, int], reason: str,
+                today: date) -> ReturnRequest:
+    if reason not in REASONS:
+        raise InvalidReturn(f"unknown reason {reason!r}", reason=reason)
+    if today > delivered_on + timedelta(days=return_window_days()):
+        raise ReturnNotAllowed(f"order {order.id} is outside the return window", order_id=order.id,
+                               delivered_on=delivered_on.isoformat())
+    ordered = {line.sku: line.qty for line in order.lines}
+    for sku, qty in items.items():
+        if qty < 1 or qty > ordered.get(sku, 0):
+            raise InvalidReturn(f"cannot return {qty} x {sku}", sku=sku, requested=qty,
+                                ordered=ordered.get(sku, 0))
+    # changed-mind returns need manual approval; faults are approved automatically
+    return ReturnRequest(order.id, dict(items), reason, approved=reason != "changed_mind")
+</file>

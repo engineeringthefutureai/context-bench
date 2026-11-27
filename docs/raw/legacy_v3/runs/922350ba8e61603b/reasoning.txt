@@ -1,0 +1,190 @@
+Let me analyze this task carefully.
+
+Task: Add the parcel weight to the shipping label. `label_text` gets an optional `weight_g` argument (the parcel weight in grams). When specified, print a line `Weight: <weight>` right after the order/parcel line. US addresses show pounds to 2 decimal places (1500 g -> `3.31 lb`); all other destinations retain the standard kilogram display (1500 g -> `1.5 kg`). Use the shop's standard weight formatting so that the label matches the packing slip.
+
+Key points:
+1. `label_text(parcel, to, parcels_total, weight_g=None)` — weight_g is optional.
+2. When weight_g is given, a line `Weight: <weight>` comes right after the order/parcel line.
+3. For US (address.country == "US"), pounds to 2 decimal places: 1500 g -> 3.31 lb.
+   - Check: 1500 g = 1.5 kg. Pounds = 1.5 * 2.20462262 = 3.30693... rounded to 2 places is 3.31. So use conversion from kg to lb: `weight_g / 1000 * 2.20462262` → 3.30693393 → f"{...:.2f}" = "3.31". Good.
+   - What about exact conversion? 1500 g / 453.59237 = 3.30693393. 2 places: "3.31".
+4. Other destinations use standard kilogram display: `format_weight(weight_g)` gives "1.5 kg" for 1500. That's `shopkit.shipping.packaging.format_weight`.
+5. "Use the shop's standard weight formatting so that the label matches the packing slip." — the packing slip uses `format_weight(weight_g)` from `shopkit.shipping.packaging`. Let me verify what format_weight does based on the tests:
+
+```python
+def test_format_weight():
+    assert format_weight(1500) == "1.5 kg"
+    assert format_weight(1000) == "1 kg"
+    assert format_weight(1234) == "1.23 kg"
+    assert format_weight(250, "g") == "250 g"
+```
+
+So `format_weight(weight_g, unit="kg")` — kg is the default, unit "g" is optional. Output format: kg with 2 decimals but trailing zeros stripped? 1500 → "1.5 kg" (not "1.50"), 1000 → "1 kg" (not "1.0"), 1234 → "1.23 kg". So strip trailing zeros and the trailing dot. Presumably the implementation is:
+
+```
+def format_weight(weight_g: int, unit: str = "kg") -> str:
+    if unit == "g":
+        return f"{weight_g} g"
+    kg = weight_g / 1000
+    text = f"{kg:.2f}".rstrip("0").rstrip(".")
+    return f"{text} kg"
+```
+Something like that. I don't have the file, but the tests confirm this behavior.
+
+For the US pounds line, "pounds to 2 decimal places (1500 g -> `3.31 lb`)" — the task explicitly says 2 decimal places for lb, so `f"{lb:.2f} lb"`. 1500 g → 3.31 lb. So the US one doesn't use format_weight with stripping; it's fixed 2 decimals. Hmm, but "use the shop's standard weight formatting so the label matches the packing slip" — for non-US, use format_weight. For US, format_weight presumably only supports "kg" and "g" units. The packing slip is kg only anyway. For US labels, the requirement is explicitly "pounds to 2 decimal places".
+
+So in labels.py:
+
+```python
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+    lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+    if weight_g is not None:
+        lines.append(f"Weight: {format_weight_for_label(weight_g, to)}")
+    lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+```
+
+And the weight formatting:
+
+```python
+def _weight_display(weight_g: int, country: str) -> str:
+    if country == "US":
+        pounds = weight_g * G_TO_LB  # or weight_g / 1000 * 2.20462262
+        return f"{pounds:.2f} lb"
+    return format_weight(weight_g)
+```
+
+Wait — but is the US check based on `to.country == "US"`? The task says "US addresses show pounds." In format_address, US/CA go on the city line. But the task clearly says only US gets pounds. So check `to.country == "US"`.
+
+Conversion factor: what constant to use? 1 lb = 453.59237 g exactly (the international pound definition). So lb = weight_g / 453.59237. 1500 / 453.59237 = 3.306933933... → "3.31". Alternatively kg * 2.2046226218. Same result.
+
+Is there an existing helper in the codebase for pounds? There's `format_weight(weight_g, "g")` — units supported are kg (default) and "g". Probably no "lb". The task says use the shop's standard weight formatting to match the packing slip — meaning the kg path should use format_weight. For lb, since format_weight doesn't support it, format directly in labels.py.
+
+Hmm, but should I extend format_weight in packaging.py to support "lb"? The target file is labels.py. The task says "Target file: shopkit/shipping/labels.py". I should keep the change minimal and centered on labels.py. But I don't have the full text of packaging.py — I only have an excerpt. If I modify packaging.py, I'd need to return the whole file, which I don't fully have (the "Retrieved code from other files" is partial, with a "lines 38-42" marker indicating it's partial). Actually wait — in the instructions: the context includes "Retrieved code from other files (the most relevant functions and classes found by searching the repository)" with partial files (e.g., "lines 38-42"). So I can't safely return whole files of those. I should only modify labels.py, which I have in full.
+
+So in labels.py:
+
+```python
+"""Shipping label contents passed to the label printer service."""
+from shopkit.customers.addresses import format_address
+from shopkit.customers.models import Address
+from shopkit.orders.fulfillment import Parcel
+from shopkit.shipping.packaging import format_weight
+
+GRAMS_PER_POUND = 453.59237
+
+
+def label_code(sku: str) -> str:
+    """Compact code printed under the barcode: uppercase, strip spaces and dashes (scanner-friendly)."""
+    return sku.replace(" ", "").replace("-", "").upper()
+
+
+def _weight_text(weight_g: int, country: str) -> str:
+    """US labels are in pounds to 2 decimal places; everything else uses the shop's standard kilogram display."""
+    if country == "US":
+        return f"{weight_g / GRAMS_PER_POUND:.2f} lb"
+    return format_weight(weight_g)
+
+
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+    lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+    if weight_g is not None:
+        lines.append(f"Weight: {_weight_text(weight_g, to.country)}")
+    lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+```
+
+Edge cases:
+- weight_g = 0 → US: "0.00 lb", others "0 kg"? format_weight(0) → f"{0.00}" → "0.00" → rstrip("0") → "0." → rstrip(".") → "0" → "0 kg". No problem.
+- weight_g=None (not specified) → no weight line. The existing test `test_label_text` calls `label_text(Parcel("o1", 1, [("ab-1", 2)]), to, parcels_total=2)` and expects text to start with the address and end with "AB1 x2". My change keeps this: no weight line, last line is "AB1 x2". Good.
+
+Order of arguments: the task says "`label_text` gets an optional `weight_g` argument". Add as a keyword default argument after parcels_total. Existing callers pass parcels_total as keyword (`parcels_total=2`). Good.
+
+Type annotation: the codebase uses `dict[str, str] | None` (Python 3.10+). So `int | None` fits the style.
+
+Now, the pounds conversion: should I use a named constant or inline? "Treat money, dates, and units carefully: ... explicit units." A named constant is good. Let me use `GRAMS_PER_POUND = 453.59237`.
+
+Check 1500 / 453.59237: 453.59237 * 3 = 1360.77711; 1500 - 1360.77711 = 139.22289; 139.22289 / 453.59237 ≈ 0.30693. So 3.30693 → f"{:.2f}" → "3.31".
+
+Another check: 1000 g → 1000/453.59237 = 2.2046226 → "2.20 lb". Reasonable.
+
+Alternative factor 2.2046: 1.5 * 2.2046 = 3.3069 → "3.31". Same. The exact international pound (453.59237 g) is best.
+
+Should the US branch also use some "strip" logic? No — the task explicitly says "pounds to 2 decimal places" and gives "3.31 lb". Fixed 2 decimals.
+
+Hmm, wait: does "use the shop's standard weight formatting so the label matches the packing slip" apply to both branches? The packing slip (for a US parcel) would display "1.5 kg". The requirement says the US label shows "3.31 lb". So "standard weight formatting" refers to the kg display via format_weight (stripped decimals, "kg" unit suffix with space). For lb, explicitly 2 decimals. My implementation matches: non-US uses format_weight exactly; US uses `f"{...:.2f} lb"`.
+
+Let me reconsider whether format_weight has a "lb" unit... The test only shows "g" as an alternative unit. If format_weight supported "lb", the task would probably say "use format_weight(..., "lb")". Since packaging.py isn't shown in full and the target file is labels.py, the safest thing is to not depend on a possibly-nonexistent unit. Formatting directly in labels.py is self-contained and verifiable against the stated example.
+
+But wait — "use the shop's standard weight formatting so the label matches the packing slip" — for the non-US case, importing format_weight from shopkit.shipping.packaging is exactly the standard formatting. Good.
+
+Let me double-check the import: `from shopkit.shipping.packaging import format_weight`. From the test file: `from shopkit.shipping.packaging import BOXES, chargeable_weight_g, dims_weight_g, format_weight, pick_box`. Yes, format_weight is in shopkit.shipping.packaging.
+
+One concern: circular imports? shopkit.shipping.labels imports from shopkit.shipping.packaging. fulfillment.py already imports from shopkit.shipping.packaging. labels imports from customers.addresses, customers.models, orders.fulfillment. Adding a packaging import should be fine — packaging probably doesn't import labels. test_shipping.py imports both. No problem.
+
+Now the line: `Weight: 3.31 lb` right after the order/parcel line. In my code, lines[2] is the order/parcel line, then append the weight line, then items. Good.
+
+Also, if weight_g is specified but the parcel is... no other edge cases.
+
+Should the parameter name be `weight_g`? Yes, per the task.
+
+Docstring: label_text currently has no docstring. Keep it simple; perhaps add a short docstring noting the optional weight line. The codebase uses docstrings on public functions (label_code has one, format_address has one, packing_slip has one). label_text currently has none. Adding a short one is fine and useful, and matches style. Let me add one.
+
+Let me also think about whether "US addresses" should include... task: "US addresses show pounds". `to.country == "US"`. format_address treats US and CA together for layout, but the weight requirement is US-only. So only "US".
+
+Final file:
+
+```python
+"""Shipping label contents passed to the label printer service."""
+from shopkit.customers.addresses import format_address
+from shopkit.customers.models import Address
+from shopkit.orders.fulfillment import Parcel
+from shopkit.shipping.packaging import format_weight
+
+GRAMS_PER_POUND = 453.59237
+
+
+def label_code(sku: str) -> str:
+    """Compact code printed under the barcode: uppercase, strip spaces and dashes (scanner-friendly)."""
+    return sku.replace(" ", "").replace("-", "").upper()
+
+
+def _weight_display(weight_g: int, country: str) -> str:
+    """Weight line value: pounds to 2 decimals for the US, standard shop kilogram display elsewhere."""
+    if country == "US":
+        return f"{weight_g / GRAMS_PER_POUND:.2f} lb"
+    return format_weight(weight_g)
+
+
+def label_text(parcel: Parcel, to: Address, parcels_total: int, weight_g: int | None = None) -> str:
+    """Label lines: address, order/parcel, optional weight and one line per item."""
+    lines = [format_address(to), "", f"Order {parcel.order_id}  parcel {parcel.number}/{parcels_total}"]
+    if weight_g is not None:
+        lines.append(f"Weight: {_weight_display(weight_g, to.country)}")
+    lines += [f"{label_code(sku)} x{qty}" for sku, qty in parcel.items]
+    return "\n".join(lines)
+```
+
+Check compatibility with existing tests:
+- test_label_text: `label_text(Parcel("o1", 1, [("ab-1", 2)]), to, parcels_total=2)` → no weight line → "Ann Lee\n1 Main St\nAustin, TX 78701\nUS\n\nOrder o1  parcel 1/2\nAB1 x2". startswith OK, contains "parcel 1/2", endswith "AB1 x2". ✓
+
+Hmm wait, format_address for US: lines = [name, line1, line2, city_line, country] → "Ann Lee", "1 Main St", "" (line2 empty, skipped), "Austin, TX 78701", "US". Joined: "Ann Lee\n1 Main St\nAustin, TX 78701\nUS". Yes, startswith works.
+
+- label_code unchanged. ✓
+
+Hypothetical new tests:
+- `label_text(Parcel("o1",1,[("ab-1",2)]), us_address, 2, weight_g=1500)` → lines: address, "", "Order o1  parcel 1/2", "Weight: 3.31 lb", "AB1 x2". ✓
+- Non-US, e.g., UK: "Weight: 1.5 kg" via format_weight(1500) == "1.5 kg". ✓
+- 1000 → "1 kg"; 1234 → "1.23 kg". ✓ (Assuming format_weight behaves per its tests.)
+
+Negative or large values? weight_g is a parcel weight; assumed non-negative. If 0, "0.00 lb" / "0 kg" — no crash. Fine.
+
+Typing: `int | None` — the codebase uses `dict[str, str] | None` in calculator.py, so 3.10+ syntax is fine.
+
+One more consideration: should `weight_g` be a positional argument, or keyword-only? The task says "gets an optional `weight_g` argument". A regular optional argument at the end is standard and simplest; callers can pass it positionally or by keyword. Fine.
+
+Naming of `_weight_display` vs `_weight_text`: labels uses the "label_text" naming; `packing_slip` returns text. Let me go with `_weight_text` to echo "text". Either is fine. I'll pick `_weight_text`.
+
+Constant placement: module-level after imports. Good.
+
+I'm fairly confident in this solution. Per the output format, I'll output only the file block, nothing else.

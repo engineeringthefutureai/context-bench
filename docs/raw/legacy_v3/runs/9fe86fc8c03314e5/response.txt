@@ -1,0 +1,91 @@
+
+
+<file path="shopkit/api/webhooks.py">
+"""Outgoing webhooks to partner systems (ERP, marketing). Payloads are signed with HMAC-SHA256."""
+import hashlib
+import hmac
+import json
+from dataclasses import dataclass, field
+
+from shopkit.events import Event, EventBus
+from shopkit.payments.reconciliation import redact_pan
+
+MAX_ATTEMPTS = 5
+
+
+@dataclass
+class Endpoint:
+    url: str
+    secret: str
+    events: set[str]                          # event names, or "order.*"-style prefixes
+
+
+@dataclass
+class Delivery:
+    endpoint: Endpoint
+    body: str
+    signature: str
+    attempts: int = 0
+    delivered: bool = False
+    errors: list[str] = field(default_factory=list)
+
+
+def sign(body: str, secret: str) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+
+
+def verify(body: str, secret: str, signature: str) -> bool:
+    return hmac.compare_digest(sign(body, secret), signature)
+
+
+def _subscribed(endpoint: Endpoint, name: str) -> bool:
+    return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
+
+
+def _mask_cards(data):
+    """Return a copy of data with every card_number field redacted the way the shop redacts
+    card numbers (payments.reconciliation.redact_pan). All other fields are unchanged."""
+    if isinstance(data, dict):
+        return {k: (redact_pan(v) if k == "card_number" else _mask_cards(v))
+                for k, v in data.items()}
+    if isinstance(data, list):
+        return [_mask_cards(v) for v in data]
+    return data
+
+
+class WebhookDispatcher:
+    def __init__(self, endpoints: list[Endpoint], transport=None):
+        self.endpoints = endpoints
+        self.queue: list[Delivery] = []
+        self._transport = transport           # callable(url, body, headers) -> status code
+
+    def attach(self, bus: EventBus) -> None:
+        for prefix in {e.split(".", 1)[0] for ep in self.endpoints for e in ep.events}:
+            bus.subscribe(f"{prefix}.*", self.on_event)
+
+    def on_event(self, event: Event) -> None:
+        data = _mask_cards(event.payload)
+        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": data},
+                          sort_keys=True, default=str)
+        for ep in self.endpoints:
+            if _subscribed(ep, event.name):
+                self.queue.append(Delivery(ep, body, sign(body, ep.secret)))
+
+    def flush(self) -> int:
+        """Try every pending delivery once; returns how many succeeded. Failures stay queued until
+        MAX_ATTEMPTS."""
+        ok = 0
+        for d in list(self.queue):
+            d.attempts += 1
+            try:
+                status = self._transport(d.endpoint.url, d.body, {"X-Signature": d.signature})
+                d.delivered = 200 <= status < 300
+                if not d.delivered:
+                    d.errors.append(f"HTTP {status}")
+            except OSError as e:
+                d.errors.append(str(e))
+            if d.delivered or d.attempts >= MAX_ATTEMPTS:
+                self.queue.remove(d)
+                ok += d.delivered
+        return ok
+</file>

@@ -1,0 +1,120 @@
+Let's analyze the task.
+
+Request: Add a `by_email(customers) -> dict[str, Customer]` function to `shopkit/reports/customers_report.py`. The keys should be the email address trimmed and lowercased, and it should be constructed "in the same way as the shop constructs other lookup tables."
+
+Looking at the repository map, the `shopkit/utils/collections.py` module has the following:
+
+```python
+def index_by(items: Iterable[T], key: Callable[[T], K]) -> dict[K, T]
+```
+
+This is the lookup table builder ("index_by" returns a dict keyed by some key). And there's a test `test_index_by_rejects_duplicates` in `tests/test_collections.py`. In other words, `index_by` rejects duplicates (it probably throws an exception when there are duplicate keys).
+
+So "constructed in the same way as the shop constructs other lookup tables" probably means using `index_by` from `shopkit.utils.collections`.
+
+Hmm, but if there are duplicate emails (after normalization), `index_by` will reject them. Wait — would customers be able to have duplicate emails? The `CustomerDirectory.register` has an `EmailTaken(Conflict)` error, so in practice, within the directory, emails are unique. However, the `customers` list passed to the report module might be arbitrary.
+
+Let's think about how `index_by` behaves on duplicates. The test name is `test_index_by_rejects_duplicates`, so it throws an exception on duplicate keys. This is the standard approach: fail clearly on ambiguous data.
+
+Now, should I use `index_by` directly? The task says "constructed in the same way as the shop constructs other lookup tables." The most natural reading is: use the shared `index_by` helper. The report module already imports `group_by` from `shopkit.utils.collections`.
+
+So:
+
+```python
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return index_by(customers, key=lambda c: c.email.strip().lower())
+```
+
+Wait, but what about customers with empty emails? The `Customer` dataclass: fields are `id: str, email: str, name: str, ...`. Since email is `str` (required, no default shown... actually, in the map, the fields are `id: str, email: str, name: str`, so all required without defaults). So email should always be a string. But could it be empty or whitespace-only? In that case, the key would be `""`. That's an edge case. Should we filter it out?
+
+Hmm. The request: "keys are the trimmed and lowercased email address." It doesn't say to exclude empty emails. The `CustomerDirectory` validates email with `InvalidEmail`, so registered customers have valid emails. I think it's fine to just key by normalized email. Filtering out empty ones might be reasonable, but it adds behavior that wasn't requested.
+
+Actually, let's think: if there are two customers both with empty emails, `index_by` will throw. That's a "fail clearly" behavior consistent with the codebase's approach to duplicate keys.
+
+Should the trimming include lowercasing? `email.strip().lower()` — Python's `str.strip()` removes whitespace, and `str.lower()` lowercases. Good.
+
+Now, about the signature: `by_email(customers) -> dict[str, Customer]`. The existing functions use the type hint `list[Customer]`. Follow the same style.
+
+Placement: The file has `signups_by_month`, `opt_in_rate`, `tier_mix`, `active_since`. Where should `by_email` go? The module is "customer cohort numbers for marketing." The new function is a lookup, not a cohort number. Add it at the end, or... the order is probably: signups_by_month, opt_in_rate, tier_mix, active_since. `by_email` is similar in that it's built from the whole customer list. Since it's the new addition for CRM sync, I'll add it at the end of the file. Actually, on reconsideration: does placement matter for tests? No, tests just call the function by name. For minimal diff, add at the end.
+
+Need to import `index_by`: modify the import line:
+
+```python
+from shopkit.utils.collections import group_by, index_by
+```
+
+Or add a separate import line. The existing import is `from shopkit.utils.collections import group_by`. The idiomatic thing: extend to `from shopkit.utils.collections import group_by, index_by`.
+
+Now, the signature of `index_by`: `index_by(items: Iterable[T], key: Callable[[T], K]) -> dict[K, T]`. So `index_by(customers, key=lambda c: c.email.strip().lower())`.
+
+Let me verify the key parameter name. The map has `def index_by(items: Iterable[T], key: Callable[[T], K]) -> dict[K, T]`. Yes, `key` is a parameter. Existing usage in the report: `group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))` — using `key=` as a keyword. Match that style.
+
+Now — potential concern: does `index_by` throw on duplicates? The test says "rejects_duplicates." Since the CustomerDirectory enforces email uniqueness on registration, a duplicate email in the list is a data error, and throwing is a correct "fail clearly" behavior.
+
+But wait — is `by_email` for CRM sync going to receive a list where normalized emails can collide? For example, "Foo@Bar.com" and "foo@bar.com " (with trailing space). In the directory, are emails normalized at registration time? The `register` in `CustomerDirectory` probably validates and maybe normalizes. Unknown. If the directory stores emails exactly as given (after validation), two customers with "A@b.co" and "a@b.co" could exist? The `EmailTaken` check might or might not normalize. Hmm.
+
+The task explicitly says to key by trimmed + lowercased email. So if two customers normalize to the same key, that's a genuine conflict, and `index_by`'s rejection of duplicates is the consistent behavior ("constructed in the same way as the shop constructs other lookup tables" — i.e., same as `index_by` which rejects duplicates).
+
+Alternatively, maybe "constructed in the same way as the shop constructs other lookup tables" refers to a simple dict comprehension like the other functions in this file (`{m: len(cs) for ...}`), or to the `products: dict[str, Product]` passed to checkout. Hmm. But the most specific signal is that `index_by` exists in `utils/collections` with a test that rejects duplicates — that is the shop's lookup table builder. The phrasing "constructed in the same way as the shop constructs other lookup tables" strongly suggests using `index_by`.
+
+Let me re-check other lookup builders in the map:
+- `shopkit/utils/collections.py: index_by(items, key) -> dict[K, T]` — yes, this is "the" lookup table function.
+- `first(items, predicate, default)`.
+- `group_by` — grouping, not lookup.
+
+So `index_by` it is.
+
+Edge cases to verify:
+1. Empty list → `index_by` on empty iterable → `{}`. Good.
+2. Email with mixed case, whitespace → normalized key. Good.
+3. Duplicate normalized email → `index_by` throws (consistent with test expectations).
+4. What type does `index_by` throw? Unknown, probably `ValueError` or `ShopError`. Doesn't matter. We delegate to it.
+
+One more consideration: should we handle a `None` email? The field type is `str`, not `str | None`, so no. If some customer had `None`, `.strip()` would throw AttributeError — but that's invalid data for the model, and failing clearly is fine. Don't add defensive code for a type that isn't declared.
+
+Docstring: existing functions have no docstrings. So I don't add one either to match style — "reviewers should not be able to tell which lines are new by style." No docstring in the file. Just add the function.
+
+Final file:
+
+```python
+"""Customer cohort numbers for marketing."""
+from datetime import date
+
+from shopkit.customers.models import Customer
+from shopkit.utils.collections import group_by, index_by
+from shopkit.utils.numbers import safe_ratio
+
+
+def signups_by_month(customers: list[Customer]) -> dict[str, int]:
+    dated = [c for c in customers if c.joined]
+    groups = group_by(dated, key=lambda c: c.joined.strftime("%Y-%m"))
+    return {m: len(cs) for m, cs in sorted(groups.items())}
+
+
+def opt_in_rate(customers: list[Customer]) -> float:
+    return safe_ratio(sum(c.marketing_opt_in for c in customers), len(customers))
+
+
+def tier_mix(customers: list[Customer]) -> dict[str, int]:
+    return {t: len(cs) for t, cs in sorted(group_by(customers, key=lambda c: c.tier).items())}
+
+
+def active_since(customers: list[Customer], since: date) -> list[Customer]:
+    return [c for c in customers if c.joined and c.joined >= since]
+
+
+def by_email(customers: list[Customer]) -> dict[str, Customer]:
+    return index_by(customers, key=lambda c: c.email.strip().lower())
+```
+
+This is the minimal change: extend the import, add the function.
+
+Let me double-check the import ordering: `from shopkit.utils.collections import group_by, index_by` — alphabetical within the import: group_by, index_by. Good.
+
+Any risk that `index_by`'s key parameter has a different name (e.g., `key_func`)? The map says `key`. And the `group_by` usage in the file also uses `key=`. Consistent.
+
+One more thought: `sum(c.marketing_opt_in ...)` treats bools as ints, no problem, unrelated.
+
+I'm confident in this change. The task said "add by_email(customers) -> dict[str, Customer]" — exact name `by_email`, positional parameter `customers`.
+
+Output: only the file block for shopkit/reports/customers_report.py.

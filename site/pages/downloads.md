@@ -32,3 +32,4 @@ Every round is pinned to a git tag, and the site shows the round listed first.
 - [raw/index.json](raw/index.json): one row per run in the raw-data viewer.
 - [raw/tasks.json](raw/tasks.json): every task, with its hidden tests and solutions.
 - `raw/runs/<run_id>.json`: one run's prompt (split by part), the model's thinking and answer, the transcript, the patch and the test output.
+- [raw/legacy_v3/](https://github.com/engineeringthefutureai/context-bench/tree/main/docs/raw/legacy_v3): the v3 round's raw runs as plain files, readable one by one on GitHub: `index.csv` (one row per run), `results.jsonl`, the judge's `grades.jsonl`, and `runs/<run_id>/` with the patch, the reply, the thinking, the test output and the prompt. The site's pages show the v4 round only.

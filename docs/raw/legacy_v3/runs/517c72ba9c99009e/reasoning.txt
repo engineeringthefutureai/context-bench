@@ -1,0 +1,142 @@
+Let me understand the task.
+
+The target file is `shopkit/orders/models.py`, which contains the `OrderLine` and `Order` dataclasses. The `Order` dataclass has `id`, `lines`, and `currency`, and the `OrderLine` dataclass has `sku`, `qty`, `unit_cents`, and a `total_cents` property.
+
+Task: Add an `Order.add_line(sku, qty, unit_cents)` method that returns the modified order line. If there is already a line in the order with the same SKU and the same unit price, increase the quantity of that line; otherwise, append a new line.
+
+Let me think about the details:
+
+1. `add_line(sku, qty, unit_cents)` returns the `OrderLine` it modified.
+2. If there is already a line with the same SKU and the same unit price, increase that line's quantity (`line.qty += qty`).
+3. Otherwise, append a new line with `OrderLine(sku, qty, unit_cents)` and return it.
+
+Edge cases:
+- What if `qty` is 0? The task doesn't specify. The order "should display as one line, not two." If qty is 0, do we still append a zero-quantity line? Hmm. Let me think about what the most reasonable interpretation consistent with the system is. The task says "If there is already a line in the order with the same SKU and the same unit price, increase the quantity of that line; otherwise, append a new line." So mechanically: check for existing line with same sku and same unit_cents, and if it exists, increase it; otherwise, append. Nothing about zero qty. Simplest: implement exactly as stated. But should we guard against qty <= 0? The codebase style — let me look at similar code.
+
+Looking at `OrderManager.addItem` in `shopkit/common/OrderManager.py` — no body, can't see. `ShopError` class exists. In `checkout.py`, `EmptyCart(ShopError)` and `NotPurchasable(ShopError)`.
+
+Hmm. The task is pretty explicit: "Add `Order.add_line(sku, qty, unit_cents)` that returns the modified order line. If there is already a line in the order with the same SKU and the same unit price, increase the quantity of that line; otherwise, append a new line."
+
+I think the tests will probably test:
+- Adding a new line to an empty order returns the new line.
+- Adding the same sku with the same price merges: quantity increases, only one line, and the returned line is the existing one (modified one).
+- Adding the same sku with a different unit price appends a second line.
+- `total_cents` reflects the merge.
+
+Maybe also tests that the returned object is identical (`is`) to the line in `order.lines`.
+
+Should I handle qty = 0? If the test adds with qty 0... The spec says "otherwise, append a new line" — no condition on qty. Let me keep it simple and not add validation that isn't in the spec. Adding `require(qty > 0)` might break a test that adds zero? Unlikely. But "keep the changes as small as the request allows." The request doesn't mention error handling for qty. I'll follow the literal spec: merge or append. Actually, wait — hmm, let me reconsider: "never silently return incorrect data" — a zero-qty line isn't incorrect data per spec. The spec defines the behavior precisely. Let me follow it.
+
+Another consideration: case sensitivity for SKU comparison. The codebase has `normalize_sku` and `sku_code` in utils, but the models file is low-level and shouldn't import utils (potential circular imports — though utils.text is unlikely to import orders, so it wouldn't be circular). But existing lines are stored as-is; the request says "same SKU" — that means the literal sku string. I'll use exact match. That's the most consistent: the model layer is simple; normalization belongs to a higher layer.
+
+Dataclass: `Order` is a `@dataclass`. Adding a method is fine.
+
+Implementation:
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+
+    def add_line(self, sku: str, qty: int, unit_cents: int) -> OrderLine:
+        """Add a line to the order, merging with an existing line of the same
+        SKU and unit price. Returns the line that was added or increased."""
+        for line in self.lines:
+            if line.sku == sku and line.unit_cents == unit_cents:
+                line.qty += qty
+                return line
+        line = OrderLine(sku=sku, qty=qty, unit_cents=unit_cents)
+        self.lines.append(line)
+        return line
+```
+
+Wait — should the return type annotation be `OrderLine`? Yes.
+
+One subtlety: dataclass with mutable default `lines` — already uses `field(default_factory=list)`, fine.
+
+Docstring style: does the codebase use docstrings? I don't see bodies for other files. The existing models.py has no docstrings. The task says "add docstrings or comments where intent isn't obvious." The merge intent is fairly obvious from the code. A short docstring might be nice, but the surrounding file has zero docstrings. To fit the style, maybe no docstring. Actually, the instructions say "add docstrings or comments where intent isn't obvious" — the intent here is obvious from the loop. Let me match the file's minimal style and skip the docstring. Hmm, but a one-line docstring wouldn't hurt. The reviewer should "not be able to tell which lines are new by their style." The file has no docstrings, so adding one would be a stylistic tell. I'll skip. Actually... it's a judgment call. I think skipping is more consistent with the file.
+
+Edge case check:
+- Order with no lines, add_line("A", 2, 100) → append OrderLine("A", 2, 100), return it. ✓
+- add_line("A", 1, 100) → finds first matching line (sku A, 100), qty 2+1=3, returns same line object. `order.lines` still length 1. ✓
+- add_line("A", 1, 200) → no match (unit price differs), append new line. Now two lines for same SKU with different prices — per spec, that's expected ("otherwise, append a new line"). ✓
+- Returns the "modified" line: in the merge case, returns the existing line (the one modified). ✓ In the new case, the new line. ✓
+
+What if qty is negative? Not in spec; mechanical behavior applies. Fine.
+
+Type hints: consistent with file (str, int). ✓
+
+Imports: no new imports needed. ✓
+
+Check the callers of `Order` — `OrderBook.add`, `generate_order` in subscriptions creates Order, etc. Adding a method doesn't break anything.
+
+One more: should `add_line` handle merging with multiple existing lines (e.g., two lines with same sku+price, if someone constructed Order directly)? The loop only merges with the first match; subsequent duplicates stay. That's fine per spec.
+
+Also, should I use `next((line for line in ...), None)`? The explicit for loop with early return is simpler and matches "simple and readable."
+
+Let me write the final file.
+
+Full new contents of shopkit/orders/models.py:
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+
+    @property
+    def total_cents(self) -> int:
+        return sum(line.total_cents for line in self.lines)
+
+    def add_line(self, sku: str, qty: int, unit_cents: int) -> OrderLine:
+        for line in self.lines:
+            if line.sku == sku and line.unit_cents == unit_cents:
+                line.qty += qty
+                return line
+        line = OrderLine(sku, qty, unit_cents)
+        self.lines.append(line)
+        return line
+```
+
+Should I use keyword arguments for the OrderLine constructor? The existing code uses positional for dataclass fields, and nowhere else can I see. Positional is fine: `OrderLine(sku, qty, unit_cents)`. Either works. Let me use positional to keep it compact. Hmm, actually keyword is a bit more self-documenting. The file is minimal; I'll go with positional, it's fine.
+
+Let me double-check: the task says "returns the modified order line." In the merge case, "the line it modified" is the existing one whose qty increased — that's what we return. Good.
+
+Let me trace `total_cents` after merging: line.qty is updated in place, so `order.total_cents` recomputes correctly. ✓
+
+I'm confident. I'll output only the file block.

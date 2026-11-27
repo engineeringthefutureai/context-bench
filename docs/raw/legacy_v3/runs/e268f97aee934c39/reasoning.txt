@@ -1,0 +1,171 @@
+Let me understand the task:
+
+1. Add `transfers_by_week(transfers) -> dict[str, int]` to `shopkit/inventory/transfers.py`
+2. Return total units moved per week, keyed by week with the same week label the other dashboards use
+3. In chronological order
+
+Looking at the context:
+
+- `shopkit/reports/sales.py` uses `iso_week_label(s.paid_at.date())` from `shopkit.utils.dates` — this is "the same week label the other dashboards use".
+- In `weekly_revenue`, weeks are grouped by `iso_week_label(s.paid_at.date())` and then `sorted(weeks.items())` — dictionary insertion order is preserved via dict comprehension over sorted keys.
+- `Transfer` has an `at: datetime` field with default `utc_now`.
+
+So `transfers_by_week(transfers)` should:
+- Take an iterable (or list) of `Transfer`
+- Key each transfer by `iso_week_label(t.at.date())`
+- Sum `t.qty` per week
+- Return a dict in chronological order (sorted by week key)
+
+One concern: sorting by `iso_week_label` string — is that chronological? Let me think about what `iso_week_label` looks like. It's from `shopkit/utils/dates.py` which isn't shown. The name suggests an ISO week label, likely something like "2024-W05" (year + ISO week number). If it's in the form "2024-W05", then string sorting gives chronological order. In `sales.py`, `weekly_revenue` does `sorted(weeks.items())` over week keys, and `weekly_report` does `sorted(by_week.items())`. So the codebase convention is to sort by the week label string. Therefore to be "in chronological order", I should follow the same pattern: `sorted(items)`.
+
+This strongly suggests `iso_week_label` returns a sortable string like "2024-W05". Let me follow exactly the same pattern as `weekly_revenue`:
+
+```python
+def transfers_by_week(transfers: list[Transfer]) -> dict[str, int]:
+    weeks = group_by(transfers, key=lambda t: iso_week_label(t.at.date()))
+    return {w: sum(t.qty for t in ts) for w, ts in sorted(weeks.items())}
+```
+
+Wait, `group_by` is from `shopkit.utils.collections`. It's used in sales.py: `weeks = group_by(sales, key=lambda s: iso_week_label(s.paid_at.date()))`. Probably returns a dict from key → list of items. So I can use it the same way.
+
+Alternatively, to minimize dependencies, I could write it without `group_by`:
+
+```python
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for t in transfers:
+        week = iso_week_label(t.at.date())
+        totals[week] = totals.get(week, 0) + t.qty
+    return dict(sorted(totals.items()))
+```
+
+This follows the style of `bucket_by_day` and doesn't require `group_by`. Hmm. Which is better? The task says "keyed by week with the same week label the other dashboards use, in chronological order". `sales.py` uses `iso_week_label` from `shopkit.utils.dates` and sorts items.
+
+Let me think about signature type hints. In `sales.py`, the functions take `list[Sale]`. `bucket_by_day` takes `Iterable[Sale]`. The task specifies `transfers_by_week(transfers) -> dict[str, int]`. Since `Transfer` is a frozen dataclass with an `at` datetime, I could type it as `Iterable[Transfer]` — but `sales.py`'s main functions use `list[...]`. Either works. The task's signature is `transfers_by_week(transfers) -> dict[str, int]`. For flexibility let me use `Iterable[Transfer]` like `bucket_by_day`, or `list[Transfer]` like the others. Hmm.
+
+Actually, let me consider consistency within the transfers module. The transfers module currently has no such helper; the only pattern to match is `sales.py`. The docstring should be similar to the one in `sales.py`: "Total units moved per ISO week, keyed by week label, in chronological order."
+
+Edge cases:
+- Empty transfers → empty dict.
+- qty is int (validated as >= 1 on creation).
+- The `at` datetime is presumably naive UTC (from `utc_now`). `t.at.date()` gets the date in the transfer's own tz, similar to how `sale.paid_at.date()` is used without tz conversion (sales' docstring says "its own date, no timezone conversion").
+
+Ordering: chronological. Sorting by the `iso_week_label` string — matches the convention in `weekly_revenue` and `weekly_report` (`sorted(weeks.items())`). Since the label format is probably "YYYY-Www", lexicographic sort = chronological. This is the safest interpretation of "the same week label the other dashboards use, in chronological order" — the other dashboards sort by label.
+
+Now, should I use `group_by` from `shopkit.utils.collections`? It exists and is used in the reports module. Using it would parallel `weekly_revenue` exactly:
+
+```python
+from shopkit.utils.collections import group_by
+from shopkit.utils.dates import iso_week_label, utc_now
+
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    weeks = group_by(transfers, key=lambda t: iso_week_label(t.at.date()))
+    return {w: sum(t.qty for t in ts) for w, ts in sorted(weeks.items())}
+```
+
+But I don't know `group_by`'s exact signature from the context — I only know it's used as `group_by(sales, key=lambda s: ...)`. The usage in `sales.py` shows it's callable with that signature. It probably returns a dict mapping keys to lists. The `weekly_revenue` code does `for w, ss in sorted(weeks.items())`, so yes, it returns a dict of lists.
+
+Alternatively, a manual accumulation avoids relying on `group_by`'s details and matches `bucket_by_day` style:
+
+```python
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    """Total units moved per week, keyed by the same week label the dashboards use,
+    in chronological order."""
+    totals: dict[str, int] = {}
+    for t in transfers:
+        week = iso_week_label(t.at.date())
+        totals[week] = totals.get(week, 0) + t.qty
+    return dict(sorted(totals.items()))
+```
+
+This is self-contained, only requires the import of `iso_week_label` (and `Iterable`). It's simple and obviously correct. I think this is the better choice — fewer assumptions about `group_by`'s return value, and the pattern of `bucket_by_day` (an accumulation loop + `dict(sorted(...))`) is already in the codebase.
+
+Hmm, but "the same week label the other dashboards use" — those use `iso_week_label` via `group_by` + dict comprehension. Both produce identical output. I'll go with the accumulation loop; it's simpler and only imports what's needed.
+
+Wait — actually, let me reconsider: using `group_by` would exactly mirror `weekly_revenue`. The reviewer would see the symmetry. But the accumulation loop mirrors `bucket_by_day`. Both are defensible. I'll pick the one that's most robust: the accumulation loop, since I can't verify `group_by`'s implementation (it's not in the context). Actually, the usage sites prove the signature and return type behavior enough. But the loop is unambiguously fine and has one fewer import.
+
+Imports needed in the loop version: `from collections.abc import Iterable` and `iso_week_label` from `shopkit.utils.dates`.
+
+Type annotation: the task says `transfers_by_week(transfers) -> dict[str, int]`. For the parameter: `Iterable[Transfer]` or `list[Transfer]`. `Transfer` is defined in the same module, so no forward reference needed. I'll go with `Iterable[Transfer]` for flexibility (mirroring `bucket_by_day` which takes `Iterable[Sale]`). Hmm, but the other functions that do aggregation (`best_day`, `weekly_revenue`, `top_skus`, `average_order_cents`, `weekly_report`) take `list[Sale]`. There's a split: `bucket_by_day` uses `Iterable`, the rest use `list`. The new function is closest in spirit to `weekly_revenue` (aggregation over weeks). But either works. Let me think about what a test might call: probably a list of `Transfer`s. Both annotations accept a list at runtime (annotations aren't enforced). Let me go with `Iterable[Transfer]` — it's a superset and matches at least one existing pattern. Actually... hmm, consistency with the majority (list) vs. flexibility. The function body only needs to iterate, so `Iterable` is the honest annotation. I'll use `Iterable[Transfer]`.
+
+Wait, also need to double check: the module imports `utc_now` from `shopkit.utils.dates`. I need to add `iso_week_label` to that import.
+
+Docstring: match the style — sales.py has docstrings like "Revenue in cents per calendar day of payment..., sorted by day. Days without sales are absent, not zero." So mine:
+
+```python
+"""Total units moved per week, keyed by the same week label as the sales dashboards,
+in chronological order. Weeks without transfers are absent, not zero."""
+```
+
+Let me keep it concise.
+
+Also, `Transfer` is a frozen dataclass; `t.at` is a datetime. `.date()` gives the date. No problem.
+
+Now, let me put together the full new file:
+
+```python
+"""Stock transfers between warehouses (rebalancing before peak season)."""
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from shopkit.errors import Conflict
+from shopkit.inventory.warehouses import Network
+from shopkit.utils.dates import iso_week_label, utc_now
+
+
+class TransferFailed(Conflict):
+    pass
+
+
+@dataclass(frozen=True)
+class Transfer:
+    sku: str
+    qty: int
+    source: str
+    destination: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def transfer(network: Network, sku: str, qty: int, source: str, destination: str) -> Transfer:
+    if qty < 1:
+        raise ValueError("qty must be >= 1")
+    src = network.get(source)
+    if src.stock.available(sku) < qty:
+        raise TransferFailed(f"{source} has only {src.stock.available(sku)} x {sku}", sku=sku,
+                             requested=qty, available=src.stock.available(sku))
+    # Stock has no public removal API; transfers adjust the ledger directly.
+    src.stock._on_hand[sku] -= qty
+    network.get(destination).stock.receive(sku, qty)
+    return Transfer(sku, qty, source, destination)
+
+
+def transfers_by_week(transfers: Iterable[Transfer]) -> dict[str, int]:
+    """Total units moved per week, keyed by the same week label the dashboards use
+    (ISO week of at's own date, no timezone conversion), in chronological order.
+    Weeks without transfers are absent, not zero."""
+    totals: dict[str, int] = {}
+    for t in transfers:
+        week = iso_week_label(t.at.date())
+        totals[week] = totals.get(week, 0) + t.qty
+    return dict(sorted(totals.items()))
+```
+
+Verifying:
+- `iso_week_label` exists in `shopkit/utils/dates.py` (imported in sales.py: `from shopkit.utils.dates import iso_week_label`). ✓
+- `Iterable` from `collections.abc`. ✓ (sales.py imports it from there)
+- Sorting by label string: matches `weekly_revenue`/`weekly_report`'s `sorted(weeks.items())`. If the label is like "2024-W37", chronological. ✓
+- Empty input → `{}`. ✓
+- Sum of `t.qty` — units moved. ✓ (units = qty, "total units moved per week")
+
+One question: should the label use `t.at.date()`? `Transfer.at` is created via `utc_now()`. The dashboards use `paid_at.date()` — the same approach: the timestamp's own date, no tz conversion. The docstring of `bucket_by_day` explicitly says "its own date, no timezone conversion". Consistent. ✓
+
+Is `iso_week_label` taking a `date`? In sales.py: `iso_week_label(s.paid_at.date())` — yes, takes a date. ✓
+
+Chronological order: one subtle risk — if `iso_week_label` returns something like "W37/2024" (week-first), then string sort would be wrong across years. But since the dashboards themselves rely on `sorted(weeks.items())` for chronological ordering, following that convention is the most consistent interpretation. ✓
+
+I think this is good. The change is minimal: add two imports, add one function.
+
+Also, let me double-check that I'm not breaking anything in the file: the import line is changed to `from shopkit.utils.dates import iso_week_label, utc_now` — both are used (`utc_now` by the dataclass default, `iso_week_label` by the new function). Alphabetical order within the import: `iso_week_label, utc_now` — alphabetical, good.
+
+I'll output the full file contents.

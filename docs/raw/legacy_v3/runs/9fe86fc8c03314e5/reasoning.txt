@@ -1,0 +1,54 @@
+Let's understand the task: in the webhook delivery of the payment event, before queuing the delivery, we need to mask the `card_number` field within the event data. This masking should use the same method that the shop uses elsewhere when storing or displaying card numbers.
+
+What I need to find:
+1. Where the shop is masking card numbers (a utility function like `mask_card`).
+2. How the event data is structured (the `event.payload` dictionary).
+3. How to mask the `card_number` field before constructing the body in `on_event`.
+
+Let's explore the repository.
+
+
+Two candidates: `shopkit.common.CustomerUtils.maskCard` and `shopkit.payments.reconciliation.redact_pan`. The task says "mask card numbers the same way the shop masks card numbers everywhere else they are stored or displayed." Let me check both files and see which one is used across the entire shop. I'll try grepping for usage of `card_number`, `maskCard`, and `redact_pan`.
+
+
+There are two masking functions:
+1. `shopkit.common.CustomerUtils.maskCard(cardNo)` → `'XXXX-XXXX-XXXX-' + cardNo[-4:]` — the docstring says "customer helpers for the account page". This is used only in tests.
+2. `shopkit.payments.reconciliation.redact_pan(card_number)` → masks everything except the last 4 digits with '*' and strips out non-digit characters. The docstring says "card number safe for storage and display: masks everything except the last 4 digits with '*', strips non-digits".
+
+The task says: "The `card_number` field of the event data must be masked in the same way that the shop masks card numbers everywhere else when storing or displaying them."
+
+The key phrase is "everywhere else when storing or displaying". The docstring of `redact_pan` is "card number safe for **storage** and display" — this matches "storing or displaying". `maskCard` is for the account page (display-only), and moreover it assumes exactly 16 digits (it breaks with a short cardNo — e.g., cardNo[-4:] of a 3-digit card returns all 3 digits, leaving nothing masked, plus it hardcodes 12 X's). `redact_pan` is what's used in the payment gateway (storage: `card_number=redact_pan(digits)` when saving the payment). Therefore `redact_pan` is "the same way the shop masks card numbers everywhere else when storing or displaying them".
+
+So we should import `redact_pan` from `shopkit.payments.reconciliation` into webhooks.py, and apply it to the `card_number` field of the event data before building the body.
+
+Now, where in on_event is the `card_number` field located? "The `card_number` field of the event data" — event.payload is the data. Let's look at the Event class and how the payment event is constructed to check the payload structure. Let's check shopkit/events and shopkit/payments/gateway.
+
+The payload might be a dict with a "card_number" key. But the payment event's data might be nested? Let's check gateway.py and the events module to see how the payload is constructed.
+
+Let's read shopkit/events and shopkit/payments/gateway.py.
+
+
+Let me check the Event structure and webhooks tests, and look at how the events module and card_number appear in the event payloads. Let me also check the webhooks tests.
+
+
+Let's take a look at test_webhooks.py to check the existing tests and how events get emitted with a card_number payload. Also, I'll check payments/models.py to see where the card_number is stored, and also check where the payment event gets emitted (probably checkout.py).
+
+
+Let me take a look at checkout.py to see where payment events get emitted and what kind of payload gets attached.
+
+
+I need to mask the card number field in webhook deliveries before they're queued, using the same masking logic the shop applies elsewhere—specifically the `redact_pan` function that stores and displays the last four digits.
+
+The question is whether to recurse through nested data structures (like a payment dict inside the payload) or only mask top-level fields. The requirement says "a card_number field in the event data," and while it's ambiguous, recursion handles both cases without breaking the top-level-only interpretation—nested card_number fields should be masked too for safety. I'll write a helper that walks through dictionaries and lists, masking any field named "card_number" while leaving everything else unchanged, and I'll mask the payload before creating the Delivery object.
+
+Now I'm deciding where to place the mask function. The task specifies webhooks.py as the target file, so I should implement it there rather than extracting it to a shared module, even though the gateway and reconciliation already have their own redaction logic.
+
+Defining the masking function... I need to decide whether to mutate the original event payload in place or work with a copy. Mutating is safer from a leakage perspective since it prevents the raw card number from being accessed elsewhere through a reference, but it does modify caller state. The cleanest approach is to apply the masking inside `on_event` before constructing the body, keeping the change localized to the webhook module. The helper function will be private to the file since the request only touches webhooks, and I'll keep its signature simple—taking and returning a dict to match the payload type. I'm also considering whether to add type annotations and docstrings to stay consistent with the codebase style.
+
+Writing the masking function... I'm weighing whether to recurse into all values or just dicts and lists. The task specifies masking `card_number` fields, and in this codebase that's a top-level key in payment event payloads. But if payment data is nested in a dict (like `{"payment": {...}}`), the full card number would still be exposed. I'll recurse into dicts and lists to be safe — it's defensible, matches the "data" structure of events, and keeps the function small and readable without overcomplicating it.
+
+Now I need to make sure I'm applying the masking in `on_event` where I'm building the payload, and I should check the import path for `redact_pan` — it's in `shopkit.payments.reconciliation` and already used by the gateway, so no circular dependency issues there.
+
+Let me verify the module structure: `reconciliation` imports from `payments.models` and `utils.csvio`, neither of which import `api`, so we're good. The webhooks module will now import `redact_pan`, which is consistent with how other modules handle their dependencies.
+
+Now I'm rewriting the full `webhooks.py` file with the masking integrated into the `on_event` method, making sure the function signature stays clean and the masking logic is properly inlined. Checking for potential import cycles and verifying the masking function handles all cases correctly — the docstring and helper function are in place, the module-level `_mask` definition is fine, and I'm tracing through a few edge cases to make sure the logic holds up.

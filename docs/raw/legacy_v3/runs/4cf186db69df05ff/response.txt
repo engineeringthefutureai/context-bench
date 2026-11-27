@@ -1,0 +1,165 @@
+
+
+<file path="shopkit/orders/models.py">
+from dataclasses import dataclass, field
+
+
+@dataclass
+class OrderLine:
+    sku: str
+    qty: int
+    unit_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.qty * self.unit_cents
+
+
+@dataclass
+class Order:
+    id: str
+    lines: list[OrderLine] = field(default_factory=list)
+    currency: str = "USD"
+    gift_message: str = ""
+</file>
+<file path="shopkit/orders/fulfillment.py">
+from dataclasses import dataclass, field
+
+from shopkit.orders.models import Order
+from shopkit.shipping.packaging import format_weight
+
+MAX_ITEMS_PER_PARCEL = 10
+
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)
+    gift_message: str = ""
+
+    @property
+    def item_count(self) -> int:
+        return sum(qty for _, qty in self.items)
+
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    """Total quantity per SKU across orders, sorted by SKU (the order pickers walk the aisles)."""
+    totals: dict[str, int] = {}
+    for order in orders:
+        for line in order.lines:
+            totals[line.sku] = totals.get(line.sku, 0) + line.qty
+    return sorted(totals.items())
+
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    """One unit per slot, at most `max_items` units per parcel, lines kept together where possible.
+
+    The order's gift message rides on the first parcel only, so it is printed once.
+    """
+    parcels: list[Parcel] = []
+    current: list[tuple[str, int]] = []
+    used = 0
+
+    for line in order.lines:
+        if line.qty > max_items:
+            # A line bigger than one parcel has to be split across parcels.
+            if current:
+                parcels.append(Parcel(order_id=order.id, number=len(parcels) + 1, items=current))
+                current, used = [], 0
+            remaining = line.qty
+            while remaining > 0:
+                take = min(max_items, remaining)
+                parcels.append(Parcel(order_id=order.id, number=len(parcels) + 1, items=[(line.sku, take)]))
+                remaining -= take
+        elif used + line.qty > max_items:
+            # Does not fit in the open parcel; keep the line whole in a fresh one.
+            parcels.append(Parcel(order_id=order.id, number=len(parcels) + 1, items=current))
+            current, used = [(line.sku, line.qty)], line.qty
+        else:
+            current.append((line.sku, line.qty))
+            used += line.qty
+
+    if current:
+        parcels.append(Parcel(order_id=order.id, number=len(parcels) + 1, items=current))
+
+    if parcels:
+        parcels[0].gift_message = order.gift_message
+    return parcels
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    """Slip packed inside each parcel: order, parcel number, contents and weight.
+
+    Prints the gift message when this parcel carries one.
+    """
+    lines = [
+        f"Order {parcel.order_id}",
+        f"Parcel {parcel.number}",
+    ]
+    lines.extend(f"{qty} x {sku}" for sku, qty in parcel.items)
+    if parcel.gift_message:
+        lines.append(f"Gift message: {parcel.gift_message}")
+    lines.append(f"Weight: {format_weight(weight_g)}")
+    return "\n".join(lines)
+</file>
+<file path="shopkit/api/serializers.py">
+from shopkit.catalog.models import Product
+from shopkit.customers.models import Customer
+from shopkit.orders.models import Order
+
+
+def money(cents: int, currency: str = "USD") -> dict:
+    return {"amount_cents": cents, "currency": currency}
+
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price": money(p.price_cents),
+        "active": p.active,
+    }
+
+
+def order(o: Order, status: str | None = None) -> dict:
+    data: dict = {
+        "id": o.id,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit": money(line.unit_cents, o.currency),
+                "total": money(line.total_cents, o.currency),
+            }
+            for line in o.lines
+        ],
+        "total": money(o.total_cents, o.currency),
+        "gift_message": o.gift_message,
+    }
+    if status is not None:
+        data["status"] = status
+    return data
+
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier,
+        "marketing_opt_in": c.marketing_opt_in,
+        "addresses": [
+            {
+                "name": a.name,
+                "line1": a.line1,
+                "line2": a.line2,
+                "city": a.city,
+                "region": a.region,
+                "postcode": a.postcode,
+                "country": a.country,
+            }
+            for a in c.addresses
+        ],
+    }
+</file>

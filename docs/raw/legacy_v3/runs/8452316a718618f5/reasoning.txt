@@ -1,0 +1,100 @@
+Let me analyze this task.
+
+The change request: newsletter recipients must, in addition to opting in, also have an email address that passes the same validation that the shop applies at signup/checkout, and everyone else is skipped.
+
+From the context:
+- `shopkit/utils/validation.py` has `is_valid_email(address: str) -> bool` — "a practical check used at signup and checkout: one @, dotted domain, no spaces. Does not attempt to implement RFC 5322."
+- `shopkit/notifications/email.py` already imports `is_valid_email` from `shopkit.utils.validation`.
+- `shopkit/common/StringUtils.py` has a looser `isEmail` used in the legacy `registerCustomer` — but the task says "the same validation the shop applies at signup and checkout," and the docstring of `is_valid_email` explicitly states it's "used at signup and checkout." The API route `register` calls `self.customers.register(...)`, which probably goes through `shopkit/customers/service.py` — not shown, but since the validation docstring explicitly says "used at signup and checkout," `is_valid_email` is the correct function to use.
+
+So the change is: in `recipients()`, filter customers by `c.marketing_opt_in` and by a valid email address.
+
+Considerations:
+- `c.email` may be None or missing? In the model — `Customer` model is not shown in full. `render_for` uses `customer.first_name or "there"` and `customer.id`. `batches` uses `c.email` directly. Should defensively handle the case where email is None: `is_valid_email` calls `address.strip()`, which will fail on None. So guard: `c.email is not None` or use a fallback like `(c.email or "")`.
+
+Let me think about how the codebase handles this. In `render_for`: `customer.first_name or "there"` — it handles a missing first_name with a fallback. So it's consistent style to handle possibly empty email in `recipients`.
+
+Simplest, correct implementation:
+
+```python
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email or "")]
+```
+
+This handles None emails by treating them as invalid (empty string won't match the regex, `len("") <= 254` is True but `_EMAIL_RE.match("")` will be falsy — actually, does `_EMAIL_RE` exist? The retrieved snippet says "lines 8-12" and references `_EMAIL_RE` — the module must define it earlier (probably lines 1-7). Since I can't see it, I'll assume it's defined since the file references it and tests pass. No problem — I don't need to touch that file.
+
+Should the check be in `recipients` or `batches`? The task says "newsletter recipients must ... everyone else is skipped." `recipients` is the function that defines who the recipients are, and `batches` derives from `recipients`. So putting the filter in `recipients` covers both. That's the natural place.
+
+Imports: add `from shopkit.utils.validation import is_valid_email`.
+
+Check import ordering/style: this file imports:
+```python
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+```
+Alphabetical order: customers, marketing, notifications, utils. `shopkit.utils.validation` comes after `shopkit.utils.collections`. So add at the end:
+
+```python
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+```
+
+Now, edge cases:
+- Empty email string → invalid, skipped.
+- None email → `c.email or ""` → invalid, skipped. Good.
+- Whitespace only → invalid.
+- Valid email, opted out → skipped (existing behavior).
+- Valid email, opted in → included.
+- Non-string email (e.g., int?) — unlikely; `is_valid_email` would fail with AttributeError on `.strip()`. The Customer model is probably typed as `email: str`. Keep it simple; not worth over-engineering. Actually, should I use `isinstance`? The codebase doesn't; keep it consistent.
+
+Also, `is_valid_email` strips the address internally, so emails with surrounding whitespace will pass — that's the signup/checkout behavior, so it's consistent.
+
+One question: should I normalize/lowercase the email? `registerCustomer` does `email.lower()`, but that's the legacy system. The shop's `Customer` model probably stores what it's given. The provider limit is about bounces from mistyped addresses, not case. I'll leave it as-is.
+
+Docstring/comment: I can add a brief comment. Existing functions have no docstrings. The module docstring says "only customers who opted in receive marketing email." Might I need to update the module docstring to reflect the new behavior? The instruction says "fit in with the surrounding code." Since the module docstring is now incomplete, a small docstring update is reasonable. Hmm — "keep the change as small as the request allows." The docstring describes behavior, and after the change it's incomplete. Updating one line in the docstring is safe and accurate. Let me do it: `"""Newsletter sends. Only opted-in customers with valid email addresses receive marketing email."""` That's an honest update. Or, leave it and add a comment in `recipients`. I think the docstring update is good, low-risk.
+
+Actually, let me reconsider: is changing the module docstring in scope? It would keep documentation accurate. Reviewers would approve. I'll make a minimal update.
+
+Final file:
+
+```python
+"""Newsletter sends. Only opted-in customers with a valid email address receive marketing email."""
+from shopkit.customers.models import Customer
+from shopkit.marketing.campaigns import Campaign
+from shopkit.notifications.templates import render_template
+from shopkit.utils.collections import chunked
+from shopkit.utils.validation import is_valid_email
+
+BATCH_SIZE = 500          # provider limit per API call
+
+BODY = "Hi {{ first_name }},\n\n{{ intro }}\n\nShop now: {{ link }}\n\nUnsubscribe: {{ unsubscribe }}"
+
+
+def recipients(customers: list[Customer]) -> list[Customer]:
+    return [c for c in customers
+            if c.marketing_opt_in and is_valid_email(c.email or "")]
+```
+
+Wait — line-length/style: the original `recipients` is a one-line list comprehension. Mine is slightly longer. Original line: `    return [c for c in customers if c.marketing_opt_in]` — 53 chars. Mine: `    return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email or "")]` — let me count: 4 + "return [c for c in customers if c.marketing_opt_in and is_valid_email(c.email or \"\")]" — about 4+87 = 91 chars. That's fine under PEP8 79? Actually 91 > 79, but many codebases use 99 or 120. Looking at the existing code: the `render_for` line: `    return render_template(BODY, {"first_name": customer.first_name or "there", "intro": intro,` — that line is about 95 chars. So the codebase allows ~95+ char lines. 91 chars is fine.
+
+Alternatively, break into two lines for readability. The original style keeps the comprehension on one line where it fits. Since render_for uses a longer line, one line is consistent. I'll keep it on one line.
+
+Verify: does `Customer` have `.email`? `batches` uses `c.email`, so yes.
+
+Does anything else call `recipients`? Only `batches` in this file. Possibly other code imports `recipients` — the filtering change is exactly what's requested; the interface (list of Customer) is preserved.
+
+Check the `is_valid_email` signature: `def is_valid_email(address: str) -> bool`. It strips internally. Passing `c.email or ""` handles None/empty.
+
+Now, is there any possibility that the "same validation at signup and checkout" refers to the legacy `isEmail` in StringUtils? The docstring of `is_valid_email` explicitly says "used at signup and checkout." The API route `register` goes through `customers.register` (service) — probably validates with `is_valid_email`. The task says "the same validation the shop applies at signup and checkout" — the `is_valid_email` docstring is a perfect match. Also `shopkit/notifications/email.py` imports it, suggesting the email pipeline uses it. Confident: `is_valid_email`.
+
+Another consideration: should the validation live in `batches` rather than `recipients` in case other callers of `recipients` expect only opt-in filtering? In this codebase, `recipients` is semantically "who receives the newsletter." Task: "newsletter recipients must ... have an email address that passes ... everyone else is skipped." So `recipients` is the correct place, and `batches` will automatically skip them too.
+
+Also, should I update the module docstring? Yes, minimal. Final:
+
+```python
+"""Newsletter sends. Only opted-in customers with a valid email address receive marketing email."""
+```
+
+I think that's it. I'll output just the file block.

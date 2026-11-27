@@ -1,0 +1,141 @@
+Let me understand the task.
+
+In `ReturnRequest` in `shopkit/orders/returns.py`, add a method `restocking_fee_cents(order)` which:
+- For "changed_mind" returns, 12.5% of the refund amount
+- 0 for any other reason
+- The rounding must be exactly the same as how the shop rounds other percentage amounts, i.e., using `apply_rate` from `shopkit/utils/numbers.py` (half-up rounding, half away from zero).
+
+Let me look at `apply_rate`:
+
+```python
+def apply_rate(cents: int, rate_pct: float | Decimal | str) -> int:
+    """`rate_pct` percent of `cents`, rounded half-up to a whole cent (half away from zero).
+    apply_rate(1999, 15) -> 300; apply_rate(-1999, 15) -> -300. Used for tax, commission, discounts."""
+    value = Decimal(cents) * Decimal(str(rate_pct)) / Decimal(100)
+    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+```
+
+Hmm, the docstring says "half away from zero," but the code uses `ROUND_HALF_UP`, which in Python's decimal module means "round to nearest, ties going away from zero." So for negative values, ROUND_HALF_UP actually rounds ties away from zero (i.e., -0.5 → -1). No wait — Python decimal's `ROUND_HALF_UP` is "Round to nearest with ties going away from zero." So for 1999*15/100 = 299.85 → 300. For -1999*15/100 = -299.85 → -300 (away from zero). OK, that's consistent with the docstring's "half away from zero."
+
+Note: `Decimal(str(12.5))` → "12.5". Good.
+
+Next, the refund amount. `refund_cents(order)` computes `sum(prices[sku] * qty for sku, qty in self.items.items())`. The restocking fee should be 12.5% of the refund amount of that return. So:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), 12.5)
+```
+
+Should I use `12.5` as a float, or `"12.5"`? `apply_rate` handles float | Decimal | str, and converts via `str(rate_pct)`. `str(12.5)` is "12.5", no problem. But for money amounts, exact arithmetic matters. Using `Decimal("12.5")` directly is cleaner and avoids floating-point issues. The rate is an exact 12.5%, so `Decimal("12.5")` is exact. Using float 12.5 is also exact in binary (12.5 = 25/2, representable). Either works, but to avoid float concerns, passing the string "12.5" or Decimal("12.5") is safer. Hmm, codebase style: tests use `apply_rate(1999, 15)` and `apply_rate(1000, "7.25")` — integer and string. For 12.5, using the string "12.5"… no wait "12.5". I think using the string "12.5" fits the codebase style well (using strings when the rate is not an integer).
+
+Also, consider: should I define a module constant for the restocking fee rate? Something like `RESTOCKING_FEE_PCT = 12.5`. The module already has constants `RETURN_WINDOW_DAYS` and `REASONS`. Adding a constant `REASON_CHANGED_MIND` might be over-refactoring. But defining a `RESTOCKING_FEE_PCT` constant is reasonable and consistent with the module's style. Let's keep it minimal but clear:
+
+```python
+RETURN_WINDOW_DAYS = 30
+REASON_CHANGED_MIND = "changed_mind"  # maybe unnecessary
+RESTOCKING_FEE_PCT = "12.5"
+```
+
+Hmm, but the existing code uses `reason != "changed_mind"` inline in `open_return`. Introducing a constant would be a slight refactor of the existing line. The instruction says don't refactor unrelated code, but if I use the constant in both places, it would be related. Actually, let's keep it simple: leave `open_return` as is (don't change it), and in the new method compare to `"changed_mind"`. Or define the constant and use it only in the new method. To keep the change minimal and not touch `open_return`, I'll inline the string literal in the new method, matching the existing style in the file.
+
+Actually, let me reconsider: `REASONS` is a tuple of strings; the existing code compares with the literal `"changed_mind"`. For consistency, use the literal.
+
+Next, docstring: the method should have a short docstring, matching the codebase style. Example:
+
+```python
+def restocking_fee_cents(self, order: Order) -> int:
+    """Restocking fee on changed-mind returns; zero for all other reasons."""
+    if self.reason != "changed_mind":
+        return 0
+    return apply_rate(self.refund_cents(order), "12.5")
+```
+
+Import: `from shopkit.utils.numbers import apply_rate`. Check import order in the file:
+
+```python
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+```
+
+Alphabetically: shopkit.errors, shopkit.orders.models, shopkit.utils.ids, shopkit.utils.numbers. So `from shopkit.utils.numbers import apply_rate` comes after `from shopkit.utils.ids import short_code`.
+
+Now, edge cases:
+- Reason is changed_mind, items is empty → refund_cents = 0 → apply_rate(0, "12.5") = 0. Good.
+- Refund amount is negative? In valid returns, refund is non-negative (prices and quantities are positive). But apply_rate handles negatives with half-away-from-zero rounding, consistent with the rest of the shop.
+- Rounding example: refund 999 cents, 12.5% → 124.875 → rounds to 125 (half-up: 0.875 > 0.5, so it rounds to 125 anyway; ties: e.g., 10 cents → 1.25 → 1; 30 cents → 3.75 → 4; tie case: x * 12.5 / 100 = x/8; a tie occurs when x/8 ends in exactly .5, i.e., x ≡ 4 mod 8: x=4 → 0.5 → 1 (away from zero). So a 4-cent refund gives a 1-cent fee. That's the shop's standard rounding, no problem.)
+
+The task says "12.5% of the refund amount of the return." The refund amount of the return is exactly what `refund_cents(order)` computes. Good — reuse it to avoid divergence.
+
+Also, should the fee be computed only for approved returns, or regardless of approval? The task says "changed_mind returns," regardless of the approval status. ReturnRequest.approved is False for changed_mind, but the fee still applies.
+
+One more consideration: `refund_cents` uses `prices[sku]`, which raises KeyError if sku is not in the order. The new method delegates to that, so it inherits the same behavior. No problem — callers of `refund_cents` already assume valid items (validated in `open_return`).
+
+Let me also consider whether to compute the fee from `self.refund_cents(order)` or inline the sum. Reuse is better and DRY.
+
+Complete updated file:
+
+```python
+"""Customer returns (RMA). A return refunds lines of a delivered order within the return window."""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from shopkit.errors import Conflict, ShopError
+from shopkit.orders.models import Order
+from shopkit.utils.ids import short_code
+from shopkit.utils.numbers import apply_rate
+
+RETURN_WINDOW_DAYS = 30
+REASONS = ("damaged", "wrong_item", "not_as_described", "changed_mind")
+RESTOCKING_FEE_PCT = "12.5"
+
+
+class ReturnNotAllowed(Conflict):
+    pass
+
+
+class InvalidReturn(ShopError):
+    http_status = 422
+
+
+@dataclass
+class ReturnRequest:
+    order_id: str
+    items: dict[str, int]            # sku -> qty being returned
+    reason: str
+    code: str = field(default_factory=lambda: short_code(8, groups=4))
+    approved: bool = False
+
+    def refund_cents(self, order: Order) -> int:
+        prices = {line.sku: line.unit_cents for line in order.lines}
+        return sum(prices[sku] * qty for sku, qty in self.items.items())
+
+    def restocking_fee_cents(self, order: Order) -> int:
+        """12.5% of the refund for changed-mind returns, 0 for every other reason."""
+        if self.reason != "changed_mind":
+            return 0
+        return apply_rate(self.refund_cents(order), RESTOCKING_FEE_PCT)
+```
+
+Hmm, should I add the constant? `apply_rate` takes a string for non-integer rates (test: `apply_rate(1000, "7.25")`). A module-level constant `RESTOCKING_FEE_PCT = "12.5"` fits the style of `RETURN_WINDOW_DAYS`. I think this is a good, small addition. Or inline `"12.5"`. Either is acceptable. The constant documents the business rate and fits the module's existing constants. I'll include it.
+
+Wait — should the constant be a float 12.5? `str(12.5)` == "12.5", exact. But `apply_rate` also accepts float. The docstring type is `float | Decimal | str`. For money rates, the string is the safest and the codebase tests use the string "7.25" for non-integers. Use the string.
+
+Double-checking the import path for `apply_rate`: `shopkit/utils/numbers.py` defines `apply_rate`. Yes.
+
+Check that `Order` is already imported — yes.
+
+The method signature: `restocking_fee_cents(order)` per the task. Takes the order parameter. Good.
+
+Trailing docstring/comments: the module docstring remains valid.
+
+One more point: the task says "add `restocking_fee_cents(order)` to `ReturnRequest`." So the method name must be exactly `restocking_fee_cents` and it must take `order`. Mine matches.
+
+Edge: `self.reason` could be any string if the dataclass is constructed directly (e.g., "damaged"). Returns 0. Good.
+
+I'm fairly confident. Let me write out the complete file.

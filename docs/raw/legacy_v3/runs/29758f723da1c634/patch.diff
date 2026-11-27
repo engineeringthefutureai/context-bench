@@ -1,0 +1,41 @@
+--- a/shopkit/api/webhooks.py
++++ b/shopkit/api/webhooks.py
+@@ -3,8 +3,10 @@
+ import hmac
+ import json
+ from dataclasses import dataclass, field
++from typing import Any
+ 
+ from shopkit.events import Event, EventBus
++from shopkit.payments.reconciliation import redact_pan
+ 
+ MAX_ATTEMPTS = 5
+ 
+@@ -38,6 +40,17 @@
+     return name in endpoint.events or f"{name.split('.', 1)[0]}.*" in endpoint.events
+ 
+ 
++def _redact(data: Any) -> Any:
++    """Copy of *data* with every `card_number` field masked by redact_pan, so raw card numbers
++    never reach a delivery. Everything else — including non-string card numbers — is unchanged."""
++    if isinstance(data, dict):
++        return {key: (redact_pan(value) if key == "card_number" and isinstance(value, str)
++                      else _redact(value)) for key, value in data.items()}
++    if isinstance(data, (list, tuple)):
++        return [_redact(value) for value in data]
++    return data
++
++
+ class WebhookDispatcher:
+     def __init__(self, endpoints: list[Endpoint], transport=None):
+         self.endpoints = endpoints
+@@ -49,7 +62,8 @@
+             bus.subscribe(f"{prefix}.*", self.on_event)
+ 
+     def on_event(self, event: Event) -> None:
+-        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": event.payload},
++        payload = _redact(event.payload)
++        body = json.dumps({"event": event.name, "at": event.at.isoformat(), "data": payload},
+                           sort_keys=True, default=str)
+         for ep in self.endpoints:
+             if _subscribed(ep, event.name):

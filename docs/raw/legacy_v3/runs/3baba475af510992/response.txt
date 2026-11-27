@@ -1,0 +1,49 @@
+<file path="shopkit/payments/refunds.py">
+"""Refunds against captured payments. Partial refunds are allowed up to the captured amount."""
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from shopkit.errors import Conflict
+from shopkit.money import format_money
+from shopkit.payments.models import Payment
+from shopkit.utils.dates import add_business_days, utc_now
+
+
+class RefundTooLarge(Conflict):
+    pass
+
+
+#: Business days the card networks take to post a refund back to the customer's card.
+REFUND_SETTLEMENT_BUSINESS_DAYS = 5
+
+
+@dataclass(frozen=True)
+class Refund:
+    payment_id: str
+    amount_cents: int
+    reason: str
+    at: datetime = field(default_factory=utc_now)
+
+
+def expected_arrival(refund: Refund) -> date:
+    """The day the customer can expect to see the refund on their card.
+
+    Banks post refunds within five business days of the day the refund was
+    issued, counting on the shop's usual business-day calendar (weekends and
+    shop-closed days are not counted). The issue day itself does not count:
+    a refund issued on a Friday arrives the following Thursday.
+    """
+    return add_business_days(refund.at.date(), REFUND_SETTLEMENT_BUSINESS_DAYS)
+
+
+def refund(payment: Payment, amount_cents: int, reason: str) -> Refund:
+    if amount_cents <= 0:
+        raise ValueError("refund amount must be positive")
+    if amount_cents > payment.refundable_cents:
+        raise RefundTooLarge(
+            f"refund {format_money(amount_cents, payment.currency)} exceeds refundable "
+            f"{format_money(payment.refundable_cents, payment.currency)}",
+            payment_id=payment.id, requested=amount_cents, refundable=payment.refundable_cents)
+    payment.refunded_cents += amount_cents
+    return Refund(payment.id, amount_cents, reason)
+</file>

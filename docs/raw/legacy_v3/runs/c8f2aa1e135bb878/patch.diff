@@ -1,0 +1,132 @@
+--- a/shopkit/catalog/models.py
++++ b/shopkit/catalog/models.py
+@@ -7,6 +7,7 @@
+     title: str
+     price_cents: int
+     active: bool = True
++    weight_g: int = 0
+ 
+     def is_purchasable(self) -> bool:
+         return self.active and self.price_cents > 0
+--- /dev/null
++++ b/shopkit/fulfillment.py
+@@ -0,0 +1,119 @@
++from collections.abc import Mapping
++
++from shopkit.catalog.models import Product
++
++
++def parcel_weight_g(parcel: object, products: Mapping) -> int:
++    """Return the total shipping weight in grams of a parcel's contents.
++
++    The parcel may be a sequence of SKUs, a mapping from SKU to quantity, or an
++    object exposing its contents under a common attribute such as `items`.
++    """
++    if products is None:
++        products = {}
++
++    total = 0
++    for sku, quantity, provided_product in _parcel_items(parcel):
++        product = None
++        try:
++            product = products[sku]
++        except KeyError:
++            pass
++
++        if product is None:
++            if provided_product is None:
++                raise KeyError(sku)
++            product = provided_product
++
++        total += quantity * product.weight_g
++
++    return total
++
++
++def _parcel_items(parcel):
++    if parcel is None:
++        return
++
++    contents = _parcel_contents(parcel)
++    if contents is None:
++        return
++
++    if isinstance(contents, Mapping):
++        for sku, quantity in contents.items():
++            if isinstance(quantity, Product):
++                yield sku, 1, quantity
++            else:
++                yield sku, 1 if quantity is None else quantity, None
++        return
++
++    if isinstance(contents, str):
++        if contents:
++            yield contents, 1, None
++        return
++
++    if hasattr(contents, "sku"):
++        yield from _item(contents)
++        return
++
++    for item in contents:
++        yield from _item(item)
++
++
++def _parcel_contents(parcel):
++    if isinstance(parcel, Mapping):
++        return parcel
++
++    for attribute in ("items", "contents", "lines", "product_skus", "skus"):
++        if hasattr(parcel, attribute):
++            return getattr(parcel, attribute)
++
++    if isinstance(parcel, str):
++        return [parcel] if parcel else []
++
++    if hasattr(parcel, "sku"):
++        return [parcel]
++
++    return parcel
++
++
++def _item(item):
++    if isinstance(item, str):
++        yield item, 1, None
++        return
++
++    if isinstance(item, Product):
++        yield item.sku, 1, item
++        return
++
++    if isinstance(item, Mapping):
++        sku = item.get("sku", item.get("product_sku", item.get("product_id")))
++        quantity = item.get("quantity", item.get("qty"))
++        product = item.get("product")
++        if not isinstance(product, Product):
++            product = None
++        yield sku, 1 if quantity is None else quantity, product
++        return
++
++    if isinstance(item, (tuple, list)) and len(item) == 2:
++        sku, quantity = item
++        if isinstance(quantity, Product):
++            yield sku, 1, quantity
++            return
++        yield sku, 1 if quantity is None else quantity, None
++        return
++
++    sku = getattr(item, "sku", None)
++    if sku is None:
++        sku = getattr(item, "product_sku", None)
++    if sku is None:
++        sku = getattr(item, "product_id", None)
++
++    quantity = getattr(item, "quantity", None)
++    if quantity is None:
++        quantity = getattr(item, "qty", 1)
++
++    product = getattr(item, "product", None)
++    if not isinstance(product, Product):
++        product = None
++
++    yield sku, quantity, product

@@ -1,0 +1,143 @@
+
+
+<file path="shopkit/catalog/models.py">
+from dataclasses import dataclass
+
+
+@dataclass
+class Product:
+    sku: str
+    title: str
+    price_cents: int
+    active: bool = True
+    weight_g: int = 0  # grams per unit; used for shipping weight
+
+    def is_purchasable(self) -> bool:
+        return self.active and self.price_cents > 0
+</file>
+<file path="shopkit/orders/fulfillment.py">
+from dataclasses import dataclass, field
+
+from shopkit.catalog.models import Product
+from shopkit.orders.models import Order
+from shopkit.shipping.packaging import format_weight
+
+MAX_ITEMS_PER_PARCEL = 8
+
+
+@dataclass
+class Parcel:
+    order_id: str
+    number: int
+    items: list[tuple[str, int]] = field(default_factory=list)
+
+    @property
+    def item_count(self) -> int:
+        return sum(qty for _, qty in self.items)
+
+
+def pick_list(orders: list[Order]) -> list[tuple[str, int]]:
+    """Total quantity per SKU across orders, sorted by SKU (the order pickers walk the aisles)."""
+    totals: dict[str, int] = {}
+    for order in orders:
+        for line in order.lines:
+            totals[line.sku] = totals.get(line.sku, 0) + line.qty
+    return sorted(totals.items())
+
+
+def split_into_parcels(order: Order, max_items: int = MAX_ITEMS_PER_PARCEL) -> list[Parcel]:
+    """One unit per slot, at most `max_items` units per parcel, lines kept together where possible."""
+    parcels: list[Parcel] = []
+    current:
+
+    def flush() -> None:
+        nonlocal current, count
+        if current:
+            parcels.append(Parcel(order_id=order.id, number=len(parcels) + 1, items=current))
+            current, count = [], 0
+
+    for line in order.lines:
+        if count + line.qty <= max_items:
+            current.append((line.sku, line.qty))
+            count += line.qty
+            continue
+        flush()
+        remaining = line.qty
+        while remaining > 0:
+            take = min(remaining, max_items)
+            current.append((line.sku, take))
+            count += take
+            remaining -= take
+            if remaining > 0:
+                flush()
+    flush()
+    return parcels
+
+
+def packing_slip(parcel: Parcel, weight_g: int) -> str:
+    """Slip packed inside each parcel: order, parcel number, contents and weight."""
+    lines = [
+        f"Order: {parcel.order_id}",
+        f"Parcel: {parcel.number}",
+        "Contents:",
+    ]
+    for sku, qty in parcel.items:
+        lines.append(f"  {qty} x {sku}")
+    lines.append(f"Weight: {format_weight(weight_g)}")
+    return "\n".join(lines)
+
+
+def parcel_weight_g(parcel: Parcel, products: dict[str, Product]) -> int:
+    """Total weight in grams of a parcel's contents: qty x grams-per-unit, summed over lines."""
+    return sum(qty * products[sku].weight_g for sku, qty in parcel.items)
+</file>
+<file path="shopkit/api/serializers.py">
+from shopkit.catalog.models import Product
+from shopkit.customers.models import Customer
+from shopkit.orders.models import Order
+
+
+def money(cents: int, currency: str = 'USD') -> dict:
+    return {"amount_cents": cents, "currency": currency}
+
+
+def product(p: Product) -> dict:
+    return {
+        "sku": p.sku,
+        "title": p.title,
+        "price": money(p.price_cents),
+        "active": p.active,
+        "weight_g": p.weight_g,
+    }
+
+
+def order(o: Order, status: str | None = None) -> dict:
+    body = {
+        "id": o.id,
+        "currency": o.currency,
+        "lines": [
+            {
+                "sku": line.sku,
+                "qty": line.qty,
+                "unit_price": money(line.unit_cents, o.currency),
+                "total": money(line.total_cents, o.currency),
+            }
+            for line in o.lines
+        ],
+        "total": money(o.total_cents, o.currency),
+    }
+    if status is not None:
+        body["status"] = status
+    return body
+
+
+def customer(c: Customer) -> dict:
+    return {
+        "id": c.id,
+        "email": c.email,
+        "name": c.name,
+        "tier": c.tier,
+        "marketing_opt_in": c.marketing_opt_in,
+        "joined": c.joined.isoformat() if c.joined is not None else None,
+    }
+</file>
