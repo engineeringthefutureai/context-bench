@@ -40,5 +40,12 @@
     $("#t-cat").addEventListener("change", render);
     $("#t-diff").addEventListener("change", render);
     render();
+    // the cards exist only now, so the browser's own jump to #<task id> on load found nothing
+    const toHash = () => {
+      const el = location.hash && document.getElementById(decodeURIComponent(location.hash.slice(1)));
+      if (el) el.scrollIntoView();
+    };
+    toHash();
+    window.addEventListener("hashchange", toHash);
   });
 })();
