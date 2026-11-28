@@ -17,4 +17,6 @@ if __name__ == "__main__":
     out.mkdir(parents=True, exist_ok=True)
     for name in L.page_names():
         (out / f"{name}.html").write_text(L.render_page(name))
-    print(f"wrote {len(L.page_names())} pages to {out}: {', '.join(L.page_names())}")
+    (out / "sitemap.xml").write_text(L.sitemap_xml())
+    (out / "llms.txt").write_text(L.llms_txt())
+    print(f"wrote {len(L.page_names())} pages + sitemap.xml + llms.txt to {out}: {', '.join(L.page_names())}")

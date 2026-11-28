@@ -43,6 +43,28 @@ def test_built_pages_in_docs_are_up_to_date():
     `python3 scripts/build_pages.py` after changing a page, the layout, or a CSS/JS file."""
     stale = [n for n in L.page_names() if (ROOT / "docs" / f"{n}.html").read_text() != L.render_page(n)]
     assert not stale, f"rebuild with scripts/build_pages.py: {stale}"
+    assert (ROOT / "docs" / "sitemap.xml").read_text() == L.sitemap_xml(), "rebuild sitemap.xml with scripts/build_pages.py"
+    assert (ROOT / "docs" / "llms.txt").read_text() == L.llms_txt(), "rebuild llms.txt with scripts/build_pages.py"
+
+
+def test_seo_og_and_structured_data():
+    import json
+    assert (ROOT / "docs" / L.OG_IMAGE).is_file()
+    assert (ROOT / "docs" / "robots.txt").is_file()
+    index_html = (ROOT / "docs" / "index.html").read_text()
+    for name, page in [("index", index_html), ("method", L.render_page("method"))]:
+        url = L.page_url(name)
+        assert f'<link rel="canonical" href="{url}">' in page, name
+        assert f'<meta property="og:url" content="{url}">' in page, name
+        assert f'<meta property="og:image" content="{L.SITE_URL}/{L.asset(L.OG_IMAGE)}">' in page, name
+        assert '<meta name="twitter:card" content="summary_large_image">' in page, name
+        m = re.search(r'<script type="application/ld\+json">(.*?)</script>', page)
+        assert m, name
+        ld = json.loads(m.group(1))
+        assert ld["url"] == url and ld["image"] == f"{L.SITE_URL}/{L.OG_IMAGE}"
+    p404 = L.render_page("404")
+    assert '<meta name="robots" content="noindex">' in p404
+    assert 'rel="canonical"' not in p404 and 'og:image' not in p404
 
 
 def test_report_keeps_the_native_names_arm_apart(tmp_path, monkeypatch):

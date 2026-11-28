@@ -962,9 +962,8 @@ def build_final(final: dict, off: dict) -> str:
 
 
 INDEX_TITLE = "Context Bench: How Context Building Affects Generated Code"
-INDEX_DESCRIPTION = ("The same coding tasks and the same model (Qwen 3.8 27B), with the context built in deliberately "
-                     "simple ways, from one file and the whole repo to retrieval, a repo map and minimal agents with "
-                     "tools, on three repository sizes, with thinking off and on, and what each costs in tokens.")
+INDEX_DESCRIPTION = ("How context building affects generated code: 30 tasks and 2,122 runs on Qwen 3.8 27B from one "
+                     "file (L1) to agentic search (L8), comparing pass rates and token cost.")
 
 
 def _page(content: str) -> str:
