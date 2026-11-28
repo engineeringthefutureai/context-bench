@@ -184,6 +184,9 @@ def render(content: str, *, page: str, title: str, description: str, scripts: li
     return Template((SITE / "layout.html").read_text()).substitute(
         title=html.escape(title, quote=False), nav=nav,
         description=_attr(description), seo=_seo_tags(page, title, description),
+        favicon_ico=asset("favicon.ico"), favicon_svg=asset("favicon.svg"),
+        favicon_48=asset("favicon-48x48.png"), favicon_32=asset("favicon-32x32.png"),
+        apple_touch_icon=asset("apple-touch-icon.png"), manifest=asset("site.webmanifest"),
         content=content.strip("\n"), scripts=tags, style_css=asset("style.css"), site_css=asset("site.css"),
         main_attr=f' class="{main_class}"' if main_class else "",
         analytics_js=asset("analytics.js"), round=ROUND, updated=UPDATED)

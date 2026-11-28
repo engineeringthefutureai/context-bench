@@ -49,8 +49,9 @@ def test_built_pages_in_docs_are_up_to_date():
 
 def test_seo_og_and_structured_data():
     import json
-    assert (ROOT / "docs" / L.OG_IMAGE).is_file()
-    assert (ROOT / "docs" / "robots.txt").is_file()
+    for f in (L.OG_IMAGE, "robots.txt", "favicon.ico", "favicon.svg", "favicon-32x32.png",
+              "favicon-48x48.png", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "site.webmanifest"):
+        assert (ROOT / "docs" / f).is_file(), f
     index_html = (ROOT / "docs" / "index.html").read_text()
     for name, page in [("index", index_html), ("method", L.render_page("method"))]:
         url = L.page_url(name)
@@ -58,6 +59,10 @@ def test_seo_og_and_structured_data():
         assert f'<meta property="og:url" content="{url}">' in page, name
         assert f'<meta property="og:image" content="{L.SITE_URL}/{L.asset(L.OG_IMAGE)}">' in page, name
         assert '<meta name="twitter:card" content="summary_large_image">' in page, name
+        assert f'<link rel="icon" href="{L.asset("favicon.ico")}" sizes="any">' in page, name
+        assert f'<link rel="icon" href="{L.asset("favicon.svg")}" type="image/svg+xml">' in page, name
+        assert f'<link rel="apple-touch-icon" href="{L.asset("apple-touch-icon.png")}" sizes="180x180">' in page, name
+        assert f'<link rel="manifest" href="{L.asset("site.webmanifest")}">' in page, name
         m = re.search(r'<script type="application/ld\+json">(.*?)</script>', page)
         assert m, name
         ld = json.loads(m.group(1))
